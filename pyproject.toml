@@ -1,13 +1,14 @@
 [project]
-name = "lqr-flow-matching"
+name = ".venv"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "ipykernel>=7.1.0",
-    "jax[cuda12]>=0.6.2",
+    "jax[cuda12]",
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",
     "tqdm>=4.67.1",
+    "pyyaml>=6.0",
 ]
