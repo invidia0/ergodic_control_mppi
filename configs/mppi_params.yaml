@@ -22,6 +22,15 @@ map:
   resolution: 0.2
   oom_cost: 100.0
 
+obstacles:
+  num_obstacles: 8
+  min_radius: 0.5
+  max_radius: 1.5
+  x_limits: [-8.0, 8.0]
+  y_limits: [-8.0, 8.0]
+  weight: 100.0
+  safe_distance: 0.2
+
 gmm2d:
   weights:
     - 0.5
@@ -41,9 +50,9 @@ gmm2d:
 
 stein:
   weight: 1.0
-  weight_pdf: 4.6
+  weight_pdf: 3.0
   h: 1.0
-  gamma: 1.5
+  gamma: 0.5
 
 model:
   delta_t: 0.02

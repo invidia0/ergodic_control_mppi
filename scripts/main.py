@@ -79,8 +79,11 @@ def visualize(params, xs=None, trajs_all=None, opt_trajs_all=None):
     # fs_y_np = np.array(fs_y)
     # fs_x_np = np.array(fs_x)
     # ax.streamplot(grids_x_np, grids_y_np, fs_x_np, fs_y_np, color='k', density=1.5, linewidth=0.3, arrowsize=1, arrowstyle='-|>')
-    ax.plot(xs[:, 0], xs[:, 1], label="Trajectory", color='k')
-    
+
+    for obs in params.obstacle_params.xyr:
+        circle = plt.Circle((obs[0], obs[1]), obs[2], color='red', alpha=0.5)
+        ax.add_artist(circle)
+
     if trajs_all is not None:
         for traj in trajs_all[-1, :, :, :2]:
             ax.plot(traj[:, 0], traj[:, 1], color='gray', alpha=0.1)
@@ -88,10 +91,13 @@ def visualize(params, xs=None, trajs_all=None, opt_trajs_all=None):
     if opt_trajs_all is not None:
         ax.plot(opt_trajs_all[-1][:, 0], opt_trajs_all[-1][:, 1], color='green', alpha=1)
     
-    ax.scatter(xs[-1, 0], xs[-1, 1], color='red', marker='x', label='End')
+    if xs is not None:
+        ax.plot(xs[:, 0], xs[:, 1], label="Trajectory", color='k')
+        ax.scatter(xs[-1, 0], xs[-1, 1], color='red', marker='x', label='End')
+    
     ax.legend()
     plt.show()
-    
+
 
 def main(N=2000):
     params, seed = params_loader.load_mppi_params("configs/mppi_params.yaml")

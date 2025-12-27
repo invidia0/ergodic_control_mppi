@@ -7,6 +7,15 @@ from models import double_integrator as model
 from typing import NamedTuple
 from mppi.stein import SteinParams, stein_grad_traj, logpdf
 
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class ObstacleParams:
+    xyr: jnp.ndarray  # (num_obstacles, 3) (x, y, r)
+    weight: float = field(metadata={"static": True})
+    safe_distance: float = field(metadata={"static": True})
+
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class MPPIParams:
@@ -36,19 +45,7 @@ class MPPIParams:
 
     model_params: model.DoubleIntegratorParams
 
-
-class MPPIBuffers(NamedTuple):
-    U_prev: jnp.ndarray # (T, dim_u)
-
-
-class MPPIOut(NamedTuple):
-    u0: jnp.ndarray # (dim_u,)
-    U_prev: jnp.ndarray # (T, dim_u)
-    opt_traj: jnp.ndarray # (T, dim_x) or (T, state_dim used)
-    roll_trajs: jnp.ndarray # (K, T, dim_x)
-    eps: jnp.ndarray # (K, T, dim_u)
-    costs: jnp.ndarray # (K,)
-    weights: jnp.ndarray # (K,)
+    obstacle_params: ObstacleParams
 
 
 def sample_epsilon(key: jax.Array, params: MPPIParams) -> tuple[jnp.ndarray, jax.Array]:
@@ -66,14 +63,21 @@ def sample_epsilon(key: jax.Array, params: MPPIParams) -> tuple[jnp.ndarray, jax
     return eps, key
 
 
+def _is_collided(x: jnp.ndarray, obs_params: ObstacleParams) -> bool:
+    """
+    Check if position x is in collision with any obstacle.
+    """
+    def check_obs(o):
+        dist = jnp.linalg.norm(x - o[:2])
+        return dist <= o[2] + obs_params.safe_distance
+
+    collided = jax.vmap(check_obs)(obs_params.xyr)
+    return jnp.any(collided)
+
+
 def stage_cost(x: jnp.ndarray, u: jnp.ndarray, params: MPPIParams) -> float:
-    """
-    Quadratic cost for double integrator.
-    x: (dim_x,)
-    u: (dim_u,)
-    """
-    cost_u = 0.0
-    return cost_u
+    collided = _is_collided(x[:2], params.obstacle_params)
+    return jnp.where(collided, params.obstacle_params.weight, 0.0)
 
 
 def terminal_cost(x: jnp.ndarray, params: MPPIParams) -> float:
@@ -116,7 +120,11 @@ def shift_U(U: jnp.ndarray) -> jnp.ndarray:
 
 
 @jax.jit
-def mppi_step(params: MPPIParams, U_prev: jnp.ndarray, x0: jnp.ndarray, key: jax.Array) -> tuple[MPPIOut, jax.Array]:
+def mppi_step(
+params: MPPIParams,
+U_prev: jnp.ndarray,
+x0: jnp.ndarray,
+key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.ndarray]:
     eps, key = sample_epsilon(key, params)  # (K,T,dim_u)
 
     S, V, trajs = jax.vmap(
