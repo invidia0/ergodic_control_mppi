@@ -19,7 +19,7 @@ where = ["mppi"]
 
 [project.optional-dependencies]
 jax = [
-    "jax>=0.4.20; python_version >= '3.10'",
+    "jax[cuda12]; python_version >= '3.10'",
 ]
 
 torch = [
