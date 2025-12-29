@@ -3,9 +3,9 @@ import yaml
 import jax
 import jax.numpy as jnp
 
-from mppi.mppi_core import MPPIParams, ObstacleParams
-from mppi.stein import SteinParams
-from models.double_integrator import DoubleIntegratorParams
+from mppi.jax.mppi_core import MPPIParams, ObstacleParams
+from mppi.jax.stein import SteinParams
+from models.jax.double_integrator import DoubleIntegratorParams
 
 
 def obstacle_generator(

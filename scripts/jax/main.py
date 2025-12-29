@@ -1,18 +1,18 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import jax
 jax.config.update("jax_enable_x64", False)
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
-from configs import params_loader
+from configs.jax import params_loader
 
-from mppi.mppi_core import mppi_step
-from models import double_integrator as model
-from mppi.stein import pdf
-from mppi.stein import drift
+from mppi.jax.mppi_core import mppi_step
+from models.jax import double_integrator as model
+from mppi.jax.stein import pdf
+from mppi.jax.stein import drift
 
 
 def closed_loop(params, x0, U0, key, N: int):

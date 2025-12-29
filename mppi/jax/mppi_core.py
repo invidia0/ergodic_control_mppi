@@ -3,9 +3,9 @@ from dataclasses import dataclass, field
 import jax
 import jax.numpy as jnp
 
-from models import double_integrator as model
+from models.jax import double_integrator as model
 from typing import NamedTuple
-from mppi.stein import SteinParams, stein_grad_traj, logpdf
+from mppi.jax.stein import SteinParams, stein_grad_traj, logpdf
 
 
 @jax.tree_util.register_dataclass
