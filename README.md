@@ -95,10 +95,10 @@ Import the backend explicitly:
 
 ```python
 # JAX
-from mppi_control.jax import MPPI
+from mppi.jax.mppi_core import mppi_step
 
 # PyTorch
-from mppi_control.torch import MPPI
+from mppi.torch.mppi_core import mppi_step
 ```
 
 The APIs are intentionally kept as similar as possible across backends.
