@@ -1,0 +1,73 @@
+import numpy as np
+from utils import utilities
+import jax
+jax.config.update("jax_enable_x64", False)
+import jax.numpy as jnp
+
+class Evaluator():
+    def __init__(self, params, xs, agent_radius = 5):
+        self.params = params
+        self.steps = xs.shape[0]
+        self.agent_radius = agent_radius
+        # self.trajectory = np.zeros((self.steps, 2))
+        self.trajectory = np.array(xs[:, 0:2])  # Store the trajectory positions
+        self.dt = params.delta_t
+
+        ## Initialize metrics
+        self.x_min, self.x_max = params.map_x_limits
+        self.y_min, self.y_max = params.map_y_limits
+        self.res = params.resolution
+        self.means = params.stein.means - np.array([self.x_min, self.y_min])
+        cov_inv = params.stein.cov_inv
+        log_weights = params.stein.log_weights
+        self.covariances = np.linalg.inv(np.array(cov_inv))
+        self.weights = np.exp(np.array(log_weights))
+        x_grid, y_grid = np.meshgrid(
+            np.arange(0, 2*self.x_max, self.res),
+            np.arange(0, 2*self.y_max, self.res),
+        )
+        self.grid = np.vstack([x_grid.ravel(), y_grid.ravel()]).T
+        self.sigma = 1 / self.agent_radius
+
+        # density_map = utilities.gauss_pdf(grid, means[0], covariances[0]) * weights[0] + \
+        #                 utilities.gauss_pdf(grid, means[1], covariances[1]) * weights[1] + \
+        #                 utilities.gauss_pdf(grid, means[2], covariances[2]) * weights[2]
+        density_map = utilities.gmm_eval(self.grid, self.means, self.covariances, self.weights)
+        self.goal_density = utilities.normalize_mat(density_map).reshape(x_grid.shape)
+
+        self.coverage_block = utilities.agent_block(2, 1e-6, self.agent_radius)
+        self.kernel_size = self.coverage_block.shape[0]
+        self.coverage_density = np.zeros_like(self.goal_density)
+        self.ergodic_metric = np.zeros(self.steps)
+
+    def update_trajectory(self, t: int, position: jax.Array):
+        self.trajectory[t, :] = np.array(position)
+
+    def compute_ergodicity(self, step: int, position: jax.Array) -> np.array:
+        t = step * self.dt
+        coverage = np.zeros_like(self.goal_density)
+        adj_pos = (position[:2] - np.array([self.x_min, self.y_min])) / self.res
+        x, y = int(adj_pos[0]), int(adj_pos[1])
+        # x, y = position[0], position[1]
+
+        row_indices, row_start_kernel, num_kernel_rows = utilities.clamp_kernel_1d(
+            x, 0, int(2*self.x_max), self.kernel_size
+        )
+        col_indices, col_start_kernel, num_kernel_cols = utilities.clamp_kernel_1d(
+            y, 0, int(2*self.y_max), self.kernel_size
+        )
+
+        self.coverage_density[row_indices, col_indices] += self.coverage_block[
+            row_start_kernel : row_start_kernel + num_kernel_rows,
+            col_start_kernel : col_start_kernel + num_kernel_cols,
+        ] # Eq. 3 - Coverage density
+        
+        coverage = utilities.normalize_mat(self.coverage_density / (t + 1e-12))
+        em_diff = np.linalg.norm(self.goal_density - coverage)
+        self.ergodic_metric[step] = em_diff
+
+    def get_ergodic_metric(self) -> np.array:
+        for step, pos in enumerate(self.trajectory):
+            self.compute_ergodicity(step, pos)
+        
+        return self.ergodic_metric
