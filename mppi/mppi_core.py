@@ -138,20 +138,19 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
     h_target = stein_grad_traj(spatial_median, params.stein)  # (T,2)
 
     S_flow = -jnp.einsum('ktn,tn->k', spatial_trajs, h_target)
-    S = S + params.stein.weight * S_flow
 
-    logp = jax.vmap(
-        lambda traj_pos: jax.vmap(
-            lambda x: logpdf(x, params.stein)
-        )(traj_pos)
-    )(spatial_trajs)
+    # logp = jax.vmap(
+    #     lambda traj_pos: jax.vmap(
+    #         lambda x: logpdf(x, params.stein)
+    #     )(traj_pos)
+    # )(spatial_trajs)
 
     # Equivalent to stage-wise cost
-    S_pdf = -jnp.sum(logp, axis=1)
+    # S_pdf = -jnp.sum(logp, axis=1)
     S = (
         S
         + params.stein.weight * S_flow
-        + params.stein.weight_pdf  * S_pdf
+        # + params.stein.weight_pdf  * S_pdf
     )
 
     rho = jnp.min(S)
