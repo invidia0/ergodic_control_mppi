@@ -23,13 +23,13 @@ map:
   oom_cost: 100.0
 
 obstacles:
-  num_obstacles: 8
+  num_obstacles: 0
   min_radius: 0.5
   max_radius: 1.5
   x_limits: [-8.0, 8.0]
   y_limits: [-8.0, 8.0]
   weight: 100.0
-  safe_distance: 0.2
+  safe_distance: 0.3
 
 gmm2d:
   weights:
@@ -45,14 +45,14 @@ gmm2d:
     - [[3.0, -1.5], [-1.5, 3.0]]
     - [[4.0,  0.0], [0.0,  2.0]]
   drift:
-    sigma: 1.0
+    sigma: 8.0
     S: [[0.0, -1.0], [1.0, 0.0]]
 
 stein:
   weight: 1.0
-  weight_pdf: 3.0
+  weight_pdf: 0.0
   h: 1.0
-  gamma: 0.5
+  gamma: 5.0
 
 model:
   delta_t: 0.02
