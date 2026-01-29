@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -7,6 +8,9 @@ jax.config.update("jax_enable_x64", False)
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
+import time
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize, LogNorm
 from configs.jax import params_loader
 
 from mppi.jax.mppi_core import mppi_step
@@ -50,7 +54,7 @@ def setup_canvas(fig, ax, params):
     return fig, ax
 
 
-def visualize(params, xs=None, trajs_all=None, opt_trajs_all=None):
+def visualize(params, xs=None, trajs_all=None, opt_trajs_all=None, ergodic_metric=None):
 
     # grid
     n_x = int((params.map_x_limits[1] - params.map_x_limits[0]) / params.resolution)
@@ -76,34 +80,45 @@ def visualize(params, xs=None, trajs_all=None, opt_trajs_all=None):
     fig = plt.figure()
     ax = fig.add_subplot(111)
     fig, ax = setup_canvas(fig, ax, params)
-    cs = ax.contourf(grids_x_np, grids_y_np, pdf_grids_np, cmap='Blues', alpha=0.8)
+    # cs = ax.contourf(grids_x_np, grids_y_np, pdf_grids_np, cmap='Blues', alpha=0.8)
+    ax.pcolormesh(grids_x_np, grids_y_np, pdf_grids_np, cmap='Blues', shading='auto', alpha=0.8)
     # fs_y_np = np.array(fs_y)
     # fs_x_np = np.array(fs_x)
     # ax.streamplot(grids_x_np, grids_y_np, fs_x_np, fs_y_np, color='k', density=1.5, linewidth=0.3, arrowsize=1, arrowstyle='-|>')
 
     for obs in params.obstacle_params.xyr:
-        circle = plt.Circle((obs[0], obs[1]), obs[2], color='red', alpha=0.5)
+        circle = plt.Circle((obs[0], obs[1]), obs[2], color='black', alpha=0.5)
         ax.add_artist(circle)
 
     if trajs_all is not None:
         for traj in trajs_all[-1, :, :, :2]:
-            ax.plot(traj[:, 0], traj[:, 1], color='gray', alpha=0.1)
+            ax.plot(traj[:, 0], traj[:, 1], color='k', alpha=0.1)
     
     if opt_trajs_all is not None:
         ax.plot(opt_trajs_all[-1][:, 0], opt_trajs_all[-1][:, 1], color='green', alpha=1)
     
     if xs is not None:
-        ax.plot(xs[:, 0], xs[:, 1], label="Trajectory", color='k')
-        ax.scatter(xs[-1, 0], xs[-1, 1], color='red', marker='x', label='End')
-    
+        if ergodic_metric is None:
+            ax.plot(xs[:, 0], xs[:, 1], label="Trajectory", color='k')
+            ax.scatter(xs[-1, 0], xs[-1, 1], color='red', marker='x', label='End')
+        else:
+            points = np.column_stack([xs[:, 0], xs[:, 1]])
+            segments = np.stack([points[:-1], points[1:]], axis=1)
+            norm = LogNorm(vmin=np.min(ergodic_metric), vmax=np.max(ergodic_metric))
+            lc = LineCollection(segments, cmap='YlOrRd', norm=norm)
+            lc.set_array(ergodic_metric)
+            lc.set_linewidth(2)
+            line = ax.add_collection(lc)
+            fig.colorbar(line, ax=ax, label='Ergodic Metric')
     ax.legend()
     plt.show()
 
 
 def main(N=2000):
     params, seed = params_loader.load_mppi_params("configs/mppi_params.yaml")
-    N_EPISODES = 50
+    N_EPISODES = 1
     ergodic_metric_hist = np.zeros((N_EPISODES, N))
+    trajs_hist = np.zeros((N_EPISODES, N, 2))
     key = jax.random.PRNGKey(seed)
     for ep in range(N_EPISODES):
         pos = params.map_x_limits[0] + (params.map_x_limits[1] - params.map_x_limits[0]) * jax.random.uniform(key, shape=(2,))
@@ -115,6 +130,7 @@ def main(N=2000):
         U_prev = jnp.zeros((params.T, params.dim_u), dtype=jnp.float32)
 
         print("Running closed-loop simulation...")
+        # timer_start = time.perf_counter()
         xs, us, U_prev, key, trajs_all, opt_trajs_all = closed_loop_jit(
             params,
             x0,
@@ -122,21 +138,29 @@ def main(N=2000):
             key,
             N=N,
         )
-        print("Done.")
+        trajs_hist[ep, :, :] = np.array(xs[:, 0:2])
+        # timer_end = time.perf_counter()
+        # print(f"Episode {ep + 1} completed in {timer_end - timer_start:.2f} seconds.")
+        # avg_time = (timer_end - timer_start) / N
+        # print(f"Average time per step [MPPI]: {avg_time * 1000:.3f} [ms]")
+        # print("Done.")
         eval = Evaluator(params, xs)
         ergodic_metric_hist[ep, :] = eval.get_ergodic_metric()
+        print("Final ergodic metric: ", ergodic_metric_hist[ep, -1])
         
-        # visualize(params, xs, trajs_all, opt_trajs_all)
+        visualize(params, xs, trajs_all, opt_trajs_all)
 
     ergodic_metric = np.mean(ergodic_metric_hist, axis=0)
     lower_bound = np.percentile(ergodic_metric_hist, 5, axis=0)   # 5th percentile (lower)
     upper_bound = np.percentile(ergodic_metric_hist, 95, axis=0)  # 95th percentile (upper)
+    np.save(os.path.join(str(Path(__file__).parent.parent.parent), 'results', 'e_mppi.npy'), ergodic_metric_hist)
+    np.save(os.path.join(str(Path(__file__).parent.parent.parent), 'results', 'xs_mppi.npy'), trajs_hist)
     fig, ax = plt.subplots()
-    ax.plot(np.arange(N-1) * params.delta_t, ergodic_metric[1:])
+    ax.plot(np.arange(N) * params.delta_t, ergodic_metric)
     ax.fill_between(
-        np.arange(N-1) * params.delta_t,
-        lower_bound[1:],
-        upper_bound[1:],
+        np.arange(N) * params.delta_t,
+        lower_bound,
+        upper_bound,
         color='blue',
         alpha=0.2,
     )
