@@ -1,20 +1,18 @@
+seed: 43 # 0, 42, 99, 35, 213
+
 mppi:
-  T: 30
-  K: 500
-  lambda: 1.0 # this is the temperature parameter higher = more exploration, lower = more exploitation
-  alpha: 0.1 # control cost weight, higher = less control effort, lower = more control effort
+  T: 35 # Default for K_N is 30
+  K: 500 # Default for T_K is 500
+  lambda: 1 # this is the temperature parameter higher = more exploration, lower = more exploitation
+  alpha: 0.2 # control cost weight, higher = less control effort, lower = more control effort
   exploration: 0.1 # fraction of rollouts using nominal control
-  delta_t: 0.02
   dim_x: 6
   dim_u: 3
-
-seed: 42
-
-noise:
-  sigma:
-    - [9, 0.0, 0.0] # linear x
-    - [0.0, 9, 0.0] # linear y
-    - [0.0, 0.0, 4] # angular
+  noise:
+    sigma:
+      - [6, 0.0, 0.0] # linear x
+      - [0.0, 6, 0.0] # linear y
+      - [0.0, 0.0, 3] # angular
 
 map:
   x_limits: [-10.0, 10.0]
@@ -22,40 +20,40 @@ map:
   resolution: 0.2
   oom_cost: 100.0
 
-obstacles:
-  num_obstacles: 8
-  min_radius: 0.5
-  max_radius: 1.5
-  x_limits: [-8.0, 8.0]
-  y_limits: [-8.0, 8.0]
-  weight: 100.0
-  safe_distance: 0.3
+  obstacles:
+    num_obstacles: 3
+    min_radius: 0.5
+    max_radius: 1.5
+    x_limits: [-8.0, 8.0]
+    y_limits: [-8.0, 8.0]
+    weight: 10000000.0
+    safe_distance: 0.3
 
-gmm2d:
+density:
   weights:
-    - 0.5
-    - 0.3
-    - 0.2
+    - 0.33333334
+    - 0.33333334
+    - 0.33333334
   means:
-    - [-2.5, -3.8]
-    - [5.0, -2.5]
-    - [3.5, 3.5]
+    - [0.0, 6.0]      # Top center
+    - [-6.0, -4.0]    # Bottom left
+    - [6.0, -4.0]     # Bottom right
   covariances:
-    - [[4.0,  2.0], [2.0,  4.0]]
-    - [[3.0, -1.5], [-1.5, 3.0]]
-    - [[4.0,  0.0], [0.0,  2.0]]
-  drift:
-    sigma: 8.0
-    S: [[0.0, -1.0], [1.0, 0.0]]
+    - [[3.0, 0.0], [0.0, 2.0]]   # Horizontal ellipse
+    - [[2.0, 1.0], [1.0, 3.0]]   # Tilted
+    - [[2.0, -1.0], [-1.0, 3.0]] # Tilted opposite
 
 stein:
-  weight: 1.0
-  weight_pdf: 0.0
+  weight: 3.0
+  weight_pdf: 8.17
   h: 1.0
-  gamma: 4.0
+  gamma: 4.0 # from top config #2: 0% OOB, erg=0.0235
+  drift:
+    sigma: 3.0
+    S: [[0.0, -1.0], [1.0, 0.0]]
 
 model:
-  delta_t: 0.02
+  delta_t: 0.02 # source of truth for timestep used by both model and MPPI runtime params
   double_integrator:
     max_accel_lin_abs: 20.0 # m/s²
     max_accel_ang_abs: 20.0 # rad/s²

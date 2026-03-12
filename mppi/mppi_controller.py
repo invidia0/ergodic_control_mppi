@@ -12,7 +12,7 @@ except:
 
 jnp.set_printoptions(precision=4)
 
-from .mppi_core import MPPIParams, mppi_step
+from .core import MPPIParams, mppi_step
 
 class MPPIController:
     def __init__(self, params: MPPIParams, seed: int = 0):
