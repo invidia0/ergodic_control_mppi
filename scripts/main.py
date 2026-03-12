@@ -17,6 +17,15 @@ from mppi.stein import pdf
 import matplotlib.patheffects as pe
 from matplotlib.patches import Circle
 
+# Check for CUDA availability
+cpu = jax.devices("cpu")[0]
+try:
+    gpu = jax.devices("cuda")[0]
+    print(f"[INFO] CUDA device found: {gpu}")
+except:
+    gpu = cpu
+    print("[INFO] No CUDA device found, using CPU.")
+
 
 def closed_loop(params, x0, U0, key, N: int):
     def one_step(carry, _):
@@ -35,8 +44,10 @@ def closed_loop(params, x0, U0, key, N: int):
     return path, trajs_all, opt_trajs_all
 
 
-closed_loop_jit = jax.jit(closed_loop, static_argnames=("N",), donate_argnums=(2, 3))
-
+closed_loop_jit = jax.jit(
+    closed_loop,
+    static_argnames=("N",)
+)
 
 def setup_canvas(fig, ax, params):
     plt.rcParams.update({'font.size': 12, 'font.family': 'serif'})
@@ -173,6 +184,10 @@ def main():
     )
     U_prev = jnp.zeros((params.T, params.dim_u), dtype=jnp.float32)
 
+    x0 = jax.device_put(x0, gpu)
+    U_prev = jax.device_put(U_prev, gpu)
+    key = jax.device_put(key, gpu)
+    params = jax.device_put(params, gpu)
 
     print("Running closed-loop simulation...")
     path, trajs_all, opt_trajs_all = closed_loop_jit(

@@ -174,7 +174,7 @@ def shift_U(U: jnp.ndarray) -> jnp.ndarray:
     return U_next
 
 
-@partial(jax.jit, donate_argnums=(1,))
+@jax.jit
 def mppi_step(
 params: MPPIParams,
 U_prev: jnp.ndarray,
