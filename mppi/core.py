@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -46,6 +47,8 @@ class MPPIParams:
     obstacle_params: ObstacleParams
 
     seed: int
+
+    steps: int
 
 
 
@@ -171,7 +174,7 @@ def shift_U(U: jnp.ndarray) -> jnp.ndarray:
     return U_next
 
 
-@jax.jit
+@partial(jax.jit, donate_argnums=(1,))
 def mppi_step(
 params: MPPIParams,
 U_prev: jnp.ndarray,

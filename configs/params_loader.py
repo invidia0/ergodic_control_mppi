@@ -135,6 +135,7 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     model_spec = _require_dict(model_cfg, "double_integrator", "model")
 
     seed = _as_int(cfg.get("seed", 0), "seed")
+    steps = _as_int(cfg.get("steps", 5000), "steps", min_value=1)
     key = jax.random.PRNGKey(seed)
 
     K = _as_int(_require_value(mppi_cfg, "K", "mppi"), "mppi.K", min_value=1)
@@ -277,4 +278,5 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         obstacle_params=obstacle_params,
         use_nominal=use_nominal,
         seed=seed,
+        steps=steps,
     )

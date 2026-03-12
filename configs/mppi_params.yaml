@@ -1,5 +1,7 @@
 seed: 43 # 0, 42, 99, 35, 213
 
+steps: 5000
+
 mppi:
   T: 35 # Default for K_N is 30
   K: 500 # Default for T_K is 500

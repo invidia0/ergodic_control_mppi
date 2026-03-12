@@ -5,6 +5,13 @@ __pycache__/
 
 *.npy
 
+# Specific files
+scripts/diagnose.py
+scripts/visualize_hm.py
+scripts/heatmap.py
+scripts/generate_videos.py
+scripts/evaluation.py
+
 # C extensions
 *.so
 
