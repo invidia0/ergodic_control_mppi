@@ -4,7 +4,6 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", False)
 
-
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class DoubleIntegratorParams:

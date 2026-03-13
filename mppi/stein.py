@@ -40,12 +40,6 @@ def score_pdf(x, p: SteinParams):
     return jax.grad(logpdf, argnums=0)(x, p)
 
 
-def drift(x, p: SteinParams):
-    s = score_pdf(x, p)
-    r = p.gamma * (p.S @ s.T).T
-    return p.D @ s + r
-
-
 def pdf(x, p: SteinParams):
     return jnp.exp(logpdf(x, p))
 
@@ -56,8 +50,17 @@ def kernel(x, y, p: SteinParams):
 
 
 def stein_grad_unit(x1, x2, p: SteinParams):
+    """
+    h_A(x1) contribution from particle x2:
+      k(x2,x1) * A @ score(x2)  +  A @ ∇_{x2} k(x2,x1)
+    where ker_grad = ∇_{x2} k(x2,x1).
+    """
+    A = p.D + p.gamma * p.S
+
+    # gradient w.r.t. the first argument of kernel, evaluated at (x2, x1)
     ker_grad = jax.grad(kernel, argnums=0)(x2, x1, p)
-    val = kernel(x2, x1, p) * drift(x2, p) + ker_grad
+
+    val = kernel(x2, x1, p) * (A @ score_pdf(x2, p)) + (A @ ker_grad)
     return val
 
 

@@ -12,7 +12,7 @@ except:
 
 jnp.set_printoptions(precision=4)
 
-from .mppi_core import MPPIParams, mppi_step
+from .core import MPPIParams, mppi_step
 
 class MPPIController:
     def __init__(self, params: MPPIParams, seed: int = 0):
@@ -31,16 +31,20 @@ class MPPIController:
         One MPPI step.
 
         x0: (dim_x,)
-        """
-        self.key, _ = jax.random.split(self.key)
 
-        out, self.key = mppi_step(
+        Returns:
+            u0: (dim_u,) — first control to apply
+            trajs: (K, T, 2) — sampled position trajectories
+            opt_traj: (T, dim_x) — optimal (weighted) trajectory
+        """
+        u0, U_next, key_next, trajs, opt_traj = mppi_step(
             self.params,
             self.U_prev,
             x0,
             self.key,
         )
 
-        self.U_prev = out.U_prev
+        self.U_prev = U_next
+        self.key = key_next
 
-        return out
+        return u0, trajs, opt_traj
