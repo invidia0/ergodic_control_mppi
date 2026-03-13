@@ -1,4 +1,3 @@
-import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,20 +27,23 @@ except:
 
 
 def closed_loop(params, x0, U0, key, N: int):
+    init_trajs = jnp.zeros((params.K, params.T, 2), dtype=jnp.float32)
+    init_opt_traj = jnp.zeros((params.T, params.dim_x), dtype=jnp.float32)
+
     def one_step(carry, _):
-        x, U_prev, key = carry
+        x, U_prev, key, _, _ = carry
         u0, U_next, key_next, trajs, opt_traj = mppi_step(params, U_prev, x, key)
         x_next = model.step(x, u0, params.model_params)
-        return (x_next, U_next, key_next), (x, trajs, opt_traj)
+        return (x_next, U_next, key_next, trajs, opt_traj), x_next
 
-    _, (path, trajs_all, opt_trajs_all) = jax.lax.scan(
+    (_, _, _, last_trajs, last_opt_traj), path = jax.lax.scan(
         one_step,
-        (x0, U0, key),
+        (x0, U0, key, init_trajs, init_opt_traj),
         xs=None,
         length=N,
     )
 
-    return path, trajs_all, opt_trajs_all
+    return path, last_trajs, last_opt_traj
 
 
 closed_loop_jit = jax.jit(
@@ -66,7 +68,7 @@ def setup_canvas(fig, ax, params):
     return fig, ax
 
 
-def visualize(params, path=None, trajs_all=None, opt_trajs_all=None):
+def visualize(params, path=None, trajs=None, opt_traj=None):
     n_x = int((params.map_x_limits[1] - params.map_x_limits[0]) / params.resolution)
     n_y = int((params.map_y_limits[1] - params.map_y_limits[0]) / params.resolution)
    
@@ -114,17 +116,17 @@ def visualize(params, path=None, trajs_all=None, opt_trajs_all=None):
 
     if path is not None:
         ax.plot(path[:, 0], path[:, 1], color='black', alpha=0.8, linewidth=2, zorder=4, label='Path')
+        xs = path[-1, :2]
+        ax.scatter(xs[0], xs[1], color='tab:red', marker='.', s=100, label='End', zorder=5)
 
-    if trajs_all is not None:
-        trajs = trajs_all[-1]  # (K, T, dim_x)
+    if trajs is not None:
+        # Last sampled trajectory batch from the final closed-loop step: (K, T, 2)
         for traj in trajs:
             ax.plot(traj[:, 0], traj[:, 1], color='gray', alpha=0.1, zorder=3)
         
-    xs = path[-1, :2]
-    ax.scatter(xs[0], xs[1], color='tab:red', marker='.', s=100, label='End', zorder=5)
     
-    if opt_trajs_all is not None:
-        ax.plot(opt_trajs_all[-1][:, 0], opt_trajs_all[-1][:, 1], color='tab:red', alpha=1, linewidth=2, zorder=4, label='Opt. Trajectory')
+    if opt_traj is not None:
+        ax.plot(opt_traj[:, 0], opt_traj[:, 1], color='tab:red', alpha=1, linewidth=2, zorder=4, label='Opt. Trajectory')
 
     ax.legend()
     plt.tight_layout()
@@ -190,7 +192,7 @@ def main():
     params = jax.device_put(params, gpu)
 
     print("Running closed-loop simulation...")
-    path, trajs_all, opt_trajs_all = closed_loop_jit(
+    path, trajs, opt_traj = closed_loop_jit(
         params,
         x0,
         U_prev,
@@ -198,7 +200,7 @@ def main():
         N=N,
     )
     print("Done.")
-    visualize(params, path, trajs_all, opt_trajs_all)
+    visualize(params, path, trajs, opt_traj)
 
 if __name__ == "__main__":
     main()
