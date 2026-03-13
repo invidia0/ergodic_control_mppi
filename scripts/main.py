@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import jax
@@ -21,9 +22,12 @@ cpu = jax.devices("cpu")[0]
 try:
     gpu = jax.devices("cuda")[0]
     print(f"[INFO] CUDA device found: {gpu}")
-except:
+except (RuntimeError, ValueError, IndexError) as exc:
     gpu = cpu
-    print("[INFO] No CUDA device found, using CPU.")
+    logging.warning(
+        "[INFO] No CUDA device found or CUDA initialization failed, using CPU.",
+        exc_info=exc,
+    )
 
 
 def closed_loop(params, x0, U0, key, N: int):
