@@ -1,5 +1,5 @@
 [project]
-name = ".venv"
+name = "ergodic_control_mppi"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -11,4 +11,5 @@ dependencies = [
     "numpy>=2.2.6",
     "tqdm>=4.67.1",
     "pyyaml>=6.0",
+    "pyqt6>=6.10.2",
 ]

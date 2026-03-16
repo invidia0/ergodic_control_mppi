@@ -127,7 +127,6 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     mppi_cfg = _require_dict(cfg, "mppi", "")
     noise_cfg = _require_dict(mppi_cfg, "noise", "mppi")
     stein_cfg = _require_dict(cfg, "stein", "")
-    drift_cfg = _require_dict(stein_cfg, "drift", "stein")
     map_cfg = _require_dict(cfg, "map", "")
     obstacle_cfg = _require_dict(map_cfg, "obstacles", "map")
     density_cfg = _require_dict(cfg, "density", "")
@@ -147,6 +146,17 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     exploration = _as_float(_require_value(mppi_cfg, "exploration", "mppi"), "mppi.exploration", min_value=0.0)
     if exploration > 1.0:
         raise ValueError("Config key 'mppi.exploration' must be <= 1.0")
+
+    ess_target = _as_float(mppi_cfg.get("ess_target", 0.3), "mppi.ess_target", min_value=0.01)
+    if ess_target >= 1.0:
+        raise ValueError("Config key 'mppi.ess_target' must be < 1.0")
+    lam_min = _as_float(mppi_cfg.get("lam_min", 0.05), "mppi.lam_min", min_value=1e-6)
+    lam_max = _as_float(mppi_cfg.get("lam_max", 20.0), "mppi.lam_max", min_value=0.0)
+    if lam_max <= lam_min:
+        raise ValueError("Config key 'mppi.lam_max' must be > mppi.lam_min")
+
+    history_len = _as_int(mppi_cfg.get("history_len", 100), "mppi.history_len", min_value=1)
+    history = jnp.zeros((history_len, 2), dtype=jnp.float32)
 
     Sigma = _float32_array(_require_value(noise_cfg, "sigma", "mppi.noise"), "mppi.noise.sigma")
     _expect_shape(Sigma, (dim_u, dim_u), "mppi.noise.sigma")
@@ -183,11 +193,14 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     d = means.shape[1]
     log_norm = -0.5 * (d * jnp.log(2 * jnp.pi) + log_det)
 
-    drift_sigma = _as_float(_require_value(drift_cfg, "sigma", "stein.drift"), "stein.drift.sigma", min_value=0.0)
-    S = _float32_array(_require_value(drift_cfg, "S", "stein.drift"), "stein.drift.S")
-    _expect_shape(S, (2, 2), "stein.drift.S")
-    # Keep existing behavior: linear scaling of diffusion by sigma.
-    D = 0.5 * drift_sigma * jnp.eye(2, dtype=jnp.float32)
+    theta_deg = _as_float(_require_value(stein_cfg, "theta", "stein"), "stein.theta", min_value=0.0)
+    if theta_deg >= 90.0:
+        raise ValueError("Config key 'stein.theta' must be < 90.0 degrees")
+    theta_rad = float(jnp.deg2rad(jnp.array(theta_deg, dtype=jnp.float32)))
+    A = jnp.array([
+        [jnp.cos(theta_rad), -jnp.sin(theta_rad)],
+        [jnp.sin(theta_rad),  jnp.cos(theta_rad)],
+    ], dtype=jnp.float32)
 
     map_x_limits = _float32_array(_require_value(map_cfg, "x_limits", "map"), "map.x_limits")
     map_y_limits = _float32_array(_require_value(map_cfg, "y_limits", "map"), "map.y_limits")
@@ -244,12 +257,12 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         cov_inv=cov_inv,
         log_weights=log_weights,
         log_norm=log_norm,
-        D=D,
-        S=S,
-        gamma=_as_float(_require_value(stein_cfg, "gamma", "stein"), "stein.gamma"),
+        A=A,
         h=_as_float(_require_value(stein_cfg, "h", "stein"), "stein.h", min_value=1e-12),
+        h_cross=_as_float(_require_value(stein_cfg, "h_cross", "stein"), "stein.h_cross", min_value=1e-12),
         weight=_as_float(_require_value(stein_cfg, "weight", "stein"), "stein.weight", min_value=0.0),
         weight_pdf=_as_float(_require_value(stein_cfg, "weight_pdf", "stein"), "stein.weight_pdf", min_value=0.0),
+        cross_alpha=_as_float(_require_value(stein_cfg, "cross_alpha", "stein"), "stein.cross_alpha", min_value=0.0),
     )
 
     model_params = DoubleIntegratorParams(
@@ -277,6 +290,13 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         model_params=model_params,
         obstacle_params=obstacle_params,
         use_nominal=use_nominal,
+        ess_target=ess_target,
+        lam_min=lam_min,
+        lam_max=lam_max,
+        history_len=history_len,
+        history=history,
+        cross_particles_len=0,
+        cross_particles=jnp.zeros((0, 2), dtype=jnp.float32),
         seed=seed,
         steps=steps,
     )
