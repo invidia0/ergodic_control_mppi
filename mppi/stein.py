@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
@@ -12,17 +13,18 @@ class SteinParams:
     log_weights: jnp.ndarray # (M,)
     log_norm: jnp.ndarray # (M,)
 
-    # drift matrices
-    D: jnp.ndarray # (2,2)
-    S: jnp.ndarray # (2,2)
-    gamma: float
+    # preconditioning matrix  A = R(θ) = [[cos θ, -sin θ], [sin θ, cos θ]]
+    # θ ∈ [0°, 90°): mixing angle between score-descent (0°) and pure rotation (90°)
+    A: jnp.ndarray # (2,2)
 
     # kernel
     h: float
+    h_cross: float  # cross-term bandwidth (fixed); sqrt(h_cross) ≈ separation radius in metres
 
     # overall weight (set to 0.0 to disable)
     weight: float
     weight_pdf: float # maybe this one can go somewhere else
+    cross_alpha: float  # relative weight of inter-robot h_cross term (0 = single-robot)
 
 
 def component_logpdf(x, p: SteinParams):
@@ -54,13 +56,12 @@ def stein_grad_unit(x1, x2, p: SteinParams):
     h_A(x1) contribution from particle x2:
       k(x2,x1) * A @ score(x2)  +  A @ ∇_{x2} k(x2,x1)
     where ker_grad = ∇_{x2} k(x2,x1).
+    A = R(θ) is the precomputed rotation matrix stored in p.
     """
-    A = p.D + p.gamma * p.S
-
     # gradient w.r.t. the first argument of kernel, evaluated at (x2, x1)
     ker_grad = jax.grad(kernel, argnums=0)(x2, x1, p)
 
-    val = kernel(x2, x1, p) * (A @ score_pdf(x2, p)) + (A @ ker_grad)
+    val = kernel(x2, x1, p) * (p.A @ score_pdf(x2, p)) + (p.A @ ker_grad)
     return val
 
 
@@ -71,6 +72,26 @@ def stein_grad_state(x, x_traj, p: SteinParams):
     """
     stein_grads = jax.vmap(stein_grad_unit, in_axes=(None, 0, None))(x, x_traj, p)
     return jnp.mean(stein_grads, axis=0)
+
+def stein_repulsion_unit(x1, x2, p: SteinParams):
+    """
+    Pure inter-robot repulsion: only the kernel gradient term.
+      A @ ∇_{x2} k(x2, x1)
+    Drops the score term k(x2,x1) * A @ score(x2) entirely,
+    removing the redundant mode-attraction bias from cross-robot particles.
+    """
+    ker_grad = jax.grad(kernel, argnums=0)(x2, x1, p)
+    return p.A @ ker_grad
+
+
+def stein_repulsion_state(x, x_traj, p: SteinParams):
+    """
+    Average pure-repulsion contribution over all particles in x_traj.
+    Uses h_cross (fixed separation bandwidth) instead of h (median-adapted self bandwidth).
+    """
+    p_cross = dataclasses.replace(p, h=p.h_cross)
+    repulsions = jax.vmap(stein_repulsion_unit, in_axes=(None, 0, None))(x, x_traj, p_cross)
+    return jnp.mean(repulsions, axis=0)
 
 
 def stein_grad_traj(x_traj, p: SteinParams):

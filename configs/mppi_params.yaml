@@ -2,12 +2,19 @@ seed: 43 # 0, 42, 99, 35, 213
 
 steps: 5000
 
+robots:
+  num_robots: 6  # Phase 2: each robot will broadcast its spatial_median to the others
+
 mppi:
-  T: 35 # Default for K_N is 30
-  K: 500 # Default for T_K is 500
+  T: 50 # Default for K_N is 30
+  K: 1000 # Default for T_K is 500
   lambda: 1 # this is the temperature parameter higher = more exploration, lower = more exploitation
   alpha: 0.2 # control cost weight, higher = less control effort, lower = more control effort
   exploration: 0.1 # fraction of rollouts using nominal control
+  ess_target: 0.3  # target effective sample size fraction; lambda auto-tunes to hit this
+  lam_min: 0.05    # minimum allowed temperature
+  lam_max: 20.0    # maximum allowed temperature
+  history_len: 100 # past robot positions fed to the Stein particle set; larger = more balanced coverage
   dim_x: 6
   dim_u: 3
   noise:
@@ -20,7 +27,7 @@ map:
   x_limits: [-10.0, 10.0]
   y_limits: [-10.0, 10.0]
   resolution: 0.2
-  oom_cost: 100.0
+  oom_cost: 1e8
 
   obstacles:
     num_obstacles: 3
@@ -28,7 +35,7 @@ map:
     max_radius: 1.5
     x_limits: [-8.0, 8.0]
     y_limits: [-8.0, 8.0]
-    weight: 10000000.0
+    weight: 1e8
     safe_distance: 0.3
 
 density:
@@ -46,16 +53,17 @@ density:
     - [[2.0, -1.0], [-1.0, 3.0]] # Tilted opposite
 
 stein:
-  weight: 3.0
-  weight_pdf: 8.17
-  h: 1.0
-  gamma: 4.0 # from top config #2: 0% OOB, erg=0.0235
-  drift:
-    sigma: 3.0
-    S: [[0.0, -1.0], [1.0, 0.0]]
+  weight: 45.0  # = old_weight(3.0) × |A_old|(4.27); compensates for unit-scale R(θ)
+  weight_pdf: 0.0
+  h: 1.0        # self-term bandwidth floor; adapted upward by median heuristic at runtime
+  h_cross: 4.0 # cross-term bandwidth (fixed); sqrt(h_cross) ≈ separation radius in metres (~4m)
+  theta: 45.0     # degrees — mixing angle: 0° = pure score-descent, 90° = pure rotation
+                # equivalent to old drift.sigma=3.0, stein.gamma=4.0
+                # good range for multi-modal GMMs: 45°–75°
+  cross_alpha: 50.0  # weight for inter-robot h_cross term (0 = off, increase for stronger separation)
 
 model:
   delta_t: 0.02 # source of truth for timestep used by both model and MPPI runtime params
   double_integrator:
-    max_accel_lin_abs: 20.0 # m/s²
-    max_accel_ang_abs: 20.0 # rad/s²
+    max_accel_lin_abs: 15.0 # m/s²
+    max_accel_ang_abs: 15.0 # rad/s²

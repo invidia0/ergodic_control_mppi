@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -5,7 +6,8 @@ import jax
 import jax.numpy as jnp
 
 from models import double_integrator as model
-from mppi.stein import SteinParams, stein_grad_traj, logpdf
+from mppi.stein import SteinParams, stein_grad_state, stein_repulsion_state, logpdf
+
 
 
 @jax.tree_util.register_dataclass
@@ -46,6 +48,16 @@ class MPPIParams:
 
     obstacle_params: ObstacleParams
 
+    ess_target: float   # target ESS fraction, e.g. 0.3
+    lam_min: float      # lower clamp for lam
+    lam_max: float      # upper clamp for lam
+
+    history_len: int = field(metadata={"static": True})  # size of position history buffer
+    history: jnp.ndarray  # (history_len, 2)  rolling buffer of executed (x, y) positions
+
+    cross_particles_len: int = field(metadata={"static": True})  # (R-1)*T for multi, 0 for single
+    cross_particles: jnp.ndarray  # (cross_particles_len, 2)  other robots' planning trajectories
+
     seed: int
 
     steps: int
@@ -81,7 +93,15 @@ def _is_collided(x: jnp.ndarray, obs_params: ObstacleParams) -> bool:
 
 def stage_cost(x: jnp.ndarray, u: jnp.ndarray, params: MPPIParams) -> float:
     collided = _is_collided(x[:2], params.obstacle_params)
-    return jnp.where(collided, params.obstacle_params.weight, 0.0)
+    px, py = x[0], x[1]
+    oom = (
+        (px < params.map_x_limits[0]) | (px > params.map_x_limits[1]) |
+        (py < params.map_y_limits[0]) | (py > params.map_y_limits[1])
+    )
+    return (
+        jnp.where(collided, params.obstacle_params.weight, 0.0)
+        + jnp.where(oom, params.oom_cost, 0.0)
+    )
 
 
 def terminal_cost(x: jnp.ndarray, params: MPPIParams) -> float:
@@ -179,14 +199,23 @@ def mppi_step(
 params: MPPIParams,
 U_prev: jnp.ndarray,
 x0: jnp.ndarray,
-key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.ndarray]:
+key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    One MPPI step.
+
+    Returns:
+        u0:             (dim_u,)      first control to apply
+        U_next:         (T, dim_u)   shifted control trajectory for next step
+        key:            updated PRNG key
+        trajs:          (K, T, 2)    sampled position trajectories
+        opt_traj:       (T, dim_x)   optimal (weighted) full-state trajectory
+        spatial_median: (T, 2)       temporal median of sampled position trajectories
+                                     — Phase 2 hook: broadcast to other robots to
+                                       drive Stein-flow repulsion across the team.
+        w:              (K,)         normalized importance weights (for ESS adaptation)
+    """
     eps, key = sample_epsilon(key, params)  # (K,T,dim_u)
 
-    # S, V, trajs = jax.vmap(
-    #     lambda e, un: batched_rollouts(params, x0, U_prev, e, un),
-    #     in_axes=(0, 0),
-    #     out_axes=(0, 0, 0),
-    # )(eps, params.use_nominal)
     eps_T = jnp.swapaxes(eps, 0, 1)  # (T, K, dim_u)
     S, V, trajs = batched_rollouts(
     params=params,
@@ -198,13 +227,36 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
 
     spatial_trajs = trajs[:, :, :2]  # (K,T,2)
     spatial_median = jnp.median(spatial_trajs, axis=0)  # (T,2)
-    h_target = stein_grad_traj(spatial_median, params.stein)  # (T,2)
+
+    # Median heuristic for kernel bandwidth: h = max(median(||xi-xj||²), h_floor)
+    diffs = spatial_median[:, None, :] - spatial_median[None, :, :]  # (T,T,2)
+    sq_dists = jnp.sum(diffs ** 2, axis=-1)                          # (T,T)
+    h_adapted = jnp.maximum(jnp.median(sq_dists), params.stein.h)   # floor = YAML h
+    stein_adapted = dataclasses.replace(params.stein, h=h_adapted)
+    params_h = dataclasses.replace(params, stein=stein_adapted)
+
+    # h_self: repel from own planning trajectory + own position history
+    self_particles = jnp.concatenate([spatial_median, params_h.history], axis=0)  # (T+H, 2)
+    h_self = jax.vmap(stein_grad_state, in_axes=(0, None, None))(
+        spatial_median, self_particles, params_h.stein
+    )  # (T, 2)
+
+    # h_cross: repel from other robots' planning trajectories.
+    # cross_particles_len is static → this branch is resolved at Python/trace time:
+    # single-robot (len=0) compiles the else; multi-robot compiles the if.
+    if params.cross_particles_len > 0:
+        h_cross = jax.vmap(stein_repulsion_state, in_axes=(0, None, None))( # ← was stein_grad_state
+            spatial_median, params_h.cross_particles, params_h.stein
+        )
+        h_target = h_self + params_h.stein.cross_alpha * h_cross
+    else:
+        h_target = h_self
 
     S_flow = -jnp.einsum('ktn,tn->k', spatial_trajs, h_target)
 
     logp = jax.vmap(
         lambda traj_pos: jax.vmap(
-            lambda x: logpdf(x, params.stein)
+            lambda x: logpdf(x, params_h.stein)
         )(traj_pos)
     )(spatial_trajs)
 
@@ -232,4 +284,4 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
 
     u0 = U.at[0].get()
     U_next = shift_U(U)
-    return u0, U_next, key, trajs, opt_traj
+    return u0, U_next, key, trajs, opt_traj, spatial_median, w
