@@ -56,11 +56,12 @@ stein:
   weight: 45.0  # = old_weight(3.0) × |A_old|(4.27); compensates for unit-scale R(θ)
   weight_pdf: 0.0
   h: 1.0        # self-term bandwidth floor; adapted upward by median heuristic at runtime
-  h_cross: 4.0 # cross-term bandwidth (fixed); sqrt(h_cross) ≈ separation radius in metres (~4m)
-  theta: 45.0     # degrees — mixing angle: 0° = pure score-descent, 90° = pure rotation
+  h_cross: 1.0 # cross-term bandwidth (fixed); sqrt(h_cross) ≈ separation radius in metres (~4m)
+  theta: 55.0     # degrees — mixing angle: 0° = pure score-descent, 90° = pure rotation
                 # equivalent to old drift.sigma=3.0, stein.gamma=4.0
                 # good range for multi-modal GMMs: 45°–75°
   cross_alpha: 50.0  # weight for inter-robot h_cross term (0 = off, increase for stronger separation)
+  history_alpha: 50.0  # weight for own history pure-repulsion (like cross_alpha but for self-history)
 
 model:
   delta_t: 0.02 # source of truth for timestep used by both model and MPPI runtime params
