@@ -1,14 +1,10 @@
-from mppi.core import MPPIParams, ObstacleParams, mppi_step, sample_epsilon
-from mppi.stein import SteinParams, logpdf, score_pdf, pdf, stein_grad_traj
+from mppi.core import Params, ObstacleParams, logpdf, score_pdf, mppi_step, sample_epsilon
 
 __all__ = [
-    "MPPIParams",
+    "Params",
     "ObstacleParams",
-    "mppi_step",
-    "sample_epsilon",
-    "SteinParams",
     "logpdf",
     "score_pdf",
-    "pdf",
-    "stein_grad_traj",
+    "mppi_step",
+    "sample_epsilon",
 ]

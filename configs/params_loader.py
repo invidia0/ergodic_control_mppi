@@ -3,8 +3,7 @@ import yaml
 import jax
 import jax.numpy as jnp
 
-from mppi.core import MPPIParams, ObstacleParams
-from mppi.stein import SteinParams
+from mppi.core import Params, ObstacleParams
 from models.double_integrator import DoubleIntegratorParams
 
 
@@ -107,7 +106,7 @@ def _obstacle_generator(
     return xyr, key
 
 
-def load_mppi_params(yaml_path: str) -> MPPIParams:
+def load_params(yaml_path: str) -> Params:
     """
     Load canonical MPPI config from YAML and build runtime params.
 
@@ -115,8 +114,14 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
       - mppi.noise
       - map.obstacles
       - density
-      - stein.drift
-      - model.delta_t (single source of truth for timestep)
+            - model.delta_t (single source of truth for simulation and MPPI timestep)
+
+        Noise covariance behavior:
+            - If mppi.noise.sigma is provided, it is used as the explicit hand-tuned covariance.
+            - If mppi.noise.sigma is omitted, covariance is built from ULD diffusion:
+                Sigma_lin = (2 * gamma_uld) / (beta * delta_t) * I
+                with optional sigma_ang_factor scaling for control dimensions beyond the
+                first two translational channels.
     """
     with open(yaml_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -126,7 +131,6 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
 
     mppi_cfg = _require_dict(cfg, "mppi", "")
     noise_cfg = _require_dict(mppi_cfg, "noise", "mppi")
-    stein_cfg = _require_dict(cfg, "stein", "")
     map_cfg = _require_dict(cfg, "map", "")
     obstacle_cfg = _require_dict(map_cfg, "obstacles", "map")
     density_cfg = _require_dict(cfg, "density", "")
@@ -135,6 +139,7 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
 
     seed = _as_int(cfg.get("seed", 0), "seed")
     steps = _as_int(cfg.get("steps", 5000), "steps", min_value=1)
+    num_robots = _as_int(cfg.get("num_robots", 1), "num_robots", min_value=1)
     key = jax.random.PRNGKey(seed)
 
     K = _as_int(_require_value(mppi_cfg, "K", "mppi"), "mppi.K", min_value=1)
@@ -155,14 +160,12 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     if lam_max <= lam_min:
         raise ValueError("Config key 'mppi.lam_max' must be > mppi.lam_min")
 
-    history_len = _as_int(mppi_cfg.get("history_len", 100), "mppi.history_len", min_value=1)
-    history = jnp.zeros((history_len, 2), dtype=jnp.float32)
-
-    Sigma = _float32_array(_require_value(noise_cfg, "sigma", "mppi.noise"), "mppi.noise.sigma")
-    _expect_shape(Sigma, (dim_u, dim_u), "mppi.noise.sigma")
-    Sigma_inv = jnp.linalg.inv(Sigma + 1e-8 * jnp.eye(dim_u, dtype=jnp.float32))
-    if not bool(jnp.all(jnp.isfinite(Sigma_inv))):
-        raise ValueError("Computed Sigma_inv contains non-finite values; check mppi.noise.sigma")
+    gamma_uld = _as_float(cfg.get("gamma_uld", 0.1), "gamma_uld", min_value=1e-6)
+    w_uld = _as_float(cfg.get("w_uld", 1.0), "w_uld", min_value=0.0)
+    w_mag = _as_float(cfg.get("w_mag", 0.1), "w_mag", min_value=0.0)
+    w_rate = _as_float(cfg.get("w_rate", 0.1), "w_rate", min_value=0.0)
+    theta = _as_float(cfg.get("theta", 1.0), "theta", min_value=0.0)
+    beta = _as_float(cfg.get("beta", 1.0), "beta", min_value=1e-12)
 
     means = _float32_array(_require_value(density_cfg, "means", "density"), "density.means")
     covs = _float32_array(_require_value(density_cfg, "covariances", "density"), "density.covariances")
@@ -193,15 +196,6 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     d = means.shape[1]
     log_norm = -0.5 * (d * jnp.log(2 * jnp.pi) + log_det)
 
-    theta_deg = _as_float(_require_value(stein_cfg, "theta", "stein"), "stein.theta", min_value=0.0)
-    if theta_deg >= 90.0:
-        raise ValueError("Config key 'stein.theta' must be < 90.0 degrees")
-    theta_rad = float(jnp.deg2rad(jnp.array(theta_deg, dtype=jnp.float32)))
-    A = jnp.array([
-        [jnp.cos(theta_rad), -jnp.sin(theta_rad)],
-        [jnp.sin(theta_rad),  jnp.cos(theta_rad)],
-    ], dtype=jnp.float32)
-
     map_x_limits = _float32_array(_require_value(map_cfg, "x_limits", "map"), "map.x_limits")
     map_y_limits = _float32_array(_require_value(map_cfg, "y_limits", "map"), "map.y_limits")
     _validate_limits(map_x_limits, "map.x_limits")
@@ -209,7 +203,7 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     resolution = _as_float(_require_value(map_cfg, "resolution", "map"), "map.resolution", min_value=1e-12)
     oom_cost = _as_float(_require_value(map_cfg, "oom_cost", "map"), "map.oom_cost", min_value=0.0)
 
-    num_obstacles = _as_int(_require_value(obstacle_cfg, "num_obstacles", "map.obstacles"), "map.obstacles.num_obstacles", min_value=1)
+    num_obstacles = _as_int(_require_value(obstacle_cfg, "num_obstacles", "map.obstacles"), "map.obstacles.num_obstacles", min_value=0)
     obs_x_limits = _float32_array(_require_value(obstacle_cfg, "x_limits", "map.obstacles"), "map.obstacles.x_limits")
     obs_y_limits = _float32_array(_require_value(obstacle_cfg, "y_limits", "map.obstacles"), "map.obstacles.y_limits")
     _validate_limits(obs_x_limits, "map.obstacles.x_limits")
@@ -222,6 +216,33 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     safe_distance = _as_float(_require_value(obstacle_cfg, "safe_distance", "map.obstacles"), "map.obstacles.safe_distance", min_value=0.0)
 
     delta_t = _as_float(_require_value(model_cfg, "delta_t", "model"), "model.delta_t", min_value=1e-12)
+
+    sigma_value = noise_cfg.get("sigma")
+    sigma_ang_factor = _as_float(
+        noise_cfg.get("sigma_ang_factor", 1.0),
+        "mppi.noise.sigma_ang_factor",
+        min_value=0.0,
+    )
+    if sigma_value is not None:
+        Sigma = _float32_array(sigma_value, "mppi.noise.sigma")
+        _expect_shape(Sigma, (dim_u, dim_u), "mppi.noise.sigma")
+    else:
+        print("[INFO] mppi.noise.sigma not provided, using auto ULD diffusion matching with gamma_uld =", gamma_uld)
+        if dim_u < 2:
+            raise ValueError(
+                "Config auto Sigma requires mppi.dim_u >= 2 for translational diffusion matching"
+            )
+        sigma_lin_var = (2.0 * gamma_uld) / (beta * delta_t)
+        Sigma = jnp.zeros((dim_u, dim_u), dtype=jnp.float32)
+        Sigma = Sigma.at[:2, :2].set(sigma_lin_var * jnp.eye(2, dtype=jnp.float32))
+        if dim_u > 2:
+            sigma_ang_var = sigma_ang_factor * sigma_lin_var
+            Sigma = Sigma.at[2:, 2:].set(sigma_ang_var * jnp.eye(dim_u - 2, dtype=jnp.float32))
+
+    Sigma_inv = jnp.linalg.inv(Sigma + 1e-8 * jnp.eye(dim_u, dtype=jnp.float32))
+    if not bool(jnp.all(jnp.isfinite(Sigma_inv))):
+        raise ValueError("Computed Sigma_inv contains non-finite values; check mppi.noise sigma configuration")
+
     max_accel_lin_abs = _as_float(
         _require_value(model_spec, "max_accel_lin_abs", "model.double_integrator"),
         "model.double_integrator.max_accel_lin_abs",
@@ -252,30 +273,27 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         safe_distance=safe_distance,
     )
 
-    stein_params = SteinParams(
-        means=means,
-        cov_inv=cov_inv,
-        log_weights=log_weights,
-        log_norm=log_norm,
-        A=A,
-        h=_as_float(_require_value(stein_cfg, "h", "stein"), "stein.h", min_value=1e-12),
-        h_cross=_as_float(_require_value(stein_cfg, "h_cross", "stein"), "stein.h_cross", min_value=1e-12),
-        weight=_as_float(_require_value(stein_cfg, "weight", "stein"), "stein.weight", min_value=0.0),
-        weight_pdf=_as_float(_require_value(stein_cfg, "weight_pdf", "stein"), "stein.weight_pdf", min_value=0.0),
-        cross_alpha=_as_float(_require_value(stein_cfg, "cross_alpha", "stein"), "stein.cross_alpha", min_value=0.0),
-    )
-
     model_params = DoubleIntegratorParams(
         delta_t=delta_t,
         max_accel_lin_abs=max_accel_lin_abs,
         max_accel_ang_abs=max_accel_ang_abs,
     )
 
-    return MPPIParams(
-        T=T,
+    return Params(
         K=K,
-        dim_x=dim_x,
+        T=T,
         dim_u=dim_u,
+        dim_x=dim_x,
+        num_robots=num_robots,
+        means=means,
+        cov_inv=cov_inv,
+        log_weights=log_weights,
+        log_norm=log_norm,
+        gamma_uld=gamma_uld,
+        w_uld=w_uld,
+        w_mag=w_mag,
+        w_rate=w_rate,
+        alpha_irrev=gamma_uld * jnp.tan(theta),  # single derived quantity for core logic
         lam=lam,
         alpha=alpha,
         gamma=gamma,
@@ -286,17 +304,12 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         map_y_limits=map_y_limits,
         resolution=resolution,
         oom_cost=oom_cost,
-        stein=stein_params,
         model_params=model_params,
         obstacle_params=obstacle_params,
         use_nominal=use_nominal,
         ess_target=ess_target,
         lam_min=lam_min,
         lam_max=lam_max,
-        history_len=history_len,
-        history=history,
-        cross_particles_len=0,
-        cross_particles=jnp.zeros((0, 2), dtype=jnp.float32),
         seed=seed,
         steps=steps,
     )

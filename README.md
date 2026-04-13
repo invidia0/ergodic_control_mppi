@@ -59,7 +59,7 @@ The fixed `h_cross` acts as a separation radius independent of local trajectory 
 | Path | Purpose |
 |------|---------|
 | `configs/mppi_params.yaml` | All tunable parameters (single source of truth) |
-| `configs/params_loader.py` | YAML → validated `MPPIParams` dataclass |
+| `configs/params_loader.py` | YAML → validated `Params` dataclass |
 | `models/double_integrator.py` | 6D double-integrator dynamics + control clamping |
 | `mppi/core.py` | JIT-compiled functional MPPI core |
 | `mppi/stein.py` | GMM log-pdf, Stein gradient operator, `SteinParams` |
