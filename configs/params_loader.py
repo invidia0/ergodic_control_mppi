@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import yaml
 
 import jax
@@ -6,6 +7,21 @@ import jax.numpy as jnp
 from mppi.core import MPPIParams, ObstacleParams
 from mppi.stein import SteinParams
 from models.double_integrator import DoubleIntegratorParams
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    seed: int
+    steps: int
+    num_robots: int
+
+
+def _load_cfg(yaml_path: str) -> dict:
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("Top-level YAML content must be a mapping")
+    return cfg
 
 
 def _require_dict(parent: dict, key: str, parent_path: str) -> dict:
@@ -107,22 +123,43 @@ def _obstacle_generator(
     return xyr, key
 
 
+def load_run_config(yaml_path: str) -> RunConfig:
+    """
+    Load run-level settings that are not part of the controller parameter bundle.
+    """
+    cfg = _load_cfg(yaml_path)
+    return _parse_run_config(cfg)
+
+
+def _parse_run_config(cfg: dict) -> RunConfig:
+    """
+    Parse run-level settings from an already loaded YAML mapping.
+    """
+    robots_cfg = cfg.get("robots", {})
+    if robots_cfg is None:
+        robots_cfg = {}
+    if not isinstance(robots_cfg, dict):
+        raise ValueError("Config section 'robots' must be a mapping")
+
+    return RunConfig(
+        seed=_as_int(cfg.get("seed", 0), "seed"),
+        steps=_as_int(cfg.get("steps", 5000), "steps", min_value=1),
+        num_robots=_as_int(robots_cfg.get("num_robots", 1), "robots.num_robots", min_value=1),
+    )
+
+
 def load_mppi_params(yaml_path: str) -> MPPIParams:
     """
-    Load canonical MPPI config from YAML and build runtime params.
+    Load MPPI/controller parameters from YAML and build runtime dataclasses.
 
-    Canonical schema (strict, no legacy aliases):
+    Canonical schema:
       - mppi.noise
       - map.obstacles
       - density
-      - stein.drift
-      - model.delta_t (single source of truth for timestep)
+      - stein
+      - model.delta_t
     """
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    if not isinstance(cfg, dict):
-        raise ValueError("Top-level YAML content must be a mapping")
+    cfg = _load_cfg(yaml_path)
 
     mppi_cfg = _require_dict(cfg, "mppi", "")
     noise_cfg = _require_dict(mppi_cfg, "noise", "mppi")
@@ -133,8 +170,8 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
     model_cfg = _require_dict(cfg, "model", "")
     model_spec = _require_dict(model_cfg, "double_integrator", "model")
 
-    seed = _as_int(cfg.get("seed", 0), "seed")
-    steps = _as_int(cfg.get("steps", 5000), "steps", min_value=1)
+    run_cfg = _parse_run_config(cfg)
+    seed = run_cfg.seed
     key = jax.random.PRNGKey(seed)
 
     K = _as_int(_require_value(mppi_cfg, "K", "mppi"), "mppi.K", min_value=1)
@@ -235,7 +272,7 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
 
     num_nominal = jnp.asarray((1.0 - exploration) * K, dtype=jnp.int32)
     use_nominal = jnp.arange(K) < num_nominal
-    gamma = lam * (1.0 - alpha)
+    control_cost_coeff = lam * (1.0 - alpha)
 
     xyr, key = _obstacle_generator(
         num_obstacles=num_obstacles,
@@ -258,11 +295,11 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         log_weights=log_weights,
         log_norm=log_norm,
         A=A,
-        h=_as_float(_require_value(stein_cfg, "h", "stein"), "stein.h", min_value=1e-12),
-        h_cross=_as_float(_require_value(stein_cfg, "h_cross", "stein"), "stein.h_cross", min_value=1e-12),
-        weight=_as_float(_require_value(stein_cfg, "weight", "stein"), "stein.weight", min_value=0.0),
+        ell_self=_as_float(_require_value(stein_cfg, "ell_self", "stein"), "stein.ell_self", min_value=1e-12),
+        ell_x=_as_float(_require_value(stein_cfg, "ell_x", "stein"), "stein.ell_x", min_value=1e-12),
+        weight_stein=_as_float(_require_value(stein_cfg, "weight_stein", "stein"), "stein.weight_stein", min_value=0.0),
         weight_pdf=_as_float(_require_value(stein_cfg, "weight_pdf", "stein"), "stein.weight_pdf", min_value=0.0),
-        cross_alpha=_as_float(_require_value(stein_cfg, "cross_alpha", "stein"), "stein.cross_alpha", min_value=0.0),
+        alpha_cross=_as_float(_require_value(stein_cfg, "alpha_cross", "stein"), "stein.alpha_cross", min_value=0.0),
     )
 
     model_params = DoubleIntegratorParams(
@@ -277,10 +314,8 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         dim_x=dim_x,
         dim_u=dim_u,
         lam=lam,
-        alpha=alpha,
-        gamma=gamma,
+        control_cost_coeff=control_cost_coeff,
         Sigma=Sigma,
-        delta_t=delta_t,
         Sigma_inv=Sigma_inv,
         map_x_limits=map_x_limits,
         map_y_limits=map_y_limits,
@@ -297,6 +332,4 @@ def load_mppi_params(yaml_path: str) -> MPPIParams:
         history=history,
         cross_particles_len=0,
         cross_particles=jnp.zeros((0, 2), dtype=jnp.float32),
-        seed=seed,
-        steps=steps,
     )

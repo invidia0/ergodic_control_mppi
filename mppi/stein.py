@@ -18,13 +18,13 @@ class SteinParams:
     A: jnp.ndarray # (2,2)
 
     # kernel
-    h: float
-    h_cross: float  # cross-term bandwidth (fixed); sqrt(h_cross) ≈ separation radius in metres
+    ell_self: float
+    ell_x: float  # cross-term bandwidth (fixed); sqrt(ell_x) ≈ separation radius in metres
 
     # overall weight (set to 0.0 to disable)
-    weight: float
+    weight_stein: float
     weight_pdf: float # maybe this one can go somewhere else
-    cross_alpha: float  # relative weight of inter-robot h_cross term (0 = single-robot)
+    alpha_cross: float  # relative weight of inter-robot ell_x term (0 = single-robot)
 
 
 def component_logpdf(x, p: SteinParams):
@@ -48,7 +48,7 @@ def pdf(x, p: SteinParams):
 
 def kernel(x, y, p: SteinParams):
     diff = x - y
-    return jnp.exp(-jnp.dot(diff, diff) / p.h)
+    return jnp.exp(-jnp.dot(diff, diff) / p.ell_self)
 
 
 def stein_grad_unit(x1, x2, p: SteinParams):
@@ -87,9 +87,9 @@ def stein_repulsion_unit(x1, x2, p: SteinParams):
 def stein_repulsion_state(x, x_traj, p: SteinParams):
     """
     Average pure-repulsion contribution over all particles in x_traj.
-    Uses h_cross (fixed separation bandwidth) instead of h (median-adapted self bandwidth).
+    Uses ell_x (fixed separation bandwidth) instead of ell_self (median-adapted self bandwidth).
     """
-    p_cross = dataclasses.replace(p, h=p.h_cross)
+    p_cross = dataclasses.replace(p, ell_self=p.ell_x)
     repulsions = jax.vmap(stein_repulsion_unit, in_axes=(None, 0, None))(x, x_traj, p_cross)
     return jnp.mean(repulsions, axis=0)
 

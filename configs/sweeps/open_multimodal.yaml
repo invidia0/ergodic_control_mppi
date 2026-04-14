@@ -1,0 +1,20 @@
+scenario_name: open_multimodal
+team_size: 4
+real_time_budget_ms: 100.0
+
+# alpha_cross_values: [1.0, 5.0, 10.0, 20.0, 50.0]
+# ell_x_values: [0.5, 1.0, 2.0, 5.0, 10.0]
+# weight_stein_values: [1.0, 5.0, 10.0, 20.0, 50.0]
+# theta_values: [1.0, 10.0, 30.0, 45.0, 55.0]
+# history_window_values: [0, 50, 100, 250, 500]
+
+alpha_cross_values: [1.0, 5.0, 10.0]
+ell_x_values: [0.5, 1.0, 2.0]
+weight_stein_values: [1.0, 5.0, 10.0]
+theta_values: [1.0, 30.0, 55.0]
+history_window_values: [1, 100, 500]
+
+num_seeds: 3
+# Optional explicit seeds:
+# seeds: [0, 1, 2]
+

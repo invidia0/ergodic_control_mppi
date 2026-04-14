@@ -4,7 +4,6 @@ from pathlib import Path
 import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import yaml
 import jax
 jax.config.update("jax_enable_x64", False)
 import jax.numpy as jnp
@@ -48,7 +47,7 @@ except (RuntimeError, ValueError, IndexError) as exc:
 def closed_loop(params, x0, U0, key, N: int):
     init_trajs = jnp.zeros((params.K, params.T, 2), dtype=jnp.float32)
     init_opt_traj = jnp.zeros((params.T, params.dim_x), dtype=jnp.float32)
-    init_median = jnp.zeros((params.T, 2), dtype=jnp.float32)
+    init_surrogate = jnp.zeros((params.T, 2), dtype=jnp.float32)
     init_lam = jnp.asarray(params.lam, dtype=jnp.float32)
     # Seed history with start position so the robot is repelled from it from step 0
     init_history = jnp.broadcast_to(x0[:2], (params.history_len, 2))  # (H, 2)
@@ -56,15 +55,15 @@ def closed_loop(params, x0, U0, key, N: int):
     def one_step(carry, _):
         x, U_prev, key, lam, history, _, _, _ = carry
         p = dataclasses.replace(params, lam=lam, history=history)
-        u0, U_next, key_next, trajs, opt_traj, spatial_median, w = mppi_step(p, U_prev, x, key)
+        u0, U_next, key_next, trajs, opt_traj, traj_surrogate, w = mppi_step(p, U_prev, x, key)
         lam_next = _adapt_lam(lam, w, params)
         history_next = jnp.roll(history, shift=-1, axis=0).at[-1].set(x[:2])
         x_next = model.step(x, u0, params.model_params)
-        return (x_next, U_next, key_next, lam_next, history_next, trajs, opt_traj, spatial_median), x_next
+        return (x_next, U_next, key_next, lam_next, history_next, trajs, opt_traj, traj_surrogate), x_next
 
     (_, _, _, _, _, last_trajs, last_opt_traj, _), path = jax.lax.scan(
         one_step,
-        (x0, U0, key, init_lam, init_history, init_trajs, init_opt_traj, init_median),
+        (x0, U0, key, init_lam, init_history, init_trajs, init_opt_traj, init_surrogate),
         xs=None,
         length=N,
     )
@@ -82,10 +81,9 @@ def multi_robot_closed_loop(params, x0_all, U0_all, key_all, num_robots: int, N:
     """
     Decentralized multi-robot ergodic control loop.
 
-    Each robot runs its own MPPI instance independently (Phase 1).  The
-    spatial medians are kept in the scan carry so that Phase 2 — Stein-flow
-    cross-repulsion via shared medians — can be activated by a minimal change
-    to the inner loop body (see the Phase 2 hook comment below).
+    Each robot runs its own MPPI instance independently. A trajectory
+    surrogate is kept in the scan carry and exchanged as Stein particles for
+    decentralized cross-robot repulsion.
 
     Args:
         params:     shared MPPIParams (same map, density, and model for all robots)
@@ -99,20 +97,19 @@ def multi_robot_closed_loop(params, x0_all, U0_all, key_all, num_robots: int, N:
     Returns:
         paths_all:       (N, R, dim_x)  executed state history for every robot
         last_opt_trajs:  (R, T, 2)      final optimal position trajectories
-        last_medians:    (R, T, 2)      final spatial medians (Phase 2 ready)
+        last_surrogates: (R, T, 2)      final shared trajectory surrogates
     """
     # Initialise carry fields that are not yet meaningful but must have the
     # correct shapes so lax.scan can verify the carry structure.
-    medians_all   = jnp.zeros((num_robots, params.T, 2), dtype=jnp.float32)
+    surrogates_all = jnp.zeros((num_robots, params.T, 2), dtype=jnp.float32)
     opt_trajs_all = jnp.zeros((num_robots, params.T, 2), dtype=jnp.float32)
-    lam_all       = jnp.full((num_robots,), params.lam, dtype=jnp.float32)
+    lam_all = jnp.full((num_robots,), params.lam, dtype=jnp.float32)
     # Per-robot history buffers seeded with each robot's start position
     histories_all = jnp.stack([
         jnp.broadcast_to(x0_all[i, :2], (params.history_len, 2))
         for i in range(num_robots)
     ])  # (R, H, 2)
 
-    # Phase 2: build a base params with the right static cross_particles shape.
     # cross_particles_len is static so dataclasses.replace inside the scan only
     # changes the dynamic leaf (cross_particles), not the pytree structure.
     cross_len = (num_robots - 1) * (params.T + params.history_len)
@@ -123,32 +120,32 @@ def multi_robot_closed_loop(params, x0_all, U0_all, key_all, num_robots: int, N:
     )
 
     def one_step(carry, _):
-        x_all, U_prev_all, key_all, lam_all, histories_all, medians_all, _opt_trajs_all = carry
+        x_all, U_prev_all, key_all, lam_all, histories_all, surrogates_all, _opt_trajs_all = carry
 
-        new_x         = []
-        new_U         = []
-        new_keys      = []
-        new_lams      = []
+        new_x = []
+        new_U = []
+        new_keys = []
+        new_lams = []
         new_histories = []
-        new_medians   = []
+        new_surrogates = []
         new_opt_trajs = []
 
         for i in range(num_robots):
             # Build cross_particles: other robots' planning trajectories + trail histories.
-            # At step 0 medians/histories are zeros — acceptable 1-step transient.
+            # At step 0 surrogates/histories are zeros — acceptable 1-step transient.
             other_flat = jnp.concatenate([
-                medians_all[:i].reshape(-1, 2),    # planning trajectories: robots 0..i-1
-                histories_all[:i].reshape(-1, 2),  # trail histories:       robots 0..i-1
-                medians_all[i+1:].reshape(-1, 2),  # planning trajectories: robots i+1..R-1
-                histories_all[i+1:].reshape(-1, 2),# trail histories:       robots i+1..R-1
-            ], axis=0)  # ((R-1)*(T+H), 2)
+                surrogates_all[:i].reshape(-1, 2), # planning trajectories: robots 0..i-1
+                histories_all[:i].reshape(-1, 2), # trail histories: robots 0..i-1
+                surrogates_all[i+1:].reshape(-1, 2), # planning trajectories: robots i+1..R-1
+                histories_all[i+1:].reshape(-1, 2), # trail histories: robots i+1..R-1
+            ], axis=0) # ((R-1)*(T+H), 2)
 
             p = dataclasses.replace(params_base,
                 lam=lam_all[i],
                 history=histories_all[i],
                 cross_particles=other_flat,
             )
-            u0, U_next, key_next, _, opt_traj, median, w = mppi_step(
+            u0, U_next, key_next, _, opt_traj, traj_surrogate, w = mppi_step(
                 p, U_prev_all[i], x_all[i], key_all[i]
             )
             x_next = model.step(x_all[i], u0, params.model_params)
@@ -158,25 +155,25 @@ def multi_robot_closed_loop(params, x0_all, U0_all, key_all, num_robots: int, N:
             new_keys.append(key_next)
             new_lams.append(_adapt_lam(lam_all[i], w, params))
             new_histories.append(jnp.roll(histories_all[i], shift=-1, axis=0).at[-1].set(x_all[i, :2]))
-            new_medians.append(median)            # (T, 2)
+            new_surrogates.append(traj_surrogate)  # (T, 2)
             new_opt_trajs.append(opt_traj[:, :2]) # (T, 2) — position only
 
-        new_x_all         = jnp.stack(new_x,         axis=0)  # (R, dim_x)
-        new_U_all         = jnp.stack(new_U,         axis=0)  # (R, T, dim_u)
-        new_key_all       = jnp.stack(new_keys,      axis=0)  # (R, 2)
-        new_lam_all       = jnp.stack(new_lams,      axis=0)  # (R,)
+        new_x_all = jnp.stack(new_x, axis=0)  # (R, dim_x)
+        new_U_all = jnp.stack(new_U, axis=0)  # (R, T, dim_u)
+        new_key_all = jnp.stack(new_keys, axis=0)  # (R, 2)
+        new_lam_all = jnp.stack(new_lams, axis=0)  # (R,)
         new_histories_all = jnp.stack(new_histories, axis=0)  # (R, H, 2)
-        new_medians_all   = jnp.stack(new_medians,   axis=0)  # (R, T, 2)
+        new_surrogates_all = jnp.stack(new_surrogates, axis=0)  # (R, T, 2)
         new_opt_trajs_all = jnp.stack(new_opt_trajs, axis=0)  # (R, T, 2)
 
-        carry_out = (new_x_all, new_U_all, new_key_all, new_lam_all, new_histories_all, new_medians_all, new_opt_trajs_all)
+        carry_out = (new_x_all, new_U_all, new_key_all, new_lam_all, new_histories_all, new_surrogates_all, new_opt_trajs_all)
         return carry_out, new_x_all  # output stacked by scan → (N, R, dim_x)
 
-    init_carry = (x0_all, U0_all, key_all, lam_all, histories_all, medians_all, opt_trajs_all)
-    (_, _, _, _, _, last_medians, last_opt_trajs), paths_all = jax.lax.scan(
+    init_carry = (x0_all, U0_all, key_all, lam_all, histories_all, surrogates_all, opt_trajs_all)
+    (_, _, _, _, _, last_surrogates, last_opt_trajs), paths_all = jax.lax.scan(
         one_step, init_carry, xs=None, length=N
     )
-    return paths_all, last_opt_trajs, last_medians  # (N,R,dim_x), (R,T,2), (R,T,2)
+    return paths_all, last_opt_trajs, last_surrogates  # (N,R,dim_x), (R,T,2), (R,T,2)
 
 
 multi_robot_closed_loop_jit = jax.jit(
@@ -295,7 +292,7 @@ def visualize_multi(params, paths_all, last_opt_trajs, num_robots):
                 color=color, alpha=0.5, linewidth=2, linestyle='--', zorder=5)
 
     ax.legend(loc='upper right', fontsize=9)
-    ax.set_title(f"Multi-Robot Ergodic Coverage — {num_robots} robots (Phase 1)")
+    ax.set_title(f"Multi-Robot Ergodic Coverage ({num_robots} robots)")
     plt.tight_layout()
     plt.show()
 
@@ -313,14 +310,13 @@ def _random_state(key, params):
 
 
 def main():
-    params = params_loader.load_mppi_params("configs/mppi_params.yaml")
+    config_path = "configs/mppi_params.yaml"
+    params = params_loader.load_mppi_params(config_path)
+    run_cfg = params_loader.load_run_config(config_path)
 
-    with open("configs/mppi_params.yaml", "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    num_robots = int(cfg.get("robots", {}).get("num_robots", 1))
-
-    N = params.steps
-    key = jax.random.PRNGKey(params.seed)
+    num_robots = run_cfg.num_robots
+    N = run_cfg.steps
+    key = jax.random.PRNGKey(run_cfg.seed)
 
     if num_robots == 1:
         # ---- Single-robot path (original behaviour) ----
@@ -349,13 +345,13 @@ def main():
         # Fresh independent keys for the simulation (split again to avoid reuse)
         sim_keys = jax.random.split(jax.random.fold_in(key, 1), num_robots)  # (R, 2)
 
-        x0_all = jax.device_put(x0_all,   gpu)
-        U0_all = jax.device_put(U0_all,   gpu)
+        x0_all = jax.device_put(x0_all, gpu)
+        U0_all = jax.device_put(U0_all, gpu)
         sim_keys = jax.device_put(sim_keys, gpu)
-        params = jax.device_put(params,   gpu)
+        params = jax.device_put(params, gpu)
 
         print(f"Running multi-robot closed-loop simulation ({num_robots} robots)...")
-        paths_all, last_opt_trajs, last_medians = multi_robot_closed_loop_jit(
+        paths_all, last_opt_trajs, last_surrogates = multi_robot_closed_loop_jit(
             params, x0_all, U0_all, sim_keys, num_robots=num_robots, N=N
         )
         print("Done.")

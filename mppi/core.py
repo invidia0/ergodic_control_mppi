@@ -1,6 +1,5 @@
 import dataclasses
 from dataclasses import dataclass, field
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -27,8 +26,7 @@ class MPPIParams:
     dim_x: int = field(metadata={"static": True})
 
     lam: float
-    alpha: float
-    gamma: float
+    control_cost_coeff: float
 
     use_nominal: jnp.ndarray  # (K,) bool - dynamic field
 
@@ -39,8 +37,6 @@ class MPPIParams:
     map_y_limits: jnp.ndarray   # (2,)
     resolution: float
     oom_cost: float
-
-    delta_t: float
 
     stein: SteinParams
 
@@ -57,10 +53,6 @@ class MPPIParams:
 
     cross_particles_len: int = field(metadata={"static": True})  # (R-1)*T for multi, 0 for single
     cross_particles: jnp.ndarray  # (cross_particles_len, 2)  other robots' planning trajectories
-
-    seed: int
-
-    steps: int
 
 
 
@@ -126,7 +118,7 @@ def single_rollout(params: MPPIParams, x0: jnp.ndarray, U_prev: jnp.ndarray, eps
         v_t = jnp.where(use_nominal, U_t + e_t, e_t)
         u_t = model.clamp(v_t, params.model_params)
 
-        cross = params.gamma * (U_t @ params.Sigma_inv @ v_t)
+        cross = params.control_cost_coeff * (U_t @ params.Sigma_inv @ v_t)
         S = S + stage_cost(x, u_t, params) + cross
         x = model.step(x, u_t, params.model_params)
         return (x, S), (u_t, x)
@@ -165,7 +157,7 @@ def batched_rollouts(params: MPPIParams,
         u_t = jax.vmap(model.clamp, in_axes=(0, None))(v_t, params.model_params)  # (K, dim_u)
 
         # Cross term (vectorized over K)
-        cross = params.gamma * (U_t[None, :] @ params.Sigma_inv * v_t).sum(axis=1)  # (K,)
+        cross = params.control_cost_coeff * (U_t[None, :] @ params.Sigma_inv * v_t).sum(axis=1)  # (K,)
 
         # Stage cost vectorized over K
         sc = jax.vmap(stage_cost, in_axes=(0, 0, None))(x, u_t, params)             # (K,)
@@ -209,9 +201,8 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
         key:            updated PRNG key
         trajs:          (K, T, 2)    sampled position trajectories
         opt_traj:       (T, dim_x)   optimal (weighted) full-state trajectory
-        spatial_median: (T, 2)       temporal median of sampled position trajectories
-                                     — Phase 2 hook: broadcast to other robots to
-                                       drive Stein-flow repulsion across the team.
+        trajectory_surrogate: (T, 2) temporal median of sampled position trajectories,
+                                     used as a trajectory surrogate in the flow objective.
         w:              (K,)         normalized importance weights (for ESS adaptation)
     """
     eps, key = sample_epsilon(key, params)  # (K,T,dim_u)
@@ -226,46 +217,46 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
     )
 
     spatial_trajs = trajs[:, :, :2]  # (K,T,2)
-    spatial_median = jnp.median(spatial_trajs, axis=0)  # (T,2)
+    trajectory_surrogate = jnp.median(spatial_trajs, axis=0)  # (T,2)
 
-    # Median heuristic for kernel bandwidth: h = max(median(||xi-xj||²), h_floor)
-    diffs = spatial_median[:, None, :] - spatial_median[None, :, :]  # (T,T,2)
+    # Median heuristic for kernel bandwidth: ell = max(median(||xi-xj||²), ell_floor)
+    diffs = trajectory_surrogate[:, None, :] - trajectory_surrogate[None, :, :]  # (T,T,2)
     sq_dists = jnp.sum(diffs ** 2, axis=-1)                          # (T,T)
-    h_adapted = jnp.maximum(jnp.median(sq_dists), params.stein.h)   # floor = YAML h
-    stein_adapted = dataclasses.replace(params.stein, h=h_adapted)
-    params_h = dataclasses.replace(params, stein=stein_adapted)
+    ell_adapted = jnp.maximum(jnp.median(sq_dists), params.stein.ell_self)   # floor = YAML ell_self
+    stein_adapted = dataclasses.replace(params.stein, ell_self=ell_adapted)
+    params_ell = dataclasses.replace(params, stein=stein_adapted)
 
-    # h_self: repel from own planning trajectory + own position history
-    self_particles = jnp.concatenate([spatial_median, params_h.history], axis=0)  # (T+H, 2)
-    h_self = jax.vmap(stein_grad_state, in_axes=(0, None, None))(
-        spatial_median, self_particles, params_h.stein
+    # ell_self: repel from own planning trajectory + own position history
+    self_particles = jnp.concatenate([trajectory_surrogate, params_ell.history], axis=0)  # (T+H, 2)
+    ell_self = jax.vmap(stein_grad_state, in_axes=(0, None, None))(
+        trajectory_surrogate, self_particles, params_ell.stein
     )  # (T, 2)
 
-    # h_cross: repel from other robots' planning trajectories.
+    # ell_cross: repel from other robots' planning trajectories.
     # cross_particles_len is static → this branch is resolved at Python/trace time:
     # single-robot (len=0) compiles the else; multi-robot compiles the if.
     if params.cross_particles_len > 0:
-        h_cross = jax.vmap(stein_repulsion_state, in_axes=(0, None, None))( # ← was stein_grad_state
-            spatial_median, params_h.cross_particles, params_h.stein
+        ell_cross = jax.vmap(stein_repulsion_state, in_axes=(0, None, None))( # ← was stein_grad_state
+            trajectory_surrogate, params_ell.cross_particles, params_ell.stein
         )
-        h_target = h_self + params_h.stein.cross_alpha * h_cross
+        h_target = ell_self + params_ell.stein.alpha_cross * ell_cross
     else:
-        h_target = h_self
+        h_target = ell_self
 
     S_flow = -jnp.einsum('ktn,tn->k', spatial_trajs, h_target)
 
-    logp = jax.vmap(
-        lambda traj_pos: jax.vmap(
-            lambda x: logpdf(x, params_h.stein)
-        )(traj_pos)
-    )(spatial_trajs)
+    # logp = jax.vmap(
+    #     lambda traj_pos: jax.vmap(
+    #         lambda x: logpdf(x, params_h.stein)
+    #     )(traj_pos)
+    # )(spatial_trajs)
 
-    # Equivalent to stage-wise cost
-    S_pdf = -jnp.sum(logp, axis=1)
+    # # Equivalent to stage-wise cost
+    # S_pdf = -jnp.sum(logp, axis=1)
     S = (
         S
-        + params.stein.weight * S_flow
-        + params.stein.weight_pdf  * S_pdf
+        + params.stein.weight_stein * S_flow
+        # + params.stein.weight_pdf  * S_pdf
     )
 
     rho = jnp.min(S)
@@ -284,4 +275,4 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
 
     u0 = U.at[0].get()
     U_next = shift_U(U)
-    return u0, U_next, key, trajs, opt_traj, spatial_median, w
+    return u0, U_next, key, trajs, opt_traj, trajectory_surrogate, w

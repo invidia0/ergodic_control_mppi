@@ -1,32 +1,35 @@
-seed: 43 # 0, 42, 99, 35, 213
-
+# Run-level settings
+seed: 43
 steps: 5000
 
+# Multi-robot toggle: set to 1 for single-robot mode.
 robots:
-  num_robots: 6  # Phase 2: each robot will broadcast its spatial_median to the others
+  num_robots: 6
 
+# MPPI controller settings
 mppi:
-  T: 50 # Default for K_N is 30
-  K: 1000 # Default for T_K is 500
-  lambda: 1 # this is the temperature parameter higher = more exploration, lower = more exploitation
-  alpha: 0.2 # control cost weight, higher = less control effort, lower = more control effort
-  exploration: 0.1 # fraction of rollouts using nominal control
-  ess_target: 0.3  # target effective sample size fraction; lambda auto-tunes to hit this
-  lam_min: 0.05    # minimum allowed temperature
-  lam_max: 20.0    # maximum allowed temperature
-  history_len: 100 # past robot positions fed to the Stein particle set; larger = more balanced coverage
+  T: 50
+  K: 1000
+  lambda: 1.0
+  alpha: 0.2        # control-cost scaling term in MPPI importance weighting
+  exploration: 0.1  # fraction of rollouts that ignore warm-start controls
+  ess_target: 0.3   # target effective sample size fraction for adaptive lambda
+  lam_min: 0.05
+  lam_max: 20.0
+  history_len: 100  # length of executed-position history included in Stein particles
   dim_x: 6
   dim_u: 3
   noise:
     sigma:
-      - [6, 0.0, 0.0] # linear x
-      - [0.0, 6, 0.0] # linear y
-      - [0.0, 0.0, 3] # angular
+      - [6.0, 0.0, 0.0]  # linear x
+      - [0.0, 6.0, 0.0]  # linear y
+      - [0.0, 0.0, 3.0]  # angular
 
+# Map and obstacle costs
 map:
   x_limits: [-10.0, 10.0]
   y_limits: [-10.0, 10.0]
-  resolution: 0.2
+  resolution: 0.2  # visualization grid resolution
   oom_cost: 1e8
 
   obstacles:
@@ -38,33 +41,32 @@ map:
     weight: 1e8
     safe_distance: 0.3
 
+# Target density p(x): Gaussian mixture in R^2
 density:
   weights:
     - 0.33333334
     - 0.33333334
     - 0.33333334
   means:
-    - [0.0, 6.0]      # Top center
-    - [-6.0, -4.0]    # Bottom left
-    - [6.0, -4.0]     # Bottom right
+    - [0.0, 6.0]
+    - [-6.0, -4.0]
+    - [6.0, -4.0]
   covariances:
-    - [[3.0, 0.0], [0.0, 2.0]]   # Horizontal ellipse
-    - [[2.0, 1.0], [1.0, 3.0]]   # Tilted
-    - [[2.0, -1.0], [-1.0, 3.0]] # Tilted opposite
+    - [[3.0, 0.0], [0.0, 2.0]]
+    - [[2.0, 1.0], [1.0, 3.0]]
+    - [[2.0, -1.0], [-1.0, 3.0]]
 
+# Stein flow settings
 stein:
-  weight: 45.0  # = old_weight(3.0) × |A_old|(4.27); compensates for unit-scale R(θ)
+  weight_stein: 45.0
   weight_pdf: 0.0
-  h: 1.0        # self-term bandwidth floor; adapted upward by median heuristic at runtime
-  h_cross: 1.0 # cross-term bandwidth (fixed); sqrt(h_cross) ≈ separation radius in metres (~4m)
-  theta: 55.0     # degrees — mixing angle: 0° = pure score-descent, 90° = pure rotation
-                # equivalent to old drift.sigma=3.0, stein.gamma=4.0
-                # good range for multi-modal GMMs: 45°–75°
-  cross_alpha: 50.0  # weight for inter-robot h_cross term (0 = off, increase for stronger separation)
-  history_alpha: 50.0  # weight for own history pure-repulsion (like cross_alpha but for self-history)
+  ell_self: 1.0        # self bandwidth floor; runtime uses median heuristic with this floor
+  ell_x: 20.0  # fixed cross-robot bandwidth; sqrt(ell_x) is an interaction distance scale
+  alpha_cross: 10.0 # scaling on cross-robot Stein gradient
+  theta: 55.0   # degrees: 0 = pure score-descent, 90 = pure curl
 
 model:
-  delta_t: 0.02 # source of truth for timestep used by both model and MPPI runtime params
+  delta_t: 0.02  # source of truth for integration timestep
   double_integrator:
-    max_accel_lin_abs: 15.0 # m/s²
-    max_accel_ang_abs: 15.0 # rad/s²
+    max_accel_lin_abs: 15.0
+    max_accel_ang_abs: 15.0
