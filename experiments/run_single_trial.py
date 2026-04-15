@@ -36,14 +36,20 @@ def _apply_controller_overrides(params, overrides: dict[str, Any]):
         kwargs["alpha_cross"] = float(overrides.get("alpha_cross"))
     if "ell_x" in overrides:
         kwargs["ell_x"] = float(overrides.get("ell_x"))
-    if "weight_stein_values" in overrides:
-        kwargs["weight_stein"] = float(overrides.get("weight_stein_values"))
+    if "weight_stein" in overrides:
+        kwargs["weight_stein"] = float(overrides.get("weight_stein"))
     if "theta" in overrides:
         kwargs["A"] = _rotation_from_theta(float(overrides["theta"]))
 
     if kwargs:
         stein = dataclasses.replace(stein, **kwargs)
         params = dataclasses.replace(params, stein=stein)
+
+    if "horizon" in overrides:
+        horizon = int(overrides["horizon"])
+        if horizon < 1:
+            raise ValueError("horizon must be >= 1")
+        params = dataclasses.replace(params, T=horizon)
 
     if "history_window" in overrides or "history_len" in overrides:
         history_len = int(overrides.get("history_window", overrides.get("history_len")))
@@ -109,7 +115,7 @@ def run_single_trial(
 
     t0 = time.perf_counter()
     robot_paths = _run_controller(params, seed=seed, team_size=team_n, steps=n_steps)
-    runtime_ms = (time.perf_counter() - t0) * 1000.0 / n_steps // team_n
+    runtime_ms = (time.perf_counter() - t0) * 1000.0
 
     trial_data = TrialData(
         robot_paths=robot_paths,

@@ -4,11 +4,11 @@ steps: 5000
 
 # Multi-robot toggle: set to 1 for single-robot mode.
 robots:
-  num_robots: 6
+  num_robots: 3
 
 # MPPI controller settings
 mppi:
-  T: 50
+  T: 300
   K: 1000
   lambda: 1.0
   alpha: 0.2        # control-cost scaling term in MPPI importance weighting
@@ -16,7 +16,7 @@ mppi:
   ess_target: 0.3   # target effective sample size fraction for adaptive lambda
   lam_min: 0.05
   lam_max: 20.0
-  history_len: 100  # length of executed-position history included in Stein particles
+  history_len: 500  # length of executed-position history included in Stein particles
   dim_x: 6
   dim_u: 3
   noise:
@@ -58,12 +58,12 @@ density:
 
 # Stein flow settings
 stein:
-  weight_stein: 45.0
+  weight_stein: 10000.0
   weight_pdf: 0.0
-  ell_self: 1.0        # self bandwidth floor; runtime uses median heuristic with this floor
-  ell_x: 20.0  # fixed cross-robot bandwidth; sqrt(ell_x) is an interaction distance scale
-  alpha_cross: 10.0 # scaling on cross-robot Stein gradient
-  theta: 55.0   # degrees: 0 = pure score-descent, 90 = pure curl
+  ell_self: 4.0        # self bandwidth floor; runtime uses median heuristic with this floor
+  ell_x: 4.0  # fixed cross-robot bandwidth; sqrt(ell_x) is an interaction distance scale
+  alpha_cross: 5.0 # scaling on cross-robot Stein gradient
+  theta: 45.0   # degrees: 0 = pure score-descent, 90 = pure curl
 
 model:
   delta_t: 0.02  # source of truth for integration timestep

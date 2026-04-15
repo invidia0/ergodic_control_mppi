@@ -226,15 +226,15 @@ key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array, jnp.ndarray, jnp.n
     stein_adapted = dataclasses.replace(params.stein, ell_self=ell_adapted)
     params_ell = dataclasses.replace(params, stein=stein_adapted)
 
-    # ell_self: repel from own planning trajectory + own position history
-    self_particles = jnp.concatenate([trajectory_surrogate, params_ell.history], axis=0)  # (T+H, 2)
+    # ell_self: interact only with the current planning surrogate.
+    self_particles = trajectory_surrogate  # (T, 2)
     ell_self = jax.vmap(stein_grad_state, in_axes=(0, None, None))(
         trajectory_surrogate, self_particles, params_ell.stein
     )  # (T, 2)
 
-    # ell_cross: repel from other robots' planning trajectories.
+    # ell_cross: repel from cross particles (other robots and/or executed history).
     # cross_particles_len is static → this branch is resolved at Python/trace time:
-    # single-robot (len=0) compiles the else; multi-robot compiles the if.
+    # zero length compiles the else; nonzero compiles the if.
     if params.cross_particles_len > 0:
         ell_cross = jax.vmap(stein_repulsion_state, in_axes=(0, None, None))( # ← was stein_grad_state
             trajectory_surrogate, params_ell.cross_particles, params_ell.stein

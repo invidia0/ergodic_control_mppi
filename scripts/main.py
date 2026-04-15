@@ -13,6 +13,10 @@ import matplotlib.patheffects as pe
 from matplotlib.patches import Circle
 from configs import params_loader
 
+from metrics.ergodicity import (
+    compute_cumulative_team_ergodic_error,
+    compute_team_occupancy_grid,
+)
 from mppi.core import mppi_step
 from models import double_integrator as model
 from mppi.stein import pdf
@@ -30,7 +34,7 @@ def _adapt_lam(lam: jnp.ndarray, w: jnp.ndarray, params) -> jnp.ndarray:
 # Check for CUDA availability
 cpu = jax.devices("cpu")[0]
 try:
-    gpu = jax.devices("cuda")[0]
+    gpu = jax.devices("gpu")[0]
     print(f"[INFO] CUDA device found: {gpu}")
 except (RuntimeError, ValueError, IndexError) as exc:
     gpu = cpu
@@ -49,12 +53,22 @@ def closed_loop(params, x0, U0, key, N: int):
     init_opt_traj = jnp.zeros((params.T, params.dim_x), dtype=jnp.float32)
     init_surrogate = jnp.zeros((params.T, 2), dtype=jnp.float32)
     init_lam = jnp.asarray(params.lam, dtype=jnp.float32)
-    # Seed history with start position so the robot is repelled from it from step 0
+    # Seed history with start position for cross-repulsion from step 0.
     init_history = jnp.broadcast_to(x0[:2], (params.history_len, 2))  # (H, 2)
+    params_base = dataclasses.replace(
+        params,
+        cross_particles_len=params.history_len,
+        cross_particles=jnp.zeros((params.history_len, 2), dtype=jnp.float32),
+    )
 
     def one_step(carry, _):
         x, U_prev, key, lam, history, _, _, _ = carry
-        p = dataclasses.replace(params, lam=lam, history=history)
+        p = dataclasses.replace(
+            params_base,
+            lam=lam,
+            history=history,
+            cross_particles=history,
+        )
         u0, U_next, key_next, trajs, opt_traj, traj_surrogate, w = mppi_step(p, U_prev, x, key)
         lam_next = _adapt_lam(lam, w, params)
         history_next = jnp.roll(history, shift=-1, axis=0).at[-1].set(x[:2])
@@ -194,6 +208,15 @@ def _pdf_background(params):
     return np.array(gx), np.array(gy), np.array(gp)
 
 
+def _as_team_paths(paths):
+    arr = np.asarray(paths)
+    if arr.ndim == 2:
+        return arr[:, None, :]
+    if arr.ndim == 3:
+        return arr
+    raise ValueError("paths must have shape (N, dim_x) or (N, R, dim_x)")
+
+
 def setup_canvas(fig, ax, params):
     plt.rcParams.update({'font.size': 12, 'font.family': 'serif'})
     plt.rcParams['mathtext.fontset'] = 'cm'
@@ -221,78 +244,79 @@ def _draw_obstacles(ax, params):
         ax.add_patch(edge)
 
 
-def visualize(params, path=None, trajs=None, opt_traj=None):
-    """Single-robot visualization (original)."""
-    gx, gy, gp = _pdf_background(params)
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    fig, ax = setup_canvas(fig, ax, params)
-    ax.contourf(gx, gy, gp, cmap='Blues', alpha=0.8)
-    _draw_obstacles(ax, params)
+def visualize_three_panel(params, paths_all, last_opt_trajs, num_robots):
+    """3-panel visualization for single and multi-robot runs."""
+    paths_np = _as_team_paths(np.array(paths_all))       # (N, R, dim_x)
+    opt_np = np.array(last_opt_trajs)                    # (R, T, 2)
 
-    if path is not None:
-        ax.plot(path[:, 0], path[:, 1], color='black', alpha=0.8, linewidth=2,
-                zorder=4, label='Path')
-        ax.scatter(path[-1, 0], path[-1, 1], color='tab:red', marker='.', s=100,
-                   label='End', zorder=5)
-
-    if trajs is not None:
-        for traj in trajs:
-            ax.plot(traj[:, 0], traj[:, 1], color='gray', alpha=0.1, zorder=3)
-
-    if opt_traj is not None:
-        ax.plot(opt_traj[:, 0], opt_traj[:, 1], color='tab:red', alpha=1,
-                linewidth=2, zorder=4, label='Opt. Trajectory')
-
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
-
-
-def visualize_multi(params, paths_all, last_opt_trajs, num_robots):
-    """
-    Multi-robot visualization.
-
-    Args:
-        params:          MPPIParams
-        paths_all:       (N, R, dim_x)  executed trajectories for all robots
-        last_opt_trajs:  (R, T, 2)      final optimal position trajectories
-        num_robots:      R
-    """
     gx, gy, gp = _pdf_background(params)
     cmap = plt.cm.get_cmap('tab10', num_robots)
+    gp_sum = float(np.sum(gp))
+    target_grid = gp / gp_sum if gp_sum > 0.0 else np.zeros_like(gp)
+    bins = (target_grid.shape[1], target_grid.shape[0])  # (x_bins, y_bins)
 
-    fig, ax = plt.subplots(figsize=(7, 5.5))
-    fig, ax = setup_canvas(fig, ax, params)
-    ax.contourf(gx, gy, gp, cmap='Blues', alpha=0.8)
-    _draw_obstacles(ax, params)
+    x_limits = (float(params.map_x_limits[0]), float(params.map_x_limits[1]))
+    y_limits = (float(params.map_y_limits[0]), float(params.map_y_limits[1]))
+    occupancy = compute_team_occupancy_grid(
+        paths_np, x_limits, y_limits, bins=bins
+    )
+    ergodic_series = compute_cumulative_team_ergodic_error(
+        paths_np, target_grid, x_limits, y_limits, bins=bins
+    )
 
-    paths_np = np.array(paths_all)     # (N, R, dim_x)
-    opt_np = np.array(last_opt_trajs) # (R, T, 2)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+    ax_cov, ax_occ, ax_metric = axes
 
-    for i in range(num_robots):
-        color  = cmap(i)
-        path_i = paths_np[:, i, :]       # (N, dim_x)
+    fig, ax_cov = setup_canvas(fig, ax_cov, params)
+    ax_cov.contourf(gx, gy, gp, cmap='Blues', alpha=0.8)
+    _draw_obstacles(ax_cov, params)
 
-        ax.plot(path_i[:, 0], path_i[:, 1],
-                color=color, alpha=0.85, linewidth=1.5, zorder=4,
-                label=f'Robot {i}')
+    for i in range(paths_np.shape[1]):
+        color = cmap(i)
+        path_i = paths_np[:, i, :]
+        label = f'Robot {i}' if num_robots > 1 else 'Path'
+        ax_cov.plot(
+            path_i[:, 0], path_i[:, 1],
+            color=color, alpha=0.85, linewidth=1.5, zorder=4, label=label
+        )
+        ax_cov.scatter(
+            path_i[0, 0], path_i[0, 1],
+            color=color, marker='*', s=120, zorder=6,
+            edgecolors='white', linewidths=0.5
+        )
+        ax_cov.scatter(
+            path_i[-1, 0], path_i[-1, 1],
+            color=color, marker='o', s=60, zorder=6,
+            edgecolors='white', linewidths=0.5
+        )
+        ax_cov.plot(
+            opt_np[i, :, 0], opt_np[i, :, 1],
+            color=color, alpha=0.6, linewidth=2, linestyle='--', zorder=5
+        )
 
-        # Start marker (star)
-        ax.scatter(path_i[0, 0], path_i[0, 1],
-                   color=color, marker='*', s=150, zorder=6,
-                   edgecolors='white', linewidths=0.5)
+    title_suffix = f"({num_robots} robots)" if num_robots > 1 else "(single robot)"
+    ax_cov.set_title(f"Coverage View {title_suffix}")
+    ax_cov.legend(loc='upper right', fontsize=9)
 
-        # End marker (circle)
-        ax.scatter(path_i[-1, 0], path_i[-1, 1],
-                   color=color, marker='o', s=60, zorder=6,
-                   edgecolors='white', linewidths=0.5)
+    fig, ax_occ = setup_canvas(fig, ax_occ, params)
+    occ_im = ax_occ.imshow(
+        occupancy,
+        origin='lower',
+        extent=[x_limits[0], x_limits[1], y_limits[0], y_limits[1]],
+        cmap='magma',
+        alpha=0.95,
+    )
+    ax_occ.set_title("Final Empirical Density")
+    fig.colorbar(occ_im, ax=ax_occ, fraction=0.046, pad=0.04, label="Probability Mass")
 
-        # Final optimal trajectory (dashed)
-        ax.plot(opt_np[i, :, 0], opt_np[i, :, 1],
-                color=color, alpha=0.5, linewidth=2, linestyle='--', zorder=5)
+    steps = np.arange(1, ergodic_series.shape[0] + 1)
+    ax_metric.plot(steps, ergodic_series, color='tab:blue', linewidth=2)
+    ax_metric.set_xlabel("Step")
+    ax_metric.set_ylabel("Ergodic Error (MSE)")
+    ax_metric.set_yscale('log')
+    ax_metric.set_title("Ergodic Metric Over Time")
+    ax_metric.grid(True, alpha=0.3, linestyle='--')
 
-    ax.legend(loc='upper right', fontsize=9)
-    ax.set_title(f"Multi-Robot Ergodic Coverage ({num_robots} robots)")
     plt.tight_layout()
     plt.show()
 
@@ -330,9 +354,11 @@ def main():
         params = jax.device_put(params, gpu)
 
         print("Running single-robot closed-loop simulation...")
-        path, trajs, opt_traj = closed_loop_jit(params, x0, U_prev, key, N=N)
+        path, _trajs, opt_traj = closed_loop_jit(params, x0, U_prev, key, N=N)
         print("Done.")
-        visualize(params, path, trajs, opt_traj)
+        path_team = np.array(path)[:, None, :]                  # (N, 1, dim_x)
+        opt_team = np.array(opt_traj)[:, :2][None, :, :]       # (1, T, 2)
+        visualize_three_panel(params, path_team, opt_team, num_robots=1)
 
     else:
         # ---- Multi-robot path ----
@@ -351,11 +377,11 @@ def main():
         params = jax.device_put(params, gpu)
 
         print(f"Running multi-robot closed-loop simulation ({num_robots} robots)...")
-        paths_all, last_opt_trajs, last_surrogates = multi_robot_closed_loop_jit(
+        paths_all, last_opt_trajs, _last_surrogates = multi_robot_closed_loop_jit(
             params, x0_all, U0_all, sim_keys, num_robots=num_robots, N=N
         )
         print("Done.")
-        visualize_multi(params, paths_all, last_opt_trajs, num_robots)
+        visualize_three_panel(params, paths_all, last_opt_trajs, num_robots=num_robots)
 
 
 if __name__ == "__main__":

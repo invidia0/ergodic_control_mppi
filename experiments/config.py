@@ -16,6 +16,7 @@ class SweepConfig:
     weight_stein_values: list[float]
     theta_values: list[float]
     history_window_values: list[int]
+    horizon_values: list[int]
     num_seeds: int
     seeds: list[int] | None = None
 
@@ -31,15 +32,17 @@ class SweepConfig:
                 for weight_stein in self.weight_stein_values:
                     for theta in self.theta_values:
                         for history_window in self.history_window_values:
-                            rows.append(
-                                {
-                                    "alpha_cross": float(alpha_cross),
-                                    "ell_x": float(ell_x),
-                                    "weight_stein": float(weight_stein),
-                                    "theta": float(theta),
-                                    "history_window": int(history_window),
-                                }
-                            )
+                            for horizon in self.horizon_values:
+                                rows.append(
+                                    {
+                                        "alpha_cross": float(alpha_cross),
+                                        "ell_x": float(ell_x),
+                                        "weight_stein": float(weight_stein),
+                                        "theta": float(theta),
+                                        "history_window": int(history_window),
+                                        "horizon": int(horizon),
+                                    }
+                                )
         return rows
 
 
@@ -69,6 +72,7 @@ def load_sweep_config(path: str | Path) -> SweepConfig:
         weight_stein_values=[float(x) for x in _as_list(cfg, "weight_stein_values", [20.0, 45.0])],
         theta_values=[float(x) for x in _as_list(cfg, "theta_values", [45.0, 60.0])],
         history_window_values=[int(x) for x in _as_list(cfg, "history_window_values", [50, 100])],
+        horizon_values=[int(x) for x in _as_list(cfg, "horizon_values", [100, 150, 250])],
         num_seeds=int(cfg.get("num_seeds", 3)),
         seeds=[int(x) for x in seeds] if seeds is not None else None,
     )

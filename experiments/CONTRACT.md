@@ -50,9 +50,10 @@ Output of one sweep:
 
 - `alpha_cross` (maps to runtime `stein.alpha_cross`)
 - `ell_x` (maps to runtime `stein.ell_x`)
-- `weight_stein_values` (maps to runtime `stein.weight_stein`)
+- `weight_stein` (maps to runtime `stein.weight_stein`)
 - `theta` (maps to runtime Stein rotation angle in degrees)
 - `history_window` (maps to runtime `mppi.history_len`)
+- `horizon` (maps to runtime `mppi.T`)
 
 ## Seed Handling
 

@@ -13,7 +13,7 @@ def _load_rows(csv_path: str | Path) -> list[dict[str, str]]:
 
 
 def plot_alpha_ellx_heatmap(
-    csv_path: str = "results/sweeps/open_multimodal.csv",
+    csv_path: str = "results/dars2026/sweeps/open_multimodal.csv",
     metric: str = "team_ergodic_error",
 ) -> None:
     rows = _load_rows(csv_path)

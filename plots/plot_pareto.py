@@ -13,7 +13,7 @@ def _load_rows(csv_path: str | Path) -> list[dict[str, str]]:
 
 
 def plot_pareto_scatter(
-    csv_path: str = "results/sweeps/open_multimodal.csv",
+    csv_path: str = "results/dars2026/sweeps/open_multimodal.csv",
     x_metric: str = "pairwise_overlap",
     y_metric: str = "team_ergodic_error",
     color_metric: str = "safety_metric",
@@ -30,6 +30,8 @@ def plot_pareto_scatter(
     sc = plt.scatter(x, y, c=c, cmap="viridis", alpha=0.85)
     plt.xlabel(x_metric)
     plt.ylabel(y_metric)
+    # Set y axis to log scale if the range is large
+    plt.yscale("log")
     plt.title("Pareto Scatter")
     cb = plt.colorbar(sc)
     cb.set_label(color_metric)

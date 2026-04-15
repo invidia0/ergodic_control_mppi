@@ -28,7 +28,8 @@ The single-robot controller follows the paper's flow-matching MPPI idea:
 
 - sampled rollouts induce a predicted spatial trajectory surrogate
 - the surrogate is used to build a Stein target flow toward the GMM density
-- the robot is also repelled from its own predicted waypoints and recent executed positions
+- the robot is repelled from its current predicted waypoints (`ell_self`)
+- recent executed positions are injected as cross particles (`ell_cross`) to reduce looping
 - the resulting flow is added as an MPPI rollout cost
 
 In code, the surrogate is the temporal median of sampled spatial rollouts (returned as `trajectory_surrogate`), and not the arithmetic mean trajectory used in the paper derivation. The rest of the mechanism is the same: the surrogate defines the self particle set and the flow cost biases sampling toward ergodic coverage.
