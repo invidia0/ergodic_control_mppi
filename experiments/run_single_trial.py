@@ -100,6 +100,7 @@ def run_single_trial(
     seed: int,
     team_size: int | None = None,
     steps: int | None = None,
+    pairwise_d_thresh: float = 1.0,
 ) -> dict[str, float | int | str]:
     """
     Run one trial and return a flat scalar row.
@@ -133,7 +134,10 @@ def run_single_trial(
         },
     )
 
-    metrics = compute_all_metrics(trial_data)
+    metrics = compute_all_metrics(
+        trial_data,
+        pairwise_d_thresh=pairwise_d_thresh,
+    )
     row: dict[str, float | int | str] = {
         "scenario_name": scenario.name,
         "seed": int(seed),
@@ -146,4 +150,3 @@ def run_single_trial(
             row[key] = value
     row.update(metrics)
     return row
-

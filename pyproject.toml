@@ -9,6 +9,7 @@ dependencies = [
     "jax[cuda12]",
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",
+    "optuna>=4.5.0",
     "tqdm>=4.67.1",
     "pyyaml>=6.0",
     "pyqt6>=6.10.2",

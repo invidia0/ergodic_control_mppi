@@ -32,6 +32,9 @@ Output of one trial:
   - `pairwise_overlap` (minimize)
   - `safety_metric` (minimize)
   - `redundancy_metric` (minimize)
+- optional additional metric keys:
+  - `R_pair` (mean close-pair count over time)
+  - `D_min_pair` (minimum pairwise spacing over time)
 
 ## Sweep Output
 

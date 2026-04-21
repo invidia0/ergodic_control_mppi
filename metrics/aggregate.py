@@ -7,6 +7,7 @@ import numpy as np
 from experiments.trial_types import TrialData
 from metrics.ergodicity import compute_team_ergodic_error
 from metrics.overlap import compute_pairwise_overlap
+from metrics.pairwise import compute_pairwise_min_distance, compute_pairwise_redundancy
 from metrics.safety import compute_safety_metric
 from metrics.redundancy import compute_redundancy_metric
 
@@ -36,7 +37,10 @@ def _to_trial_data(trial_data: TrialData | Mapping[str, Any]) -> TrialData:
     )
 
 
-def compute_all_metrics(trial_data: TrialData | Mapping[str, Any]) -> dict[str, float]:
+def compute_all_metrics(
+    trial_data: TrialData | Mapping[str, Any],
+    pairwise_d_thresh: float = 1.0,
+) -> dict[str, float]:
     """
     Aggregate all scalar metrics for one trial.
     """
@@ -63,5 +67,9 @@ def compute_all_metrics(trial_data: TrialData | Mapping[str, Any]) -> dict[str, 
             td.map_x_limits,
             td.map_y_limits,
         ),
+        "R_pair": compute_pairwise_redundancy(
+            td.robot_paths,
+            d_thresh=pairwise_d_thresh,
+        ),
+        "D_min_pair": compute_pairwise_min_distance(td.robot_paths),
     }
-
