@@ -1,16 +1,20 @@
 [project]
 name = "ergodic_control_mppi"
 version = "0.1.0"
-description = "Add your description here"
+description = "Flow-matching MPPI for single- and multi-robot ergodic coverage"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "ipykernel>=7.1.0",
-    "jax[cuda12]",
+    "jax",
     "matplotlib>=3.10.8",
-    "numpy>=2.2.6",
-    "optuna>=4.5.0",
-    "tqdm>=4.67.1",
+    "numpy>=2.2.6,<2.4",
     "pyyaml>=6.0",
-    "pyqt6>=6.10.2",
 ]
+
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]"]
+experiments = ["optuna>=4.5.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,54 +1,108 @@
 # Repository Guidelines
 
-## Purpose
+## Purpose and supported paths
 
-This repository implements flow-matching MPPI for ergodic coverage with:
+This repository implements flow-matching MPPI for ergodic coverage with one
+shared JAX numerical core and two closed-loop orchestrators:
 
-- a single-robot path
-- a decentralized multi-robot path aligned with the DARS 2026 paper in [`DARS2026_paper.pdf`](/home/mmantovani/Projects/ergodic_control_mppi/DARS2026_paper.pdf)
+- `ergodic_control_mppi.mppi.single.run_single` for one robot.
+- `ergodic_control_mppi.mppi.multi.run_multi` for synchronous decentralized
+  teams. Each robot exchanges its median predicted position trajectory and
+  executed-position history; cross-robot Stein interactions use only the
+  repulsive kernel-gradient term.
 
-The main runnable entrypoint is [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py). Mode selection is driven by `robots.num_robots` in [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml).
+`ergodic_control_mppi.simulation.run_simulation` owns configuration-to-runtime
+dispatch, state initialization, device placement, and conversion to NumPy.
+`scripts/main.py` is the user-facing simulation command. The value of
+`robots.num_robots` in `configs/mppi_params.yaml` selects single or multi mode.
 
-## Architecture
+## Package architecture and data flow
 
-- [`configs/params_loader.py`](/home/mmantovani/Projects/ergodic_control_mppi/configs/params_loader.py) is the configuration entrypoint. It validates YAML and constructs immutable runtime dataclasses.
-- [`models/double_integrator.py`](/home/mmantovani/Projects/ergodic_control_mppi/models/double_integrator.py) owns only the system dynamics and control clamping.
-- [`mppi/core.py`](/home/mmantovani/Projects/ergodic_control_mppi/mppi/core.py) contains the functional MPPI implementation, rollout scoring, adaptive Stein bandwidth handling, and the flow-matching cost integration.
-- [`mppi/stein.py`](/home/mmantovani/Projects/ergodic_control_mppi/mppi/stein.py) is the source of truth for the target density, score function, kernel, and Stein interaction operators.
-- [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py) contains the closed-loop simulation paths, device selection, and plotting for both single and multi-robot runs.
+- `ergodic_control_mppi/config.py` reads and validates one YAML document into
+  an immutable `AppConfig`.
+- `ergodic_control_mppi/parameters.py` defines JAX-compatible controller
+  parameters and typed experiment variants. Runtime histories, surrogates,
+  keys, and controls are loop state, not parameters.
+- `ergodic_control_mppi/models/double_integrator.py` owns the fixed 6-state,
+  3-control dynamics and batch-compatible clamping.
+- `ergodic_control_mppi/mppi/stein.py` owns analytic GMM density/score and RBF
+  Stein interactions.
+- `ergodic_control_mppi/mppi/core.py` owns functional sampling, rollouts,
+  costs, adaptive bandwidth, importance weighting, and `mppi_step`.
+- `ergodic_control_mppi/mppi/{single,multi}.py` own the JAX closed-loop scans.
+- `ergodic_control_mppi/metrics/` owns experiment-independent metric inputs
+  and metric calculation.
+- `ergodic_control_mppi/experiments/` owns scenario construction, typed
+  controller variants, trial execution, CSV output, BO, ablations,
+  sensitivity, and literature comparisons.
+- `ergodic_control_mppi/plotting/` owns interactive simulation and publication
+  plotting. Controller modules never import plotting.
 
-## Working Rules
+Runtime flow is YAML -> `load_config` -> `AppConfig` -> `run_simulation` ->
+`run_single` or `run_multi` -> normalized `SimulationResult.paths` with shape
+`(N, R, 6)`. Experiment runners use the same simulation path and pass a
+`TrialData` value to metrics before writing stable flat CSV rows.
 
-- Keep JAX parameter containers immutable and tree-compatible. Prefer `dataclasses.replace(...)` when changing nested runtime parameters.
-- Preserve the existing shape contracts. Core examples:
-  - state: `(dim_x,)`
-  - control horizon: `(T, dim_u)`
-  - sampled trajectories: `(K, T, ...)`
-  - robot batches: `(R, ...)`
-  - obstacle arrays: `(num_obstacles, 3)`
-- Keep `mppi/core.py` and `mppi/stein.py` side-effect free inside `jax.jit`, `jax.vmap`, and `jax.lax.scan` paths.
-- Preserve `jax.config.update("jax_enable_x64", False)` unless the task is explicitly about numeric precision.
-- Do not assume CUDA is available. Runtime behavior must continue to work on CPU-only machines.
-- Preserve the script-friendly import pattern in [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py) unless entrypoints are being reorganized consistently across the repo.
+## Shape and numerical contracts
+
+- State: `(6,)`, ordered `[px, py, vx, vy, yaw, yaw_rate]`.
+- Control: `(3,)`, ordered `[ax, ay, angular_acceleration]`.
+- Nominal control horizon: `(T, 3)`; robot batch: `(R, T, 3)`.
+- Sampled controls/positions: `(K, T, 3)` and `(K, T, 2)`.
+- Single path: `(N, 6)` internally; multi path: `(N, R, 6)`.
+- Public simulation and metric paths: `(N, R, 6)`.
+- Obstacles: `(num_obstacles, 3)` as `(x, y, radius)`, including `(0, 3)`.
+- Shared multi-robot particles per robot: `((R-1) * (T + H), 2)`.
+
+Keep parameter dataclasses frozen and JAX-tree-compatible. Only
+shape-controlling integers may be static JAX fields. Use `dataclasses.replace`
+for nested variants. Keep core functions side-effect free under `jax.jit`,
+`jax.vmap`, and `jax.lax.scan`. Preserve
+`jax.config.update("jax_enable_x64", False)`. CPU-only execution is mandatory;
+device discovery belongs only in `simulation.py`.
+
+## Configuration and experiment contracts
+
+`configs/` contains YAML only. The fixed model dimensions are not YAML knobs.
+Active controller keys are those validated by `load_config`; do not document
+or silently accept removed keys such as `mppi.dim_x`, `mppi.dim_u`, or
+`stein.weight_pdf`.
+
+Experiment CSV field names are public contracts. Existing CSVs remain
+readable, runs do not regenerate old numerical results, and destructive
+runners must refuse to replace outputs unless `--overwrite` is supplied.
+Optuna is optional and imported only by BO code. Literature baselines reuse
+the package dynamics equations.
+
+## Supported commands
+
+Run from the repository root:
+
+```bash
+uv run python scripts/main.py [--config PATH] [--device auto|cpu|gpu] [--no-plot]
+uv run python -m ergodic_control_mppi.experiments.bo --help
+uv run python -m ergodic_control_mppi.experiments.ablations --help
+uv run python -m ergodic_control_mppi.experiments.sensitivity --help
+uv run python -m ergodic_control_mppi.experiments.literature --help
+uv run python -m compileall ergodic_control_mppi scripts tests
+JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests -v
+uv lock --check
+```
+
+## Refactor boundaries
+
+- Preserve active YAML semantics, array shapes, CPU fallback, and experiment
+  CSV schemas except for explicitly removed inactive fields.
+- Preserve the implemented Stein/MPPI objective. Do not retune it or claim a
+  theoretical audit against an unavailable paper.
+- Correct adaptive-temperature control-cost coupling, initial multi-robot
+  surrogates, BO error headers, and equivalent analytic derivatives.
+- Do not add legacy import shims, a performance benchmark, or a latency gate.
+- Documentation may mention only files, commands, parameters, and outputs that
+  exist in the current tree and are wired into runtime.
 
 ## Validation
 
-There is no automated test suite in the current repository snapshot.
-
-Use the smallest relevant validation step for a change:
-
-```bash
-uv run python -m compileall configs models mppi scripts
-```
-
-For runtime smoke testing, run:
-
-```bash
-uv run python scripts/main.py
-```
-
-## Documentation Rules
-
-- `README.md` and `AGENTS.md` must only mention files, commands, and parameters that exist and are wired into the current runtime.
-- When documenting the multi-robot controller, describe it in implementation-first terms and then map it to the paper theory.
-- Do not present inactive config keys as supported public interface.
+Use `unittest`; do not add a test framework. Every nontrivial numerical or
+validation change needs the smallest runnable regression test. Plot tests use
+a noninteractive backend and temporary output paths.

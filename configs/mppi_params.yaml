@@ -17,8 +17,6 @@ mppi:
   lam_min: 0.05
   lam_max: 20.0
   history_len: 1000  # length of executed-position history included in Stein particles
-  dim_x: 6
-  dim_u: 3
   noise:
     sigma:
       - [6.0, 0.0, 0.0]  # linear x
@@ -59,7 +57,6 @@ density:
 # Stein flow settings
 stein:
   weight_stein: 2228.2492276014987
-  weight_pdf: 0.0
   ell_self: 4.0        # self bandwidth floor; runtime uses median heuristic with this floor
   ell_x: 16.565452675970764  # fixed cross-robot bandwidth; sqrt(ell_x) is an interaction distance scale
   alpha_cross: 12.633417458693733 # scaling on cross-robot Stein gradient

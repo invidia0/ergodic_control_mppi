@@ -1,146 +1,122 @@
 # Ergodic Control MPPI
 
-JAX implementation of flow-matching Model Predictive Path Integral control for ergodic coverage with a Gaussian mixture target density. The repository supports both:
+JAX implementation of flow-matching Model Predictive Path Integral control for
+ergodic coverage of a Gaussian-mixture target density. One numerical core
+supports a single robot and synchronous decentralized robot teams.
 
-- single-robot ergodic exploration
-- decentralized multi-robot ergodic exploration following the formulation in [`DARS2026_paper.pdf`](/home/mmantovani/Projects/ergodic_control_mppi/DARS2026_paper.pdf)
+## Implementation
 
-The runtime path is selected through `robots.num_robots` in [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml).
+At every control step, the controller samples `mppi.K` noisy control sequences
+over `mppi.T` steps, integrates the fixed six-state double integrator, and
+scores obstacle, map-boundary, MPPI control, and Stein flow-matching costs. The
+weighted update becomes the next receding-horizon control sequence.
 
-## Overview
+The package separates numerical code from orchestration:
 
-At each control step, MPPI samples `K` noisy control sequences over a horizon `T`, rolls them through the double-integrator dynamics, scores them, and updates the nominal control using importance weights.
+| Path | Responsibility |
+|---|---|
+| `ergodic_control_mppi/config.py` | One-pass YAML loading and validation |
+| `ergodic_control_mppi/parameters.py` | Immutable JAX parameter trees and typed experiment variants |
+| `ergodic_control_mppi/models/double_integrator.py` | Batch-compatible 6-state/3-control dynamics |
+| `ergodic_control_mppi/mppi/core.py` | Sampling, rollout costs, Stein integration, and MPPI update |
+| `ergodic_control_mppi/mppi/stein.py` | Analytic GMM score, RBF gradient, and Stein interactions |
+| `ergodic_control_mppi/mppi/single.py` | Single-robot closed-loop scan |
+| `ergodic_control_mppi/mppi/multi.py` | Vectorized synchronous multi-robot scan |
+| `ergodic_control_mppi/simulation.py` | Device selection, initialization, dispatch, and NumPy results |
+| `ergodic_control_mppi/metrics/` | Ergodicity and coordination metrics |
+| `ergodic_control_mppi/experiments/` | BO, ablations, sensitivity, and literature comparisons |
+| `ergodic_control_mppi/plotting/` | Simulation and publication figures |
 
-The rollout cost combines:
+`run_simulation(...)` always returns paths with shape `(steps, robots, 6)`.
+Internally, `run_single(...)` uses `(steps, 6)` and `run_multi(...)` uses
+`(steps, robots, 6)`. Obstacles have shape `(num_obstacles, 3)` and may be
+empty.
 
-- obstacle and out-of-map penalties
-- the standard MPPI control-cost cross term
-- a flow-matching ergodic term built from Stein interactions with the target density
-- an optional target log-density term
+## Multi-robot behavior and theory mapping
 
-The controller runs on CPU and also uses CUDA when JAX can acquire a CUDA device.
+The implementation is decentralized in its controller state: each robot owns
+its MPPI controls, key, temperature, executed-position history, and predicted
+trajectory surrogate. Robots update synchronously. Before each update, every
+robot receives the other robots' previous surrogates and histories as Stein
+cross particles.
 
-## Theory to Code
+The shared surrogate is the temporal median of sampled position rollouts. Its
+self interaction contains the target-density score and kernel gradient. The
+cross-robot interaction retains only the rotated kernel-gradient repulsion,
+scaled by `stein.alpha_cross`; it does not add another target-attraction term.
+This is the implementation's mapping to the decentralized flow-matching
+theory. No unavailable paper artifact is required or claimed to have been
+re-audited.
 
-### Single robot
-
-The single-robot controller follows the paper's flow-matching MPPI idea:
-
-- sampled rollouts induce a predicted spatial trajectory surrogate
-- the surrogate is used to build a Stein target flow toward the GMM density
-- the robot is repelled from its current predicted waypoints (`ell_self`)
-- recent executed positions are injected as cross particles (`ell_cross`) to reduce looping
-- the resulting flow is added as an MPPI rollout cost
-
-In code, the surrogate is the temporal median of sampled spatial rollouts (returned as `trajectory_surrogate`), and not the arithmetic mean trajectory used in the paper derivation. The rest of the mechanism is the same: the surrogate defines the self particle set and the flow cost biases sampling toward ergodic coverage.
-
-### Multi robot
-
-The multi-robot path in [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py) is decentralized:
-
-- each robot runs its own MPPI loop
-- each robot shares a predicted spatial trajectory surrogate with the others
-- each robot appends other robots' shared trajectories and recent histories into `cross_particles`
-- the self term keeps the single-robot ergodic attraction to the target density
-- the cross term keeps only the kernel-gradient repulsion from other robots, matching the paper's decision to drop the foreign score contribution
-
-This maps directly to the paper's multi-robot formulation:
-
-- shared predicted trajectories induce coordination
-- repulsion acts across the whole prediction horizon, so robots avoid future overlap rather than only current positions
-- recent executed positions are included to reduce revisitation
-- the multi-robot objective is encoded entirely in the rollout cost, so the MPPI optimization loop itself does not change
-
-### Adaptive parameters
-
-Two adaptive rules from the paper are present in the implementation:
-
-- self-interaction bandwidth is updated online with the median heuristic, floored by `stein.ell_self` (previously `stein.h`)
-- MPPI temperature `lambda` is adapted with an ESS target and clamped by `mppi.lam_min` and `mppi.lam_max`
-
-The cross-robot bandwidth `stein.ell_x` remains fixed. Its square root is the approximate interaction distance scale in workspace units.
-
-## Repository Layout
-
-| Path | Purpose |
-|------|---------|
-| [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml) | Main configuration file for simulation, MPPI, map, density, and Stein parameters |
-| [`configs/params_loader.py`](/home/mmantovani/Projects/ergodic_control_mppi/configs/params_loader.py) | Strict YAML loader and validator that builds the runtime parameter dataclasses |
-| [`models/double_integrator.py`](/home/mmantovani/Projects/ergodic_control_mppi/models/double_integrator.py) | 6D double-integrator dynamics and control clamping |
-| [`mppi/core.py`](/home/mmantovani/Projects/ergodic_control_mppi/mppi/core.py) | Functional MPPI rollout, weighting, and Stein-flow cost integration |
-| [`mppi/stein.py`](/home/mmantovani/Projects/ergodic_control_mppi/mppi/stein.py) | GMM log-density, score, kernel, and Stein interaction operators |
-| [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py) | Single and multi-robot simulation entrypoint plus visualization |
-| [`results/`](/home/mmantovani/Projects/ergodic_control_mppi/results) | Saved artifacts from experiments already present in the repository |
-| [`DARS2026_paper.pdf`](/home/mmantovani/Projects/ergodic_control_mppi/DARS2026_paper.pdf) | Paper reference for the intended multi-robot formulation |
+The self bandwidth uses the median squared-distance heuristic with
+`stein.ell_self` as a floor. The cross bandwidth `stein.ell_x` is fixed. MPPI
+temperature adapts toward `mppi.ess_target`, and the control-cost coefficient
+is recomputed from the current temperature and `mppi.alpha` at every step.
 
 ## Installation
 
-The project uses `uv` for environment management.
+The base installation is CPU-capable and depends on plain `jax`:
 
 ```bash
 uv sync
 ```
 
-If you prefer plain `venv` + `pip`:
+Optional environments are:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install .
+uv sync --extra cuda12       # NVIDIA CUDA 12 JAX wheels
+uv sync --extra experiments  # Optuna for Bayesian optimization
 ```
 
-## Usage
+This follows the official JAX split between plain CPU `jax` and accelerator
+extras such as [`jax[cuda12]`](https://docs.jax.dev/en/latest/installation.html).
 
-Run commands from the repository root.
+## Simulation
+
+`robots.num_robots` in `configs/mppi_params.yaml` selects the controller path.
+Run from the repository root:
 
 ```bash
-# Run either the single-robot or multi-robot simulation
-# depending on robots.num_robots in configs/mppi_params.yaml
 uv run python scripts/main.py
-
-# Syntax check the Python modules
-uv run python -m compileall configs models mppi scripts
+uv run python scripts/main.py --config configs/mppi_params.yaml --device cpu --no-plot
 ```
 
-The script loads [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml), generates random obstacles and initial states, then executes:
+The CLI accepts `--device auto|cpu|gpu`. `auto` uses a GPU when JAX exposes one
+and otherwise falls back to CPU. Controller imports do not query devices,
+print, log, or import plotting.
 
-- `closed_loop_jit(...)` when `robots.num_robots == 1`
-- `multi_robot_closed_loop_jit(...)` when `robots.num_robots > 1`
+The model dimensions are fixed and are not configuration keys:
 
-## Configuration
+- state `(6,)`: `[px, py, vx, vy, yaw, yaw_rate]`
+- control `(3,)`: `[ax, ay, angular_acceleration]`
 
-The main configuration surface is [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml).
+Active tuning keys are `mppi.T`, `mppi.K`, `mppi.lambda`, `mppi.alpha`,
+`mppi.exploration`, `mppi.ess_target`, `mppi.lam_min`, `mppi.lam_max`,
+`mppi.history_len`, `mppi.noise.sigma`, `stein.weight_stein`,
+`stein.ell_self`, `stein.ell_x`, `stein.alpha_cross`, and `stein.theta`.
+`stein.theta` accepts the inclusive range `[0, 90]` degrees.
 
-Important keys for switching and tuning modes:
+## Research commands
 
-| Key | Meaning |
-|-----|---------|
-| `robots.num_robots` | `1` for single-robot mode, `>1` for decentralized multi-robot mode |
-| `mppi.K` | Number of MPPI rollouts per replanning step |
-| `mppi.T` | Receding-horizon length |
-| `mppi.lambda` | Initial MPPI temperature |
-| `mppi.ess_target` | ESS fraction target for adaptive temperature tuning |
-| `mppi.lam_min`, `mppi.lam_max` | Clamp range for adaptive temperature |
-| `mppi.history_len` | Length of the executed-position history buffer used in Stein interactions |
-| `stein.weight` | Weight of the flow-matching cost |
-| `stein.weight_pdf` | Weight of the log-density term |
-| `stein.h` | Floor for the adaptive self bandwidth |
-| `stein.ell_x` | Fixed cross-robot bandwidth |
-| `stein.theta` | Rotation angle defining the curl-augmented geometry |
-| `stein.alpha_cross` | Strength of inter-robot repulsion |
+Experiment YAML lives in `configs/experiments/`. Destructive runners refuse to
+replace CSV output unless `--overwrite` is supplied.
 
-The target density is specified under `density`. Obstacles are sampled each run from `map.obstacles`.
+```bash
+uv run python -m ergodic_control_mppi.experiments.bo --config configs/experiments/open_multimodal_bo.yaml
+uv run python -m ergodic_control_mppi.experiments.ablations --ablation-config configs/experiments/open_multimodal_ablations.yaml --overwrite
+uv run python -m ergodic_control_mppi.experiments.sensitivity --config configs/experiments/open_multimodal_sensitivity.yaml --overwrite
+uv run python -m ergodic_control_mppi.experiments.literature --config configs/experiments/literature_comparison.yaml --overwrite
+```
 
-## State and Control
+Trial CSV rows preserve the established scalar fields, including
+`team_ergodic_error`, `pairwise_overlap`, `safety_metric`,
+`redundancy_metric`, `R_pair`, `D_min_pair`, and `runtime_ms`. Existing CSVs
+are not regenerated automatically.
 
-| Quantity | Shape | Meaning |
-|----------|-------|---------|
-| state `x` | `(6,)` | `[px, py, vx, vy, yaw, yaw_rate]` |
-| control `u` | `(3,)` | `[ax, ay, alpha]` |
+## Validation
 
-Controls are clamped to the configured acceleration bounds before integration.
-
-## Current implementation notes
-
-- The current multi-robot implementation shares predicted spatial surrogates and history buffers inside the simulation loop in [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py).
-- The paper describes pooling mean predicted trajectories. The current code uses the temporal median of sampled spatial rollouts as the exchanged surrogate.
+```bash
+uv run python -m compileall ergodic_control_mppi scripts tests
+JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests -v
+uv lock --check
+```
