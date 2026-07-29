@@ -1,8 +1,7 @@
 # Ergodic Control MPPI
 
 JAX implementation of flow-matching Model Predictive Path Integral control for
-ergodic coverage of a Gaussian-mixture target density. One numerical core
-supports a single robot and synchronous decentralized robot teams.
+single-robot ergodic coverage of a Gaussian-mixture target density.
 
 ## Implementation
 
@@ -21,59 +20,54 @@ The package separates numerical code from orchestration:
 | `ergodic_control_mppi/mppi/core.py` | Sampling, rollout costs, Stein integration, and MPPI update |
 | `ergodic_control_mppi/mppi/stein.py` | Analytic GMM score, RBF gradient, and Stein interactions |
 | `ergodic_control_mppi/mppi/single.py` | Single-robot closed-loop scan |
-| `ergodic_control_mppi/mppi/multi.py` | Vectorized synchronous multi-robot scan |
 | `ergodic_control_mppi/simulation.py` | Device selection, initialization, dispatch, and NumPy results |
 | `ergodic_control_mppi/metrics/` | Ergodicity and coordination metrics |
-| `ergodic_control_mppi/experiments/` | BO, ablations, sensitivity, and literature comparisons |
+| `ergodic_control_mppi/experiments/` | Literature comparisons |
 | `ergodic_control_mppi/plotting/` | Simulation and publication figures |
 
-`run_simulation(...)` always returns paths with shape `(steps, robots, 6)`.
-Internally, `run_single(...)` uses `(steps, 6)` and `run_multi(...)` uses
-`(steps, robots, 6)`. Obstacles have shape `(num_obstacles, 3)` and may be
-empty.
+`run_simulation(...)` always returns paths with shape `(steps, 1, 6)` (a
+trivial robot axis kept for metric/plot compatibility). Internally,
+`run_single(...)` uses `(steps, 6)`. Obstacles have shape `(num_obstacles, 3)`
+and may be empty.
 
-## Multi-robot behavior and theory mapping
+## Stein flow-matching theory mapping
 
-The implementation is decentralized in its controller state: each robot owns
-its MPPI controls, key, temperature, executed-position history, and predicted
-trajectory surrogate. Robots update synchronously. Before each update, every
-robot receives the other robots' previous surrogates and histories as Stein
-cross particles.
+At every control step, rollout evaluation states are the current position
+followed by the first `T - 1` sampled positions. Their temporal increments are
+scored with the Section III-C objective
+`sum(-dt * h(z_k) @ delta_z_k + 0.5 * ||delta_z_k||^2)`. The Stein flow
+`h(z_k)` is evaluated once on the horizon-wise median compression of the
+rollout evaluation states and broadcast across rollouts. The returned
+surrogate remains the median of all `T` future sampled positions.
 
-The shared surrogate is the temporal median of sampled position rollouts. Its
-self interaction contains the target-density score and kernel gradient. The
-cross-robot interaction retains only the rotated kernel-gradient repulsion,
-scaled by `stein.alpha_cross`; it does not add another target-attraction term.
-This is the implementation's mapping to the decentralized flow-matching
-theory. No unavailable paper artifact is required or claimed to have been
-re-audited.
+The Stein target-density score and kernel gradient use a median-heuristic
+bandwidth with a configured floor. This is the implementation's mapping to the
+flow-matching theory; no unavailable paper artifact is required or claimed to
+have been re-audited.
 
-The self bandwidth uses the median squared-distance heuristic with
-`stein.ell_self` as a floor. The cross bandwidth `stein.ell_x` is fixed. MPPI
-temperature adapts toward `mppi.ess_target`, and the control-cost coefficient
-is recomputed from the current temperature and `mppi.alpha` at every step.
+MPPI temperature adapts toward `mppi.ess_target`, and the control-cost
+coefficient is recomputed from the current temperature and `mppi.alpha` at
+every step.
 
 ## Installation
 
 The base installation is CPU-capable and depends on plain `jax`:
 
 ```bash
-uv sync
+uv sync --python 3.12
 ```
 
 Optional environments are:
 
 ```bash
-uv sync --extra cuda12       # NVIDIA CUDA 12 JAX wheels
-uv sync --extra experiments  # Optuna for Bayesian optimization
+uv sync --python 3.12 --extra cuda13  # NVIDIA CUDA 13 JAX wheels
 ```
 
 This follows the official JAX split between plain CPU `jax` and accelerator
-extras such as [`jax[cuda12]`](https://docs.jax.dev/en/latest/installation.html).
+extras such as [`jax[cuda13]`](https://docs.jax.dev/en/latest/installation.html).
 
 ## Simulation
 
-`robots.num_robots` in `configs/mppi_params.yaml` selects the controller path.
 Run from the repository root:
 
 ```bash
@@ -92,9 +86,9 @@ The model dimensions are fixed and are not configuration keys:
 
 Active tuning keys are `mppi.T`, `mppi.K`, `mppi.lambda`, `mppi.alpha`,
 `mppi.exploration`, `mppi.ess_target`, `mppi.lam_min`, `mppi.lam_max`,
-`mppi.history_len`, `mppi.noise.sigma`, `stein.weight_stein`,
-`stein.ell_self`, `stein.ell_x`, `stein.alpha_cross`, and `stein.theta`.
-`stein.theta` accepts the inclusive range `[0, 90]` degrees.
+`mppi.memory_length`, `mppi.noise.sigma`, `stein.weight_stein`,
+`stein.ell_self`, `stein.repulsion_weight`, `stein.repulsion_bandwidth`, and
+`stein.theta`. `stein.theta` accepts the inclusive range `[0, 90]` degrees.
 
 ## Research commands
 
@@ -102,9 +96,6 @@ Experiment YAML lives in `configs/experiments/`. Destructive runners refuse to
 replace CSV output unless `--overwrite` is supplied.
 
 ```bash
-uv run python -m ergodic_control_mppi.experiments.bo --config configs/experiments/open_multimodal_bo.yaml
-uv run python -m ergodic_control_mppi.experiments.ablations --ablation-config configs/experiments/open_multimodal_ablations.yaml --overwrite
-uv run python -m ergodic_control_mppi.experiments.sensitivity --config configs/experiments/open_multimodal_sensitivity.yaml --overwrite
 uv run python -m ergodic_control_mppi.experiments.literature --config configs/experiments/literature_comparison.yaml --overwrite
 ```
 

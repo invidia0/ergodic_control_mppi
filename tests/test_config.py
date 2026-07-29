@@ -22,6 +22,7 @@ class ConfigTest(unittest.TestCase):
     def test_valid_load_and_deterministic_obstacles(self):
         config_a = load_config("configs/mppi_params.yaml")
         config_b = load_config("configs/mppi_params.yaml")
+        self.assertEqual(config_a.controller.stein.self_bandwidth, 1.0)
         np.testing.assert_array_equal(config_a.controller.workspace.obstacles, config_b.controller.workspace.obstacles)
 
     def test_zero_obstacles(self):
@@ -33,6 +34,10 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(theta=theta):
                 config = load_config(self._mutate(lambda data, theta=theta: data["stein"].update(theta=theta)))
                 self.assertTrue(np.all(np.isfinite(config.controller.stein.rotation)))
+
+    def test_non_positive_self_bandwidth_is_rejected(self):
+        with self.assertRaises(ValueError):
+            load_config(self._mutate(lambda data: data["stein"].update(ell_self=0)))
 
     def test_non_integral_shape_value_is_rejected(self):
         with self.assertRaises(ValueError):

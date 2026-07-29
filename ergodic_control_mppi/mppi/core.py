@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 
 from ergodic_control_mppi.models.double_integrator import clamp, step
-from ergodic_control_mppi.mppi.stein import stein_gradient, stein_repulsion
+from ergodic_control_mppi.mppi.stein import kernel, pdf, stein_gradient, stein_repulsion
 from ergodic_control_mppi.parameters import ControllerParams
 
 
@@ -58,7 +58,21 @@ def stage_cost(state: jax.Array, params: ControllerParams) -> jax.Array:
         | (position[..., 1] < params.workspace.y_limits[0])
         | (position[..., 1] > params.workspace.y_limits[1])
     )
-    return collision * params.workspace.obstacle_cost + outside * params.workspace.out_of_map_cost
+    # Soft inward margin: penalize hugging the *inside* of the map edge so the
+    # flow can't park the robot in a corner (a corner is otherwise cost-free).
+    gap = jnp.minimum(
+        jnp.minimum(position[..., 0] - params.workspace.x_limits[0],
+                    params.workspace.x_limits[1] - position[..., 0]),
+        jnp.minimum(position[..., 1] - params.workspace.y_limits[0],
+                    params.workspace.y_limits[1] - position[..., 1]),
+    )
+    encroach = jnp.maximum(params.workspace.boundary_margin - gap, 0.0)
+    margin_cost = params.workspace.boundary_weight * encroach * encroach
+    return (
+        collision * params.workspace.obstacle_cost
+        + outside * params.workspace.out_of_map_cost
+        + margin_cost
+    )
 
 
 def _rollouts(
@@ -96,13 +110,31 @@ def _rollouts(
     return costs, jnp.swapaxes(controls, 0, 1), jnp.swapaxes(positions, 0, 1)
 
 
+def _flow_tracking_cost(
+    flow: jax.Array, displacements: jax.Array, time_step: float
+) -> jax.Array:
+    """Compute the displacement/velocity flow cost for each rollout.
+
+    Args:
+        flow: Stein flow at rollout evaluation states with shape ``(K, T, 2)``.
+        displacements: Consecutive position changes with shape ``(K, T, 2)``.
+        time_step: Dynamics integration step.
+
+    Returns:
+        Flow-tracking costs with shape ``(K,)``.
+    """
+    alignment = -time_step * jnp.sum(flow * displacements, axis=-1)
+    effort = 0.5 * jnp.sum(displacements * displacements, axis=-1)
+    return jnp.sum(alignment + effort, axis=-1)
+
+
 def mppi_step(
     params: ControllerParams,
     previous_controls: jax.Array,
     state: jax.Array,
     key: jax.Array,
     temperature: jax.Array,
-    cross_particles: jax.Array,
+    memory: jax.Array,
 ) -> MPPIStepResult:
     """Compute one adaptive-temperature MPPI control update.
 
@@ -112,7 +144,9 @@ def mppi_step(
         state: Current state with shape ``(6,)``.
         key: JAX PRNG key.
         temperature: Current positive MPPI temperature.
-        cross_particles: History or other-robot positions with shape ``(P, 2)``.
+        memory: Executed-position ring buffer with shape ``(memory_length, 2)``;
+            oldest first. The reference flow is repelled from a recency- and
+            density-weighted (fading) memory of it to drive ergodic coverage.
 
     Returns:
         Named outputs containing the first control, shifted controls, advanced
@@ -124,18 +158,90 @@ def mppi_step(
         params, state, previous_controls, epsilon, temperature
     )
     surrogate = jnp.median(sampled_positions, axis=0)
-    differences = surrogate[:, None, :] - surrogate[None, :, :]
+    initial_positions = jnp.broadcast_to(
+        state[:2], (params.mppi.samples, 1, 2)
+    )
+    evaluation_positions = jnp.concatenate(
+        (initial_positions, sampled_positions[:, :-1]), axis=1
+    )
+    displacements = sampled_positions - evaluation_positions
+    # Broadcast median-source field: ~0.995 rank-correlated with the faithful per-rollout
+    # eq.-25 cost in the warm-started regime; source choice barely matters. Only a genuine
+    # per-step ensemble split (rollouts branching) would need per-cluster representatives.
+    source_particles = jnp.median(evaluation_positions, axis=0)
+    differences = source_particles[:, None, :] - source_particles[None, :, :]
     bandwidth = jnp.maximum(
         jnp.median(jnp.sum(differences * differences, axis=-1)),
         params.stein.self_bandwidth,
     )
-    target_flow = stein_gradient(surrogate, surrogate, params.gmm, params.stein, bandwidth)
-    if cross_particles.shape[0]:
-        target_flow += params.stein.repulsion_weight * stein_repulsion(
-            surrogate, cross_particles, params.stein
-        )
-    costs += params.stein.flow_weight * -jnp.einsum(
-        "kti,ti->k", sampled_positions, target_flow
+    target_flow = stein_gradient(
+        source_particles, source_particles, params.gmm, params.stein, bandwidth
+    )
+    # Fading-memory coverage feedback: repel the plan from the executed-position
+    # buffer. Two per-particle weightings, blended by deficit_gate in [0, 1]:
+    #  - fading (gate=0): recency decay gamma**age; the recent orbit drives
+    #    spiral-fill while old positions fade so modes can be revisited.
+    #  - coverage-deficit (gate=1): weight w_i = relu(o_i - p_i) comparing the
+    #    recency-weighted occupancy *density* o (a proper KDE, integrates to 1) to
+    #    the target density p at memory point i. Zero pressure while a region is
+    #    under-filled (dwell), positive once occupancy exceeds its target share
+    #    (eject) -> distributes dwell-time proportionally and frees under-covered
+    #    modes (o~0 there -> no repulsion, so attraction pulls the robot in).
+    #    Both are true densities (no visited-only calibration), so a mode filled
+    #    past its share ejects globally. Bounded, deterministic -> Markov.
+    ages = jnp.arange(memory.shape[0])[::-1]  # 0 = newest (buffer is oldest-first)
+    recency = params.stein.memory_decay ** ages
+    target_density = pdf(memory, params.gmm)
+
+    def occupancy_density(bandwidth):
+        """Recency-weighted KDE of visitation at the memory points (integrates to ~1)."""
+        kde = kernel(memory[:, None, :], memory[None, :, :], bandwidth) @ recency
+        return kde / (jnp.sum(recency) * jnp.pi * bandwidth)
+
+    fine_bw = params.stein.spiral_bandwidth
+    o_fine = occupancy_density(fine_bw)
+
+    # Coarse coverage-deficit: leave a filled mode and reach a far one (distribution).
+    coarse_bw = params.stein.repulsion_bandwidth
+    deficit = jnp.maximum(occupancy_density(coarse_bw) - target_density, 0.0)
+    # Fill-gated eject: with eject_fill_gated on, the eject force acts only from cells that
+    # are already fine-filled (o_fine >= p), so under-filled cells don't push the robot out
+    # -> it dwells until the mode is densely covered, THEN leaves (fill-driven, not on a
+    # timer). eject_fill_gated=0 leaves the coarse deficit untouched.
+    fill_gate = jnp.where(params.stein.eject_fill_gated > 0, (o_fine >= target_density) * 1.0, 1.0)
+    deficit = deficit * fill_gate
+    gate = params.stein.deficit_gate
+    memory_weights = (1.0 - gate) * recency + gate * deficit
+    target_flow += params.stein.repulsion_weight * stein_repulsion(
+        source_particles, memory, memory_weights, params.stein, coarse_bw
+    )
+    # Fine second term: push each orbit onto the next unfilled strip -> dense spiral-fill
+    # within a mode. spiral_deficit blends the fine weighting: 1 => fine coverage-deficit
+    # relu(o_fine - p) (two-scale deficit), 0 => fading recency trail. spiral_weight=0 off.
+    deficit_fine = jnp.maximum(o_fine - target_density, 0.0)
+    spiral = params.stein.spiral_deficit
+    fine_weights = (1.0 - spiral) * recency + spiral * deficit_fine
+    target_flow += params.stein.spiral_weight * stein_repulsion(
+        source_particles, memory, fine_weights, params.stein, fine_bw
+    )
+    # Optional constant-speed tracking: follow the flow *direction* at a fixed
+    # reference speed (LQR-flow-matching style). reference_speed=0 keeps the raw
+    # velocity-magnitude cost.
+    #
+    # Reparameterization notes (why the tuning space is smaller than the knob count):
+    #  - Magnitude gauge: when reference_speed>0 this normalization discards |target_flow|,
+    #    so only the DIRECTION of (attraction + rw*coarse + sw*fine) matters. repulsion_weight
+    #    and spiral_weight are therefore RATIOS to the attraction (implicit weight 1); the overall
+    #    flow scale is a free gauge. Two relative weights, not three magnitudes.
+    #  - Horizon reach L = reference_speed * T * dt is the geometric span of one plan; reference_speed
+    #    and the MPPI horizon T are partially redundant through it (tune one against the reported T).
+    speed = params.stein.reference_speed
+    norm = jnp.linalg.norm(target_flow, axis=-1, keepdims=True)
+    target_flow = jnp.where(
+        speed > 0, speed * target_flow / jnp.maximum(norm, 1e-3), target_flow
+    )
+    costs += params.stein.flow_weight * _flow_tracking_cost(
+        target_flow[None], displacements, params.model.delta_t
     )
     shifted_costs = costs - jnp.min(costs)
     unnormalized = jnp.exp(-shifted_costs / temperature)

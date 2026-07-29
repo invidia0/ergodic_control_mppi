@@ -10,6 +10,7 @@ import numpy as np
 from ergodic_control_mppi.config import AppConfig
 from ergodic_control_mppi.metrics.ergodicity import (
     compute_cumulative_team_ergodic_error,
+    compute_reachable_mask,
     compute_team_occupancy_grid,
 )
 from ergodic_control_mppi.mppi.stein import pdf
@@ -45,8 +46,11 @@ def plot_simulation(
     limits_x = tuple(map(float, workspace.x_limits))
     limits_y = tuple(map(float, workspace.y_limits))
     occupancy = compute_team_occupancy_grid(result.paths, limits_x, limits_y, (nx, ny))
+    reachable = compute_reachable_mask(
+        workspace.obstacles, float(workspace.safe_distance), limits_x, limits_y, (nx, ny)
+    )
     errors = compute_cumulative_team_ergodic_error(
-        result.paths, target, limits_x, limits_y, (nx, ny)
+        result.paths, target, limits_x, limits_y, (nx, ny), reachable_mask=reachable
     )
 
     figure, axes = plt.subplots(1, 3, figsize=(18, 5.5))

@@ -6,7 +6,6 @@ summary_csv_path: results/dars2026/literature/literature_comparison_summary.csv
 convergence_csv_path: results/dars2026/literature/literature_comparison_convergence.csv
 plot_output_dir: results/dars2026/literature/plots
 
-team_size: 4
 steps: 5000
 seeds: [0, 1, 2]
 d_thresh: 1.0

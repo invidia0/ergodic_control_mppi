@@ -12,7 +12,10 @@ from ergodic_control_mppi.metrics.coordination import (
     compute_redundancy_metric,
     compute_safety_metric,
 )
-from ergodic_control_mppi.metrics.ergodicity import compute_team_ergodic_error
+from ergodic_control_mppi.metrics.ergodicity import (
+    compute_reachable_mask,
+    compute_team_ergodic_error,
+)
 
 
 @dataclass(frozen=True)
@@ -54,9 +57,15 @@ def compute_all_metrics(
 ) -> dict[str, float]:
     """Compute every stable scalar experiment metric."""
     data = _as_trial_data(trial_data)
+    target_shape = np.asarray(data.target_density_grid).shape
+    bins = (target_shape[1], target_shape[0])
+    reachable = compute_reachable_mask(
+        data.obstacle_map, data.safety_radius, data.map_x_limits, data.map_y_limits, bins
+    )
     return {
         "team_ergodic_error": compute_team_ergodic_error(
-            data.robot_paths, data.target_density_grid, data.map_x_limits, data.map_y_limits
+            data.robot_paths, data.target_density_grid, data.map_x_limits, data.map_y_limits,
+            reachable_mask=reachable,
         ),
         "pairwise_overlap": compute_pairwise_overlap(
             data.robot_paths, data.map_x_limits, data.map_y_limits

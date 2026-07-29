@@ -135,7 +135,6 @@ def load_config(path: str | Path) -> AppConfig:
     if not isinstance(raw, dict):
         raise ValueError("Top-level YAML content must be a mapping")
 
-    robots = _mapping(raw, "robots")
     mppi_raw = _mapping(raw, "mppi")
     noise = _mapping(mppi_raw, "noise", "mppi")
     map_raw = _mapping(raw, "map")
@@ -150,18 +149,25 @@ def load_config(path: str | Path) -> AppConfig:
             raise ValueError(f"Config key 'mppi.{removed}' was removed; the model dimensions are fixed")
     if "weight_pdf" in stein_raw:
         raise ValueError("Config key 'stein.weight_pdf' was removed because it was inactive")
+    if "history_len" in mppi_raw:
+        raise ValueError("Config key 'mppi.history_len' was removed with multi-robot support")
+    for removed in ("ell_x", "alpha_cross"):
+        if removed in stein_raw:
+            raise ValueError(f"Config key 'stein.{removed}' was removed with multi-robot support")
+    if "robots" in raw:
+        raise ValueError("Config key 'robots' was removed; this controller is single-robot only")
 
     seed = _integer(raw.get("seed", 0), "seed")
     resolution = _number(_required(map_raw, "resolution", "map"), "map.resolution", 1e-12)
     run = RunConfig(
         seed=seed,
         steps=_integer(raw.get("steps", 5000), "steps", 1),
-        num_robots=_integer(robots.get("num_robots", 1), "robots.num_robots", 1),
         resolution=resolution,
     )
 
     samples = _integer(_required(mppi_raw, "K", "mppi"), "mppi.K", 1)
     horizon = _integer(_required(mppi_raw, "T", "mppi"), "mppi.T", 1)
+    memory_length = _integer(mppi_raw.get("memory_length", 2), "mppi.memory_length", 2)
     temperature = _number(_required(mppi_raw, "lambda", "mppi"), "mppi.lambda", 1e-12)
     alpha = _number(_required(mppi_raw, "alpha", "mppi"), "mppi.alpha", 0.0)
     if alpha > 1:
@@ -206,16 +212,36 @@ def load_config(path: str | Path) -> AppConfig:
     if theta > 90:
         raise ValueError("Config key 'stein.theta' must be in [0, 90]")
     theta_radians = np.deg2rad(theta)
+    memory_decay = _number(stein_raw.get("memory_decay", 0.99), "stein.memory_decay", 1e-12)
+    if memory_decay >= 1:
+        raise ValueError("Config key 'stein.memory_decay' must be < 1")
+    deficit_gate = _number(stein_raw.get("deficit_gate", 1.0), "stein.deficit_gate", 0.0)
+    if deficit_gate > 1:
+        raise ValueError("Config key 'stein.deficit_gate' must be in [0, 1]")
+    spiral_deficit = _number(stein_raw.get("spiral_deficit", 0.0), "stein.spiral_deficit", 0.0)
+    if spiral_deficit > 1:
+        raise ValueError("Config key 'stein.spiral_deficit' must be in [0, 1]")
     stein = SteinParams(
         rotation=jnp.asarray(
             [[np.cos(theta_radians), -np.sin(theta_radians)],
              [np.sin(theta_radians), np.cos(theta_radians)]],
             dtype=jnp.float32,
         ),
-        self_bandwidth=_number(_required(stein_raw, "ell_self", "stein"), "stein.ell_self", 1e-12),
-        cross_bandwidth=_number(_required(stein_raw, "ell_x", "stein"), "stein.ell_x", 1e-12),
+        self_bandwidth=_number(
+            _required(stein_raw, "ell_self", "stein"),
+            "stein.ell_self",
+            1e-12,
+        ),
         flow_weight=_number(_required(stein_raw, "weight_stein", "stein"), "stein.weight_stein", 0.0),
-        repulsion_weight=_number(_required(stein_raw, "alpha_cross", "stein"), "stein.alpha_cross", 0.0),
+        repulsion_weight=_number(stein_raw.get("repulsion_weight", 0.0), "stein.repulsion_weight", 0.0),
+        repulsion_bandwidth=_number(stein_raw.get("repulsion_bandwidth", 4.0), "stein.repulsion_bandwidth", 1e-12),
+        memory_decay=memory_decay,
+        reference_speed=_number(stein_raw.get("reference_speed", 0.0), "stein.reference_speed", 0.0),
+        deficit_gate=deficit_gate,
+        spiral_bandwidth=_number(stein_raw.get("spiral_bandwidth", 0.4), "stein.spiral_bandwidth", 1e-12),
+        spiral_weight=_number(stein_raw.get("spiral_weight", 0.0), "stein.spiral_weight", 0.0),
+        spiral_deficit=spiral_deficit,
+        eject_fill_gated=_number(stein_raw.get("eject_fill_gated", 1.0), "stein.eject_fill_gated", 0.0),
     )
 
     map_x = _limits(_required(map_raw, "x_limits", "map"), "map.x_limits")
@@ -256,11 +282,13 @@ def load_config(path: str | Path) -> AppConfig:
             "map.obstacles.safe_distance",
             0.0,
         ),
+        boundary_margin=_number(map_raw.get("boundary_margin", 0.0), "map.boundary_margin", 0.0),
+        boundary_weight=_number(map_raw.get("boundary_weight", 0.0), "map.boundary_weight", 0.0),
     )
     mppi = MPPIParams(
         samples=samples,
         horizon=horizon,
-        history_length=_integer(mppi_raw.get("history_len", 100), "mppi.history_len", 1),
+        memory_length=memory_length,
         temperature=temperature,
         alpha=alpha,
         exploration=exploration,

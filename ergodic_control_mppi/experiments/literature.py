@@ -50,7 +50,6 @@ class LiteratureComparisonConfig:
     summary_csv_path: str
     convergence_csv_path: str
     plot_output_dir: str
-    team_size: int
     steps: int
     seeds: list[int]
     d_thresh: float
@@ -208,7 +207,6 @@ def load_literature_comparison_config(path: str | Path) -> LiteratureComparisonC
         summary_csv_path=str(cfg.get("summary_csv_path", summary_csv_default)),
         convergence_csv_path=str(cfg.get("convergence_csv_path", convergence_csv_default)),
         plot_output_dir=str(cfg.get("plot_output_dir", plot_output_default)),
-        team_size=_as_int(cfg.get("team_size", 4), "team_size", min_value=1),
         steps=_as_int(cfg.get("steps", 5000), "steps", min_value=1),
         seeds=_as_list_int(cfg, "seeds", min_value=0) if "seeds" in cfg else [0, 1, 2],
         d_thresh=_as_float(cfg.get("d_thresh", 1.0), "d_thresh", min_value=0.0),
@@ -306,7 +304,6 @@ def _summary_rows(
             "method_name": method_name,
             "num_seeds": int(len(group)),
             "seed_list": ",".join(str(s) for s in seeds),
-            "team_size": int(group[0]["team_size"]),
             "steps": int(group[0]["steps"]),
         }
         summary.update(summarize(group, metrics))
@@ -333,7 +330,6 @@ def run_literature_comparison(
         make_no_obstacle_scenario(
             base_scenario,
             spec,
-            team_size=cfg.team_size,
             steps=cfg.steps,
             grid_shape=tuple(base_scenario.target_density_grid.shape),
         )
@@ -349,7 +345,6 @@ def run_literature_comparison(
         "scenario_name",
         "method_name",
         "seed",
-        "team_size",
         "steps",
         "runtime_ms",
     ] + REQUIRED_METRICS
@@ -366,7 +361,7 @@ def run_literature_comparison(
 
     for scenario in scenarios:
         for seed in cfg.seeds:
-            x0_all = sample_initial_states(scenario.params, cfg.team_size, seed)
+            x0_all = sample_initial_states(scenario.params, 1, seed)
             for method_name in cfg.methods:
                 print(f"Running scenario='{scenario.name}' method='{method_name}' seed={seed}...")
                 t0 = time.perf_counter()
@@ -391,7 +386,6 @@ def run_literature_comparison(
                         "scenario_name": scenario.name,
                         "method_name": method_name,
                         "seed": int(seed),
-                        "team_size": int(cfg.team_size),
                         "steps": int(cfg.steps),
                     },
                 )
@@ -400,7 +394,6 @@ def run_literature_comparison(
                     "scenario_name": scenario.name,
                     "method_name": method_name,
                     "seed": int(seed),
-                    "team_size": int(cfg.team_size),
                     "steps": int(cfg.steps),
                     "runtime_ms": float(runtime_ms),
                 }

@@ -1,9 +1,8 @@
-"""Immutable runtime parameters for the controller and experiments."""
+"""Immutable runtime parameters for the controller."""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import jax
-import jax.numpy as jnp
 
 from ergodic_control_mppi.models.double_integrator import DoubleIntegratorParams
 
@@ -15,13 +14,11 @@ class RunConfig:
     Attributes:
         seed: JAX random seed.
         steps: Number of closed-loop control steps.
-        num_robots: Number of independently controlled robots.
         resolution: Visualization grid resolution in workspace units.
     """
 
     seed: int
     steps: int
-    num_robots: int
     resolution: float
 
 
@@ -43,9 +40,16 @@ class SteinParams:
 
     rotation: jax.Array
     self_bandwidth: float
-    cross_bandwidth: float
     flow_weight: float
     repulsion_weight: float
+    repulsion_bandwidth: float
+    memory_decay: float
+    reference_speed: float
+    deficit_gate: float
+    spiral_bandwidth: float
+    spiral_weight: float
+    spiral_deficit: float
+    eject_fill_gated: float
 
 
 @jax.tree_util.register_dataclass
@@ -55,7 +59,7 @@ class MPPIParams:
 
     samples: int = field(metadata={"static": True})
     horizon: int = field(metadata={"static": True})
-    history_length: int = field(metadata={"static": True})
+    memory_length: int = field(metadata={"static": True})
     temperature: float
     alpha: float
     exploration: float
@@ -77,6 +81,8 @@ class WorkspaceParams:
     obstacles: jax.Array
     obstacle_cost: float
     safe_distance: float
+    boundary_margin: float
+    boundary_weight: float
 
 
 @jax.tree_util.register_dataclass
@@ -89,65 +95,3 @@ class ControllerParams:
     stein: SteinParams
     workspace: WorkspaceParams
     model: DoubleIntegratorParams
-
-
-@dataclass(frozen=True)
-class ControllerVariant:
-    """Typed optional overrides used by all experiment runners."""
-
-    repulsion_weight: float | None = None
-    cross_bandwidth: float | None = None
-    flow_weight: float | None = None
-    theta: float | None = None
-    horizon: int | None = None
-    history_length: int | None = None
-
-
-def apply_variant(params: ControllerParams, variant: ControllerVariant) -> ControllerParams:
-    """Apply a typed experiment variant through immutable nested replacements.
-
-    Args:
-        params: Base controller parameters.
-        variant: Optional values to replace.
-
-    Returns:
-        A controller tree sharing all unchanged arrays with ``params``.
-
-    Raises:
-        ValueError: If an override is outside its supported range.
-    """
-    stein_changes: dict[str, object] = {}
-    mppi_changes: dict[str, object] = {}
-    if variant.repulsion_weight is not None:
-        if variant.repulsion_weight < 0:
-            raise ValueError("repulsion_weight must be >= 0")
-        stein_changes["repulsion_weight"] = float(variant.repulsion_weight)
-    if variant.cross_bandwidth is not None:
-        if variant.cross_bandwidth <= 0:
-            raise ValueError("cross_bandwidth must be > 0")
-        stein_changes["cross_bandwidth"] = float(variant.cross_bandwidth)
-    if variant.flow_weight is not None:
-        if variant.flow_weight < 0:
-            raise ValueError("flow_weight must be >= 0")
-        stein_changes["flow_weight"] = float(variant.flow_weight)
-    if variant.theta is not None:
-        if not 0 <= variant.theta <= 90:
-            raise ValueError("theta must be in [0, 90]")
-        theta = jnp.deg2rad(jnp.asarray(variant.theta, dtype=jnp.float32))
-        stein_changes["rotation"] = jnp.array(
-            [[jnp.cos(theta), -jnp.sin(theta)], [jnp.sin(theta), jnp.cos(theta)]],
-            dtype=jnp.float32,
-        )
-    if variant.horizon is not None:
-        if variant.horizon < 1:
-            raise ValueError("horizon must be >= 1")
-        mppi_changes["horizon"] = int(variant.horizon)
-    if variant.history_length is not None:
-        if variant.history_length < 1:
-            raise ValueError("history_length must be >= 1")
-        mppi_changes["history_length"] = int(variant.history_length)
-    return replace(
-        params,
-        stein=replace(params.stein, **stein_changes),
-        mppi=replace(params.mppi, **mppi_changes),
-    )

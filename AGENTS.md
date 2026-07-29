@@ -2,19 +2,14 @@
 
 ## Purpose and supported paths
 
-This repository implements flow-matching MPPI for ergodic coverage with one
-shared JAX numerical core and two closed-loop orchestrators:
+This repository implements flow-matching MPPI for single-robot ergodic
+coverage with one shared JAX numerical core and one closed-loop orchestrator:
 
-- `ergodic_control_mppi.mppi.single.run_single` for one robot.
-- `ergodic_control_mppi.mppi.multi.run_multi` for synchronous decentralized
-  teams. Each robot exchanges its median predicted position trajectory and
-  executed-position history; cross-robot Stein interactions use only the
-  repulsive kernel-gradient term.
+- `ergodic_control_mppi.mppi.single.run_single` for the one controlled robot.
 
 `ergodic_control_mppi.simulation.run_simulation` owns configuration-to-runtime
 dispatch, state initialization, device placement, and conversion to NumPy.
-`scripts/main.py` is the user-facing simulation command. The value of
-`robots.num_robots` in `configs/mppi_params.yaml` selects single or multi mode.
+`scripts/main.py` is the user-facing simulation command.
 
 ## Package architecture and data flow
 
@@ -29,7 +24,7 @@ dispatch, state initialization, device placement, and conversion to NumPy.
   Stein interactions.
 - `ergodic_control_mppi/mppi/core.py` owns functional sampling, rollouts,
   costs, adaptive bandwidth, importance weighting, and `mppi_step`.
-- `ergodic_control_mppi/mppi/{single,multi}.py` own the JAX closed-loop scans.
+- `ergodic_control_mppi/mppi/single.py` owns the JAX closed-loop scan.
 - `ergodic_control_mppi/metrics/` owns experiment-independent metric inputs
   and metric calculation.
 - `ergodic_control_mppi/experiments/` owns scenario construction, typed
@@ -39,27 +34,52 @@ dispatch, state initialization, device placement, and conversion to NumPy.
   plotting. Controller modules never import plotting.
 
 Runtime flow is YAML -> `load_config` -> `AppConfig` -> `run_simulation` ->
-`run_single` or `run_multi` -> normalized `SimulationResult.paths` with shape
-`(N, R, 6)`. Experiment runners use the same simulation path and pass a
-`TrialData` value to metrics before writing stable flat CSV rows.
+`run_single` -> normalized `SimulationResult.paths` with shape `(N, 1, 6)`.
+Experiment runners use the same simulation path and pass a `TrialData` value
+to metrics before writing stable flat CSV rows.
+
+## Coding style and helper placement
+
+Apply YAGNI and KISS: reuse existing code and the standard library, add only
+what the current requirement needs, and prefer the simplest clear
+implementation. Factor code for modularity, obvious usage, and maintainability
+without speculative abstractions, configuration, dependencies, or verbose
+boilerplate. Keep scripts concise and limited to orchestration and CLI concerns
+when reusable behavior belongs in the package.
+
+Keep functions at the narrowest scope that serves their actual callers:
+
+- Keep a function script-local when only that file uses it.
+- Put functions shared within one package folder in a folder-local utility
+  module.
+- Put functions used across different package areas in a repository-level
+  utility module.
+
+Do not promote helpers before reuse requires it, and reuse an existing
+appropriate module before creating another utility module. Every reusable,
+public, or otherwise non-self-explanatory function must have a Google-style
+docstring. Include only applicable sections such as `Args`, `Returns`, and
+`Raises`; do not add verbose docstrings that merely restate an obvious
+signature.
 
 ## Shape and numerical contracts
 
 - State: `(6,)`, ordered `[px, py, vx, vy, yaw, yaw_rate]`.
 - Control: `(3,)`, ordered `[ax, ay, angular_acceleration]`.
-- Nominal control horizon: `(T, 3)`; robot batch: `(R, T, 3)`.
+- Nominal control horizon: `(T, 3)`.
 - Sampled controls/positions: `(K, T, 3)` and `(K, T, 2)`.
-- Single path: `(N, 6)` internally; multi path: `(N, R, 6)`.
-- Public simulation and metric paths: `(N, R, 6)`.
+- Single path: `(N, 6)` internally.
+- Public simulation and metric paths: `(N, 1, 6)` (trivial robot axis kept for
+  metric/plot compatibility).
 - Obstacles: `(num_obstacles, 3)` as `(x, y, radius)`, including `(0, 3)`.
-- Shared multi-robot particles per robot: `((R-1) * (T + H), 2)`.
 
 Keep parameter dataclasses frozen and JAX-tree-compatible. Only
 shape-controlling integers may be static JAX fields. Use `dataclasses.replace`
 for nested variants. Keep core functions side-effect free under `jax.jit`,
 `jax.vmap`, and `jax.lax.scan`. Preserve
-`jax.config.update("jax_enable_x64", False)`. CPU-only execution is mandatory;
-device discovery belongs only in `simulation.py`.
+`jax.config.update("jax_enable_x64", False)`. CPU fallback and testing are
+mandatory; optional GPU execution is supported. Device discovery belongs only
+in `simulation.py`.
 
 ## Configuration and experiment contracts
 
@@ -95,8 +115,8 @@ uv lock --check
   CSV schemas except for explicitly removed inactive fields.
 - Preserve the implemented Stein/MPPI objective. Do not retune it or claim a
   theoretical audit against an unavailable paper.
-- Correct adaptive-temperature control-cost coupling, initial multi-robot
-  surrogates, BO error headers, and equivalent analytic derivatives.
+- Correct adaptive-temperature control-cost coupling, BO error headers, and
+  equivalent analytic derivatives.
 - Do not add legacy import shims, a performance benchmark, or a latency gate.
 - Documentation may mention only files, commands, parameters, and outputs that
   exist in the current tree and are wired into runtime.

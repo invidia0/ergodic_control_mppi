@@ -1,19 +1,16 @@
-"""Shared scenario, variant, CSV, summary, and trial utilities."""
+"""Shared scenario, CSV, and summary utilities."""
 
 import csv
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-import time
 from typing import Any, Iterable
 
 import jax.numpy as jnp
 import numpy as np
 
-from ergodic_control_mppi.config import AppConfig, load_config
-from ergodic_control_mppi.metrics.evaluate import TrialData, compute_all_metrics
+from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.mppi.stein import pdf
-from ergodic_control_mppi.parameters import ControllerParams, ControllerVariant, RunConfig, apply_variant
-from ergodic_control_mppi.simulation import run_simulation
+from ergodic_control_mppi.parameters import ControllerParams, RunConfig
 
 
 @dataclass(frozen=True)
@@ -63,73 +60,6 @@ def load_scenario(
         np.asarray(workspace.obstacles),
         float(workspace.safe_distance if safety_radius is None else safety_radius),
     )
-
-
-def variant_from_mapping(values: dict[str, Any]) -> ControllerVariant:
-    """Validate established experiment-column names into one typed variant."""
-    allowed = {"alpha_cross", "ell_x", "weight_stein", "theta", "horizon", "history_window", "history_len"}
-    unknown = values.keys() - allowed
-    if unknown:
-        raise ValueError(f"unknown controller variant fields: {sorted(unknown)}")
-    history = values.get("history_window", values.get("history_len"))
-    return ControllerVariant(
-        repulsion_weight=float(values["alpha_cross"]) if "alpha_cross" in values else None,
-        cross_bandwidth=float(values["ell_x"]) if "ell_x" in values else None,
-        flow_weight=float(values["weight_stein"]) if "weight_stein" in values else None,
-        theta=float(values["theta"]) if "theta" in values else None,
-        horizon=int(values["horizon"]) if "horizon" in values else None,
-        history_length=int(history) if history is not None else None,
-    )
-
-
-def run_trial(
-    scenario: Scenario,
-    variant: ControllerVariant,
-    seed: int,
-    team_size: int | None = None,
-    steps: int | None = None,
-    pairwise_d_thresh: float = 1.0,
-) -> dict[str, float | int | str]:
-    """Run one CPU trial and return its stable flat scalar CSV row."""
-    team = scenario.run_config.num_robots if team_size is None else int(team_size)
-    count = scenario.run_config.steps if steps is None else int(steps)
-    if team < 1 or count < 1:
-        raise ValueError("team_size and steps must be >= 1")
-    run = replace(scenario.run_config, seed=int(seed), num_robots=team, steps=count)
-    params = apply_variant(scenario.params, variant)
-    start = time.perf_counter()
-    result = run_simulation(AppConfig(run, params), device="cpu")
-    runtime_ms = (time.perf_counter() - start) * 1000
-    metrics = compute_all_metrics(
-        TrialData(
-            result.paths,
-            scenario.target_density_grid,
-            scenario.map_x_limits,
-            scenario.map_y_limits,
-            scenario.obstacle_map,
-            scenario.safety_radius,
-        ),
-        pairwise_d_thresh,
-    )
-    row: dict[str, float | int | str] = {
-        "scenario_name": scenario.name,
-        "seed": int(seed),
-        "team_size": team,
-        "steps": count,
-        "runtime_ms": float(runtime_ms),
-    }
-    for name, value in (
-        ("alpha_cross", variant.repulsion_weight),
-        ("ell_x", variant.cross_bandwidth),
-        ("weight_stein", variant.flow_weight),
-        ("theta", variant.theta),
-        ("horizon", variant.horizon),
-        ("history_window", variant.history_length),
-    ):
-        if value is not None:
-            row[name] = value
-    row.update(metrics)
-    return row
 
 
 def append_csv(path: str | Path, row: dict[str, Any], fieldnames: list[str]) -> None:

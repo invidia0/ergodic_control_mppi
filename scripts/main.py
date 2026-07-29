@@ -1,4 +1,4 @@
-"""Command-line entrypoint for single- and multi-robot simulations."""
+"""Command-line entrypoint for single-robot simulations."""
 
 import argparse
 from pathlib import Path
@@ -16,11 +16,12 @@ def main() -> None:
     parser.add_argument("--config", default="configs/mppi_params.yaml")
     parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto")
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--progress", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    print(f"Running {config.run.num_robots}-robot simulation on {args.device}...")
-    result = run_simulation(config, args.device)
+    print(f"Running single-robot simulation on {args.device}...")
+    result = run_simulation(config, args.device, progress=args.progress)
     print(f"Done on {result.device}; paths shape={result.paths.shape}.")
     if not args.no_plot:
         from ergodic_control_mppi.plotting.simulation import plot_simulation

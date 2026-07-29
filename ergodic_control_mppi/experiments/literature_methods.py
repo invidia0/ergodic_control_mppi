@@ -11,7 +11,6 @@ import numpy as np
 
 from ergodic_control_mppi.experiments.common import Scenario, build_target_grid
 from ergodic_control_mppi.models import double_integrator as model
-from ergodic_control_mppi.mppi.multi import run_multi
 from ergodic_control_mppi.mppi.single import run_single
 from ergodic_control_mppi.parameters import GMMParams
 from ergodic_control_mppi.simulation import random_state
@@ -39,7 +38,6 @@ def make_no_obstacle_scenario(
     base_scenario: Scenario,
     gmm_spec: GMMSpec,
     *,
-    team_size: int,
     steps: int,
     grid_shape: tuple[int, int] = (80, 80),
 ) -> Scenario:
@@ -77,9 +75,7 @@ def make_no_obstacle_scenario(
     return Scenario(
         name=gmm_spec.name,
         params=params,
-        run_config=dataclasses.replace(
-            base_scenario.run_config, steps=int(steps), num_robots=int(team_size)
-        ),
+        run_config=dataclasses.replace(base_scenario.run_config, steps=int(steps)),
         target_density_grid=target_grid,
         map_x_limits=tuple(map(float, params.workspace.x_limits)),
         map_y_limits=tuple(map(float, params.workspace.y_limits)),
@@ -304,23 +300,15 @@ def _run_mppi(
     steps: int,
     seed: int,
 ) -> np.ndarray:
-    team_size = int(x0_all.shape[0])
+    if x0_all.shape[0] != 1:
+        raise ValueError("the 'mppi' baseline is single-robot only")
     x0_j = jnp.asarray(x0_all, dtype=jnp.float32)
     params = scenario.params
 
-    if team_size == 1:
-        key = jax.random.PRNGKey(seed)
-        U0 = jnp.zeros((params.mppi.horizon, 3), dtype=jnp.float32)
-        result = jax.jit(run_single, static_argnames=("steps",))(params, x0_j[0], U0, key, steps)
-        return np.asarray(result.path, dtype=np.float64)[:, None, :]
-
     key = jax.random.PRNGKey(seed)
-    U0_all = jnp.zeros((team_size, params.mppi.horizon, 3), dtype=jnp.float32)
-    sim_keys = jax.random.split(jax.random.fold_in(key, 1), team_size)
-    result = jax.jit(run_multi, static_argnames=("steps",))(
-        params, x0_j, U0_all, sim_keys, steps
-    )
-    return np.asarray(result.paths, dtype=np.float64)
+    U0 = jnp.zeros((params.mppi.horizon, 3), dtype=jnp.float32)
+    result = jax.jit(run_single, static_argnames=("steps",))(params, x0_j[0], U0, key, steps)
+    return np.asarray(result.path, dtype=np.float64)[:, None, :]
 
 
 

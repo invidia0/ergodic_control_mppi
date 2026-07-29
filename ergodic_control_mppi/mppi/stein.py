@@ -54,14 +54,14 @@ def stein_gradient(
     """Compute target-attractive Stein flow for each queried position.
 
     Args:
-        positions: Query positions with shape ``(T, 2)``.
+        positions: Query positions with shape ``(Q, 2)``.
         particles: Target particles with shape ``(P, 2)``.
         gmm: Precomputed target-density terms.
         stein: Rotation and interaction parameters.
         bandwidth: Positive RBF bandwidth.
 
     Returns:
-        Mean Stein flow with shape ``(T, 2)``.
+        Mean Stein flow with shape ``(Q, 2)``.
     """
     particle = particles[None, :, :]
     query = positions[:, None, :]
@@ -74,10 +74,28 @@ def stein_gradient(
 def stein_repulsion(
     positions: jax.Array,
     particles: jax.Array,
+    weights: jax.Array,
     stein: SteinParams,
+    bandwidth: jax.Array,
 ) -> jax.Array:
-    """Compute pure rotated kernel-gradient interaction with cross particles."""
-    gradients = kernel_gradient(
-        particles[None, :, :], positions[:, None, :], stein.cross_bandwidth
-    )
-    return jnp.mean(gradients @ stein.rotation.T, axis=1)
+    """Weighted-mean RBF repulsion pushing each query away from ``particles``.
+
+    Used to repel the plan from a bounded memory of recently visited positions
+    (the curl-augmented "fading memory" coverage feedback). Same curl rotation
+    as ``stein_gradient``; no target-density term. Per-particle ``weights``
+    carry the recency decay and density-ratio; the mean is normalized by their
+    sum so the direction is well-defined regardless of the weighting.
+
+    Args:
+        positions: Query positions with shape ``(Q, 2)``.
+        particles: Memory positions with shape ``(P, 2)``.
+        weights: Non-negative per-particle weights with shape ``(P,)``.
+        stein: Rotation parameters.
+        bandwidth: Positive RBF bandwidth.
+
+    Returns:
+        Weighted-mean repulsion with shape ``(Q, 2)``.
+    """
+    repulsion = kernel_gradient(particles[None, :, :], positions[:, None, :], bandwidth)
+    rotated = repulsion @ stein.rotation.T
+    return jnp.sum(rotated * weights[None, :, None], axis=1) / jnp.maximum(jnp.sum(weights), 1e-12)

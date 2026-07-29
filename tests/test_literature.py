@@ -25,7 +25,6 @@ def _write_literature_config(directory: Path, base: Path, methods: str) -> Path:
         summary_csv_path: {directory / 'summary.csv'}
         convergence_csv_path: {directory / 'convergence.csv'}
         plot_output_dir: {directory / 'plots'}
-        team_size: 2
         steps: 3
         seeds: [0]
         d_thresh: 1.0
@@ -60,24 +59,24 @@ class LiteratureTest(unittest.TestCase):
     def test_all_methods_return_finite_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            base = write_small_config(directory, robots=2, steps=3)
+            base = write_small_config(directory, steps=3)
             config = load_literature_comparison_config(
                 _write_literature_config(directory, base, "mppi, smc, hedac, traj_opt, dec")
             )
             scenario = make_no_obstacle_scenario(
-                load_scenario(str(base)), config.scenarios[0], team_size=2, steps=3
+                load_scenario(str(base)), config.scenarios[0], steps=3
             )
             self.assertEqual(scenario.params.workspace.obstacles.shape, (0, 3))
-            initial = sample_initial_states(scenario.params, 2, 0)
+            initial = sample_initial_states(scenario.params, 1, 0)
             for method in config.methods:
                 paths = run_literature_method(method, scenario, initial, steps=3, seed=0, cfg=config)
-                self.assertEqual(paths.shape, (3, 2, 6))
+                self.assertEqual(paths.shape, (3, 1, 6))
                 self.assertTrue(np.all(np.isfinite(paths)))
 
     def test_runner_preserves_required_csv_fields_and_overwrite_guard(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            base = write_small_config(directory, robots=2, steps=2)
+            base = write_small_config(directory, steps=2)
             config_path = _write_literature_config(directory, base, "smc")
             rows, summaries, convergence = run_literature_comparison(str(config_path))
             self.assertEqual(len(rows), 1)

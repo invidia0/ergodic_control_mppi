@@ -26,6 +26,41 @@ def _validate_map_limits(
         raise ValueError("map limits must satisfy lower < upper on both axes")
 
 
+def compute_reachable_mask(
+    obstacles: ArrayLike,
+    safe_distance: float,
+    map_x_limits: tuple[float, float],
+    map_y_limits: tuple[float, float],
+    bins: tuple[int, int],
+) -> ArrayLike:
+    """Boolean grid ``(bins_y, bins_x)``: True where a cell center lies outside
+    every obstacle's ``radius + safe_distance``.
+
+    Used to restrict coverage metrics to the space the robot can actually reach,
+    so target mass sitting inside an obstacle is not counted as "missed".
+    """
+    _validate_map_limits(map_x_limits, map_y_limits)
+    bins_x, bins_y = bins
+    x_min, x_max = map_x_limits
+    y_min, y_max = map_y_limits
+    xs = x_min + (np.arange(bins_x) + 0.5) * (x_max - x_min) / bins_x
+    ys = y_min + (np.arange(bins_y) + 0.5) * (y_max - y_min) / bins_y
+    grid_x, grid_y = np.meshgrid(xs, ys)  # (bins_y, bins_x)
+    mask = np.ones((bins_y, bins_x), dtype=bool)
+    for ox, oy, radius in np.asarray(obstacles, dtype=np.float64).reshape(-1, 3):
+        mask &= (grid_x - ox) ** 2 + (grid_y - oy) ** 2 > (radius + safe_distance) ** 2
+    return mask
+
+
+def _restrict_to_mask(grid: ArrayLike, mask: ArrayLike | None) -> ArrayLike:
+    """Zero cells outside ``mask`` and renormalize to unit mass over the rest."""
+    if mask is None:
+        return grid
+    restricted = grid * mask
+    total = float(restricted.sum())
+    return restricted / total if total > 0.0 else restricted
+
+
 def _as_team_paths(robot_paths: ArrayLike) -> ArrayLike:
     """
     Convert robot paths to shape (steps, robots, state_dim).
@@ -132,12 +167,18 @@ def compute_team_ergodic_error(
     map_x_limits: tuple[float, float],
     map_y_limits: tuple[float, float],
     bins: tuple[int, int] | None = None,
+    reachable_mask: ArrayLike | None = None,
 ) -> float:
     """
     Compute the canonical scalar occupancy-based ergodic error.
     Lower is better.
+
+    If ``reachable_mask`` (a ``(bins_y, bins_x)`` boolean grid from
+    :func:`compute_reachable_mask`) is given, the target and occupancy are
+    restricted to reachable cells and renormalized, so target mass inside
+    obstacles is not counted as uncovered.
     """
-    target = _normalize_density(target_density_grid)
+    target = _restrict_to_mask(_normalize_density(target_density_grid), reachable_mask)
     grid_bins = bins if bins is not None else (target.shape[1], target.shape[0])
     occupancy = _team_occupancy_grid(robot_paths, map_x_limits, map_y_limits, grid_bins)
 
@@ -146,7 +187,7 @@ def compute_team_ergodic_error(
             f"occupancy grid shape {occupancy.shape} does not match target shape {target.shape}"
         )
 
-    diff = occupancy - target
+    diff = _restrict_to_mask(occupancy, reachable_mask) - target
     return float(np.mean(diff * diff))
 
 
@@ -156,14 +197,17 @@ def compute_cumulative_team_ergodic_error(
     map_x_limits: tuple[float, float],
     map_y_limits: tuple[float, float],
     bins: tuple[int, int] | None = None,
+    reachable_mask: ArrayLike | None = None,
 ) -> ArrayLike:
     """
     Cumulative occupancy MSE over time.
 
-    For each step t, the occupancy uses samples from steps [0, t].
+    For each step t, the occupancy uses samples from steps [0, t]. If
+    ``reachable_mask`` is given, target and occupancy are restricted to reachable
+    cells and renormalized (see :func:`compute_team_ergodic_error`).
     """
     team_paths = _as_team_paths(robot_paths)
-    target = _normalize_density(target_density_grid)
+    target = _restrict_to_mask(_normalize_density(target_density_grid), reachable_mask)
     grid_bins = bins if bins is not None else (target.shape[1], target.shape[0])
 
     bins_x, bins_y = grid_bins
@@ -188,7 +232,7 @@ def compute_cumulative_team_ergodic_error(
             total += float(np.sum(valid))
 
         occupancy = counts / total if total > 0.0 else np.zeros_like(counts)
-        diff = occupancy - target
+        diff = _restrict_to_mask(occupancy, reachable_mask) - target
         series[t] = float(np.mean(diff * diff))
 
     return series

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -v -E \"WARNING|warn|tensorflow|TF-TRT|cuda|cuDNN|cuBLAS|External|XLA|absl|Platform|Compil|^\\\\s*$\" /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/screen.err.log)",
+      "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/screen.py)",
+      "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/confirm.py)",
+      "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/refine.py)",
+      "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/lambda_sweep.py)"
+    ]
+  }
+}

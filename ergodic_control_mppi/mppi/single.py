@@ -24,6 +24,7 @@ def run_single(
     initial_controls: jax.Array,
     key: jax.Array,
     steps: int,
+    progress: bool = False,
 ) -> SingleRunResult:
     """Run a single-robot closed loop.
 
@@ -33,34 +34,49 @@ def run_single(
         initial_controls: Zero or warm-start controls with shape ``(T, 3)``.
         key: JAX PRNG key.
         steps: Positive scan length; static under JIT.
+        progress: Whether to print approximately one update per percent.
 
     Returns:
         Executed path ``(N, 6)`` and final optimal/surrogate trajectories.
     """
-    history = jnp.broadcast_to(initial_state[:2], (params.mppi.history_length, 2))
     temperature = jnp.asarray(params.mppi.temperature, dtype=jnp.float32)
     initial_optimal = jnp.broadcast_to(initial_state, (params.mppi.horizon, 6))
     initial_surrogate = jnp.broadcast_to(initial_state[:2], (params.mppi.horizon, 2))
+    initial_memory = jnp.broadcast_to(initial_state[:2], (params.mppi.memory_length, 2))
+    progress_interval = max(1, (steps + 99) // 100)
 
-    def scan_step(carry, _):
-        state, controls, current_key, current_temperature, current_history, _, _ = carry
+    def scan_step(carry, index):
+        if progress:
+            current = index + 1
+            jax.lax.cond(
+                (current % progress_interval == 0) | (current == steps),
+                lambda _: jax.debug.print(
+                    "Progress: {current}/{total} ({percent}%)",
+                    current=current,
+                    total=steps,
+                    percent=current * 100 // steps,
+                ),
+                lambda _: None,
+                operand=None,
+            )
+        state, controls, current_key, current_temperature, memory, _, _ = carry
         result = mppi_step(
             params,
             controls,
             state,
             current_key,
             current_temperature,
-            current_history,
+            memory,
         )
         next_state = step(state, result.control, params.model)
-        next_history = jnp.concatenate((current_history[1:], state[None, :2]), axis=0)
         next_temperature = adapt_temperature(current_temperature, result.weights, params)
+        next_memory = jnp.concatenate((memory[1:], next_state[None, :2]), axis=0)
         next_carry = (
             next_state,
             result.controls,
             result.key,
             next_temperature,
-            next_history,
+            next_memory,
             result.optimal_trajectory,
             result.surrogate,
         )
@@ -71,11 +87,11 @@ def run_single(
         initial_controls,
         key,
         temperature,
-        history,
+        initial_memory,
         initial_optimal,
         initial_surrogate,
     )
     (*_, final_optimal, final_surrogate), path = jax.lax.scan(
-        scan_step, initial, xs=None, length=steps
+        scan_step, initial, xs=jnp.arange(steps)
     )
     return SingleRunResult(path, final_optimal, final_surrogate)
