@@ -245,6 +245,22 @@ def _cells_for_stage(name: str, spec: dict[str, Any], defaults: dict[str, Any]) 
                         )
     else:
         raise ValueError(f"unknown stage kind '{kind}' in stage '{name}'")
+
+    # Two arms with identical overrides are the same experiment under two names.
+    # Deduplication keys on the arm, so they would both run: pure wasted GPU time,
+    # and the usual cause is a placeholder arm left unfilled.
+    if kind in ("arms", "factorial"):
+        signatures: dict[str, str] = {}
+        for arm, overrides in (spec.get("arms", {}) or {}).items():
+            key = json.dumps({k: _canonical(v) for k, v in sorted((overrides or {}).items())},
+                             sort_keys=True)
+            if key in signatures:
+                raise ValueError(
+                    f"stage '{name}': arms '{signatures[key]}' and '{arm}' set identical "
+                    f"parameters ({key or 'no overrides'}), so they would run twice. "
+                    "Fill in the placeholder or remove one."
+                )
+            signatures[key] = arm
     return cells
 
 

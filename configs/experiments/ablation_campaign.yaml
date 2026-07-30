@@ -178,5 +178,10 @@ stages:
     arms:
       full: {}
       memory_off: {stein.memory_gain: 0.0}
-      # Placeholder: overwrite with the stage-1/2/3 winner, then re-run --dry-run.
-      best: {}
+      # BEFORE LAUNCHING THIS STAGE: uncomment and fill in with the winner from
+      # stages 1-3. Left empty it would duplicate `full` on every cell (~5 GPU-h
+      # of nothing), which the duplicate-arm guard in ablation.py now refuses.
+      # best:
+      #   stein.memory_balance: ...
+      #   stein.memory_gain: ...
+      #   stein.coarse_bandwidth: ...
