@@ -521,6 +521,87 @@ def plot_generalization(
     return path
 
 
+STRUCTURE_ROWS = {"a0": r"$a=0$", "a085": r"$a=0.85$", "a1": r"$a=1$"}
+STRUCTURE_COLS = {
+    "Q1f": r"$Q{=}1$ ($h_f$)", "Q1m": r"$Q{=}1$ (mid)",
+    "Q2": r"$Q{=}2$", "Q3": r"$Q{=}3$",
+}
+
+
+def plot_structure(
+    campaign_dir: Path, stage: str, output: Path, metric: str = "occupancy_mse"
+) -> Path:
+    """Balance x scale-bank matrix for the structural cross.
+
+    Arm names are the grid coordinates (``<balance>_<scale>``); arms that do not
+    parse -- ``memory_off``, where both axes are meaningless -- are drawn as a
+    reference line instead of forced into a cell.
+    """
+    rows = load_index(campaign_dir, stage)
+    cells: dict[tuple[str, str], list[float]] = defaultdict(list)
+    outside: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        parts = row["arm"].split("_")
+        if len(parts) == 2 and parts[0] in STRUCTURE_ROWS and parts[1] in STRUCTURE_COLS:
+            cells[(parts[0], parts[1])].append(float(row[metric]))
+        else:
+            outside[row["arm"]].append(float(row[metric]))
+    if not cells:
+        raise ValueError(f"stage '{stage}' has no <balance>_<scale> arms to plot")
+
+    row_keys = [k for k in STRUCTURE_ROWS if any(k == r for r, _ in cells)]
+    col_keys = [k for k in STRUCTURE_COLS if any(k == c for _, c in cells)]
+    grid = np.full((len(row_keys), len(col_keys)), np.nan)
+    for (r, c), values in cells.items():
+        grid[row_keys.index(r), col_keys.index(c)] = np.median(values)
+
+    # Centre on the shipped default so the map reads as "better/worse than what
+    # we ship", consistent with every other interaction figure.
+    default = grid[row_keys.index("a085"), col_keys.index("Q3")] if (
+        "a085" in row_keys and "Q3" in col_keys
+    ) else np.nanmedian(grid)
+    change = 100.0 * (grid - default) / default
+    limit = float(np.nanmax(np.abs(change))) or 1.0
+
+    with plt.rc_context(rc=paper_style("column")):
+        figure, axis = plt.subplots(figsize=(3.35, 2.5))
+        image = axis.pcolormesh(
+            np.arange(len(col_keys) + 1) - 0.5, np.arange(len(row_keys) + 1) - 0.5,
+            change, cmap=DIVERGING_CMAP,
+            norm=TwoSlopeNorm(vcenter=0.0, vmin=-limit, vmax=limit), shading="flat",
+        )
+        for r in range(len(row_keys)):
+            for c in range(len(col_keys)):
+                if np.isfinite(change[r, c]):
+                    axis.text(c, r, f"{change[r, c]:+.0f}", ha="center", va="center",
+                              fontsize=6.0, color="#111111")
+        # Offset into the cell corner: the best cell is often the default, whose
+        # "+0" label would otherwise sit under the marker.
+        best_r, best_c = np.unravel_index(np.nanargmin(grid), grid.shape)
+        axis.plot(best_c - 0.33, best_r - 0.30, "*", color="#111111",
+                  markersize=5.5, markeredgewidth=0)
+        axis.set_xticks(np.arange(len(col_keys)))
+        axis.set_xticklabels([STRUCTURE_COLS[c] for c in col_keys], fontsize=6)
+        axis.set_yticks(np.arange(len(row_keys)))
+        axis.set_yticklabels([STRUCTURE_ROWS[r] for r in row_keys], fontsize=6)
+        axis.set_xlabel("scale bank")
+        axis.set_ylabel("trail / excess balance")
+        axis.set_title("% vs shipped default (blue better)", fontsize=7)
+        axis.grid(visible=False)
+        bar = figure.colorbar(image, ax=axis, fraction=0.046, pad=0.03)
+        bar.ax.tick_params(labelsize=5.5)
+        if outside:
+            note = ", ".join(
+                f"{ARM_LABELS.get(k, k)} {100.0 * (np.median(v) - default) / default:+.0f}%"
+                for k, v in sorted(outside.items())
+            )
+            axis.set_xlabel(f"scale bank\n({note})", fontsize=6)
+        figure.tight_layout(pad=0.3)
+        path = save(figure, output)
+        plt.close(figure)
+    return path
+
+
 def plot_timing(timing_json: Path, output: Path) -> Path:
     """Per-stage time budget (donut) beside the cost scaling in K, T, P, Q.
 
@@ -699,6 +780,8 @@ def write_best_table(
 STAGE_FIGURES = {
     "screening": ("tornado", "violins"),
     "interactions": ("interactions",),
+    "core": ("arms", "convergence", "generalization", "table"),
+    "structure": ("structure", "arms", "table"),
     "components": ("arms", "convergence", "table"),
     "generalization": ("generalization",),
     "smoke": ("tornado", "violins", "arms", "convergence", "table"),
@@ -741,6 +824,8 @@ def main() -> None:
                                                     args.threshold_factor))
                 elif kind == "generalization":
                     written.append(plot_generalization(args.campaign_dir, stage, target.with_suffix(".pdf")))
+                elif kind == "structure":
+                    written.append(plot_structure(args.campaign_dir, stage, target.with_suffix(".pdf")))
                 elif kind == "table":
                     written.append(write_best_table(
                         args.campaign_dir, stage, target.with_suffix(".tex"),

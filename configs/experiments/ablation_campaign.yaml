@@ -140,11 +140,22 @@ stages:
           mppi.K: [125, 250, 500, 1000, 2000, 3000, 4000]
           mppi.T: [50, 100, 150, 250, 350, 500, 700]
 
-  # Stage 3 -- structural arms at the long horizon, 10 seeds.
-  components:
-    kind: arms
+  # Stage 3a -- the arms that carry the Sec. III-C claims, crossed over
+  # 4 densities x 4 obstacle counts. Breadth is spent here rather than on the
+  # response-surface stages: this is what turns "helps on our target" into
+  # "helps in N of 16 environments", and it exercises the DERIVED scales
+  # (h_c ranges 0.95 to 12.0 across these densities) which are otherwise
+  # validated on a single mixture.
+  #
+  # 5 seeds per environment is thin per environment by design. Report win counts
+  # across environments from the within-environment paired difference against
+  # `full` (same seed, same map) -- not per-environment significance.
+  core:
+    kind: factorial
     steps: 20000
-    seeds: [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    seeds: [43, 44, 45, 46, 47]
+    densities: [trimodal, four_mode, multiscale, unimodal]
+    obstacle_counts: [3, 6, 0, 10]
     arms:
       full: {}
       memory_off: {stein.memory_gain: 0.0}
@@ -159,6 +170,47 @@ stages:
         stein.memory_scales: 1
         stein.fine_bandwidth: 0.632
       two_scale: {stein.memory_scales: 2}
+
+  # Stage 3b -- structural cross among the core arms: balance x scale bank.
+  # Those six arms are the spokes of a 3 x 4 grid through the default, so this
+  # fills in the six missing corners and answers a question stage 2 does not
+  # reach: is the scale bank's benefit contingent on the balance setting?
+  # (Stage 2 has a x k_M and tau x Q, but not a x Q -- and `one_good_scale`
+  # needs two coupled overrides, which a `grid` pair cannot express.)
+  #
+  # Reference environment only, 10 seeds: like the other interaction stages this
+  # establishes a response-surface SHAPE, which is conventionally measured once.
+  # Crossing it over the 16 environments as well costs +22 h.
+  #
+  # Arm names are the grid coordinates -- <balance>_<scale> -- and the figure
+  # parses them, so keep the convention if you add levels.
+  structure:
+    kind: arms
+    steps: 20000
+    seeds: [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    arms:
+      a0_Q1f:   {stein.memory_balance: 0.0,  stein.memory_scales: 1}
+      a0_Q1m:   {stein.memory_balance: 0.0,  stein.memory_scales: 1, stein.fine_bandwidth: 0.632}
+      a0_Q2:    {stein.memory_balance: 0.0,  stein.memory_scales: 2}
+      a0_Q3:    {stein.memory_balance: 0.0}
+      a085_Q1f: {stein.memory_balance: 0.85, stein.memory_scales: 1}
+      a085_Q1m: {stein.memory_balance: 0.85, stein.memory_scales: 1, stein.fine_bandwidth: 0.632}
+      a085_Q2:  {stein.memory_balance: 0.85, stein.memory_scales: 2}
+      a085_Q3:  {stein.memory_balance: 0.85}   # the shipped default
+      a1_Q1f:   {stein.memory_balance: 1.0,  stein.memory_scales: 1}
+      a1_Q1m:   {stein.memory_balance: 1.0,  stein.memory_scales: 1, stein.fine_bandwidth: 0.632}
+      a1_Q2:    {stein.memory_balance: 1.0,  stein.memory_scales: 2}
+      a1_Q3:    {stein.memory_balance: 1.0}
+      memory_off: {stein.memory_gain: 0.0}     # a and Q are meaningless at k_M = 0
+
+  # Stage 3c -- auxiliary arms. Hyperparameter and prior-component checks rather
+  # than Sec. III-C claims, so they stay on the reference environment.
+  components:
+    kind: arms
+    steps: 20000
+    seeds: [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    arms:
+      full: {}
       no_curl: {stein.theta: 0.0}
       weak_flow: {stein.weight_stein: 500.0}
       no_speed_gauge: {stein.reference_speed: 0.0}
@@ -167,21 +219,22 @@ stages:
       # Buffer truncation at fixed gamma: 3 tau (shipped) vs 5 tau.
       long_buffer: {mppi.memory_length: 2500}
 
-  # Stage 4 -- does the best combination generalize? Fill in `best` from the
-  # stage 1-3 results before launching this stage.
+  # Stage 4 -- the tuned best combination, over the same environments as `core`
+  # so it drops straight into that comparison. `core` already answers "does it
+  # generalize" for every headline arm, so this stage only has to cover the one
+  # configuration that does not exist until stages 1-3 are read.
+  #
+  # BEFORE LAUNCHING: uncomment `best` and fill in the winner. Left empty it
+  # would duplicate `full`, which the duplicate-arm guard in ablation.py refuses.
   generalization:
     kind: factorial
     steps: 20000
-    seeds: [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
-    densities: [unimodal, bimodal, trimodal, four_mode, multiscale]
-    obstacle_counts: [0, 3, 6, 10]
+    seeds: [43, 44, 45, 46, 47]
+    densities: [trimodal, four_mode, multiscale, unimodal]
+    obstacle_counts: [3, 6, 0, 10]
     arms:
-      full: {}
-      memory_off: {stein.memory_gain: 0.0}
-      # BEFORE LAUNCHING THIS STAGE: uncomment and fill in with the winner from
-      # stages 1-3. Left empty it would duplicate `full` on every cell (~5 GPU-h
-      # of nothing), which the duplicate-arm guard in ablation.py now refuses.
       # best:
       #   stein.memory_balance: ...
       #   stein.memory_gain: ...
       #   stein.coarse_bandwidth: ...
+      full: {}
