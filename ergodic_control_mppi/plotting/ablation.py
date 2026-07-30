@@ -572,23 +572,32 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
 
         axis = axes[1]
         scaling = report.get("scaling", {})
-        slopes = {"K": 1.0, "T": 1.0, "P": 2.0, "Q": 1.0}
+        # Each parameter is plotted against the stage it actually drives, not the
+        # total: the total carries a fixed ~2.4 ms overhead, so no pure power law
+        # can fit it and a slope reference against it would be misleading.
+        drives = {
+            "K": ("rollouts_ms", 1.0, r"rollouts $\propto K$"),
+            "T": ("rollouts_ms", 1.0, r"rollouts $\propto T$"),
+            "P": ("memory_ms", 2.0, r"KDE $\propto P^2$"),
+            "Q": ("memory_ms", 1.0, r"KDE $\propto Q$"),
+        }
         for (name, rows_list), color in zip(
             sorted(scaling.items()), ["#2E4A6B", "#4E79A7", ACCENT, "#59A14F"]
         ):
+            key, slope, label = drives[name]
             levels = np.asarray([row["level"] for row in rows_list], dtype=np.float64)
-            times = np.asarray([row["total_ms"] for row in rows_list], dtype=np.float64)
-            axis.plot(levels / levels[0], times / times[0], "o-", color=color,
-                      markersize=2.4, linewidth=0.9, label=f"${name}$")
-            reference = (levels / levels[0]) ** slopes[name]
-            axis.plot(levels / levels[0], reference, color=color, linewidth=0.5,
+            times = np.asarray([row[key] for row in rows_list], dtype=np.float64)
+            relative = levels / levels[0]
+            axis.plot(relative, times / times[0], "o-", color=color,
+                      markersize=2.4, linewidth=0.9, label=label)
+            axis.plot(relative, relative ** slope, color=color, linewidth=0.5,
                       linestyle=":", alpha=0.7)
         axis.set_xscale("log")
         axis.set_yscale("log")
         axis.set_xlabel("parameter, relative to its smallest level")
-        axis.set_ylabel("time per step, relative")
+        axis.set_ylabel("stage time, relative")
         axis.set_title("(b) cost scaling (dotted: predicted slope)", fontsize=7)
-        axis.legend(fontsize=6, loc="upper left", handlelength=1.2)
+        axis.legend(fontsize=5.5, loc="upper left", handlelength=1.2, labelspacing=0.25)
         figure.tight_layout(pad=0.35, w_pad=1.0)
         path = save(figure, output)
         plt.close(figure)

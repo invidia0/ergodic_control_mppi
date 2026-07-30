@@ -488,11 +488,16 @@ def run_campaign(
 
 
 # Cost model for the dry-run estimate, least-squares fitted to the 25 points
-# measured by experiments/timing.py on an RTX 5090 (median |error| 7.5%). Terms:
-# constant overhead, rollouts O(K*T), occupancy KDE O(Q*P^2), attraction O(T^2).
-# A flat per-step rate underestimates the expensive corners by ~5x, so budgeting
-# needs at least this much structure. Refit with --scaling if the device changes.
-COST_MS = (1.352, 5.94e-6, 8.99e-8, 1.378e-5)
+# measured by experiments/timing.py on the RTX 5090 that runs the campaign
+# (median |error| 4.0%, measured bracket 1.2-9.0 ms/step). Terms: constant
+# overhead, rollouts O(K*T), occupancy KDE O(Q*P^2), attraction O(T^2). A flat
+# per-step rate underestimates the expensive corners by ~5x, so budgeting needs
+# at least this much structure.
+#
+# Refit after any hardware change:
+#   python -m ergodic_control_mppi.experiments.timing --device gpu --scaling
+# then least-squares the four terms against the recorded total_ms values.
+COST_MS = (2.367, 8.151e-7, 1.44e-8, 1.378e-5)
 
 
 def _estimate_ms(data: dict[str, Any]) -> float:
