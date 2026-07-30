@@ -11,6 +11,12 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 
+from ergodic_control_mppi.plotting.style import (
+    SCENARIO_COLORS,
+    SCENARIO_LINESTYLES,
+    paper_style,
+)
+
 METHOD_ORDER = ["mppi", "smc", "hedac", "traj_opt", "dec"]
 METHOD_LABELS = {
     "mppi": "Proposed",
@@ -26,47 +32,6 @@ SCENARIO_LABELS = {
     "trimodal": "Trimodal",
     "four_mode": "Four-mode",
 }
-SCENARIO_COLORS = {
-    "unimodal": "#4E79A7",
-    "bimodal": "#F28E2B",
-    "trimodal": "#59A14F",
-    "four_mode": "#E15759",
-}
-SCENARIO_LINESTYLES = {
-    "unimodal": "-",
-    "bimodal": "--",
-    "trimodal": "-.",
-    "four_mode": ":",
-}
-
-
-
-def _paper_plot_style() -> dict[str, object]:
-    return {
-        "font.family": "serif",
-        "font.serif": ["STIXGeneral", "DejaVu Serif", "Times New Roman"],
-        "mathtext.fontset": "stix",
-        "text.usetex": False,
-        "figure.facecolor": "#FFFFFF",
-        "axes.facecolor": "#DCE2EC",
-        "axes.edgecolor": "#98A4BA",
-        "axes.grid": True,
-        "axes.axisbelow": True,
-        "grid.color": "#E8ECF4",
-        "grid.alpha": 0.9,
-        "grid.linewidth": 0.9,
-        "axes.titlesize":  16,
-        "axes.titleweight": "bold",
-        "axes.labelsize": 16,
-        "xtick.labelsize": 16,
-        "ytick.labelsize": 16,
-        "legend.fontsize": 16,
-        "savefig.facecolor": "#FFFFFF",
-        "savefig.edgecolor": "#FFFFFF",
-    }
-
-
-
 def _load_rows(csv_path: str | Path) -> list[dict[str, str]]:
     with open(csv_path, "r", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -136,7 +101,7 @@ def plot_literature_bars(
             float(row["team_ergodic_error_std"]),
         )
 
-    with plt.rc_context(rc=_paper_plot_style()):
+    with plt.rc_context(rc=paper_style("poster")):
         fig, ax = plt.subplots(1, 1, figsize=(9.2, 5.4), constrained_layout=True)
         x = np.arange(len(methods), dtype=np.float64)
         width = 0.8 / max(len(scenarios), 1)
@@ -209,7 +174,7 @@ def plot_literature_convergence(
     out_root.mkdir(parents=True, exist_ok=True)
     saved_paths: list[str] = []
 
-    with plt.rc_context(rc=_paper_plot_style()):
+    with plt.rc_context(rc=paper_style("poster")):
         cmap = plt.get_cmap("tab10")
         for scenario_name in scenarios:
             fig, ax = plt.subplots(1, 1, figsize=(9.2, 5.4), constrained_layout=True)
@@ -272,7 +237,7 @@ def plot_literature_convergence_single_axis_5(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    with plt.rc_context(rc=_paper_plot_style()):
+    with plt.rc_context(rc=paper_style("poster")):
         fig, ax = plt.subplots(1, 1, figsize=(9.2, 5.4), constrained_layout=True)
         cmap = plt.get_cmap("tab10")
         for m_idx, method in enumerate(methods):
@@ -339,7 +304,7 @@ def plot_literature_convergence_single_axis_20(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    with plt.rc_context(rc=_paper_plot_style()):
+    with plt.rc_context(rc=paper_style("poster")):
         fig, ax = plt.subplots(1, 1, figsize=(9.8, 6.0), constrained_layout=True)
         cmap = plt.get_cmap("tab10")
         method_colors: dict[str, tuple[float, float, float, float]] = {

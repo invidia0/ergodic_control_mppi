@@ -10,6 +10,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from ergodic_control_mppi.experiments.common import Scenario, build_target_grid
+from ergodic_control_mppi.metrics.ergodicity import (
+    fourier_basis_values as _basis_values_np,
+    fourier_wavenumbers,
+)
 from ergodic_control_mppi.models import double_integrator as model
 from ergodic_control_mppi.mppi.single import run_single
 from ergodic_control_mppi.parameters import GMMParams
@@ -56,6 +60,7 @@ def make_no_obstacle_scenario(
 
     gmm = GMMParams(
         means=means,
+        covariance=covs,
         covariance_inverse=cov_inv,
         log_weights=log_weights,
         log_normalizers=log_norm,
@@ -96,16 +101,7 @@ def sample_initial_states(params, team_size: int, seed: int) -> np.ndarray:
 
 
 def _fourier_context(scenario: Scenario, order: int) -> _FourierContext:
-    if order < 1:
-        raise ValueError("fourier order must be >= 1")
-    k_list = []
-    for kx in range(order + 1):
-        for ky in range(order + 1):
-            if kx == 0 and ky == 0:
-                continue
-            k_list.append((float(kx), float(ky)))
-    k_arr = np.asarray(k_list, dtype=np.float64)
-    lambda_k = np.power(1.0 + np.sum(k_arr * k_arr, axis=1), -1.5)
+    k_arr, lambda_k = fourier_wavenumbers(order)
 
     x_min, x_max = scenario.map_x_limits
     y_min, y_max = scenario.map_y_limits
@@ -132,26 +128,6 @@ def _fourier_context(scenario: Scenario, order: int) -> _FourierContext:
         y_min=float(y_min),
         y_max=float(y_max),
     )
-
-
-
-def _basis_values_np(
-    xy: np.ndarray,
-    k_arr: np.ndarray,
-    x_min: float,
-    x_max: float,
-    y_min: float,
-    y_max: float,
-) -> np.ndarray:
-    pts = np.asarray(xy, dtype=np.float64)
-    kx = k_arr[:, 0][None, :]
-    ky = k_arr[:, 1][None, :]
-    x_span = max(float(x_max - x_min), 1e-12)
-    y_span = max(float(y_max - y_min), 1e-12)
-
-    xn = ((pts[:, 0:1] - x_min) / x_span)
-    yn = ((pts[:, 1:2] - y_min) / y_span)
-    return np.cos(np.pi * xn * kx) * np.cos(np.pi * yn * ky)
 
 
 

@@ -12,13 +12,15 @@ mppi:
   ess_target: 0.3   # target effective sample size fraction for adaptive lambda
   lam_min: 0.05
   lam_max: 20.0
-  # memory_length is derived as ceil(3 * memory_time / delta_t); set it here only to
-  # override that (the occupancy KDE is O(memory_scales * P^2), so P dominates cost).
+  memory_length: 2000  # executed-position buffer; recency-weighted (gamma**age) repulsion; long enough to fill a mode in one visit
   noise:
     sigma:
       - [0.9, 0.0, 0.0]  # linear x  (tighter sampling => cleaner flow tracking / dwelling)
       - [0.0, 0.9, 0.0]  # linear y
       - [0.0, 0.0, 0.45] # angular
+      # - [3.0, 0.0, 0.0]  # linear x  (tighter sampling => cleaner flow tracking / dwelling)
+      # - [0.0, 3.0, 0.0]  # linear y
+      # - [0.0, 0.0, 1.5] # angular
 
 # Map and obstacle costs
 map:
@@ -56,20 +58,17 @@ density:
 # Stein flow settings
 stein:
   theta: 30.0  # degrees: 0 = pure score-descent, 90 = pure curl; 30 => direct transits, reaches all modes
-  weight_stein: 3000.0      # flow-tracking weight; must dominate control/obstacle costs to actually dwell
+  weight_stein: 3000.0         # flow-tracking weight; must dominate control/obstacle costs to actually dwell
   ell_self: 1.0             # floor under the adaptive median RBF bandwidth
-  reference_speed: 4.0      # >0 => track flow DIRECTION at this constant speed (LQR style); 0 => raw magnitude
-
-  # Fading-memory coverage feedback: three free parameters, spatial scales derived.
-  memory_time: 10.0         # tau_M [s]: decay exp(-dt/tau), buffer P = ceil(3 tau/dt)
-  memory_balance: 0.85      # a in [0, 1]: 0 = pure trail avoidance, 1 = pure over-coverage correction
-  memory_gain: 15.0         # k_M: memory strength as a ratio to the attraction (implicit weight 1)
-  memory_scales: 3          # Q log-spaced scales between the fine and coarse bandwidths
-  fill_resolution: 0.2      # delta_res [m]: sensor footprint / track spacing => h_f = 2 delta_res^2
-  # coarse_bandwidth (h_c) defaults to the mode width median_j tr(Sigma_j) -- repulsion
-  # peaks one mode radius out, the same sqrt(h/2) convention as h_f -- capped at
-  # 0.25*min_{r!=s} ||mu_r - mu_s||^2 so it never merges neighbouring modes.
-  # Set coarse_bandwidth / fine_bandwidth explicitly only to override the derivation.
+  repulsion_weight: 15.0       # coarse eject strength; gated by fill-completeness (eject_fill_gated) so it can be strong without leaving early
+  repulsion_bandwidth: 3.0     # RBF bandwidth for the coarse (eject/distribute) memory repulsion
+  memory_decay: 0.999          # gamma: recency weight gamma**age (tau ~ 1/(1-gamma) ~ 1000 steps); long enough to fill a mode before forgetting
+  reference_speed: 4.0         # >0 => track flow DIRECTION at this constant speed (LQR style); 0 => raw magnitude. 4 = 20k-horizon optimum
+  spiral_bandwidth: 0.3        # fine RBF bandwidth for the within-mode spiral-fill term
+  spiral_weight: 10.0          # strength of the fine spiral-fill repulsion (0 disables)
+  # Frozen design toggles (deficit_gate=1, spiral_deficit=0, eject_fill_gated=1) are the settled
+  # winners from the Phase 1/3/4 ablations; they now default to those values in config.py. Set them
+  # explicitly only in an ablation config to sweep them; the main run leaves them hardcoded.
 
 model:
   delta_t: 0.02  # source of truth for integration timestep

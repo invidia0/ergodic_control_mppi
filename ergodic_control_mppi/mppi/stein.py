@@ -6,6 +6,11 @@ from jax.scipy.special import logsumexp
 
 from ergodic_control_mppi.parameters import GMMParams, SteinParams
 
+# Design constant: dimensionless floor gating the over-coverage field off as the
+# total relative excess vanishes. Small against the O(1) excesses of normal
+# operation, so it only acts in the (near-)fully-under-covered regime.
+ACTIVITY_FLOOR = 1e-3
+
 
 def component_logpdf(position: jax.Array, params: GMMParams) -> jax.Array:
     """Return component log densities with shape ``(..., M)``."""
@@ -99,3 +104,89 @@ def stein_repulsion(
     repulsion = kernel_gradient(particles[None, :, :], positions[:, None, :], bandwidth)
     rotated = repulsion @ stein.rotation.T
     return jnp.sum(rotated * weights[None, :, None], axis=1) / jnp.maximum(jnp.sum(weights), 1e-12)
+
+
+def smoothed(gmm: GMMParams, bandwidth: jax.Array) -> GMMParams:
+    """Convolve the target with the normalized kernel ``kappa_h / (pi h)``.
+
+    That kernel is ``N(0, (h/2) I)``, so the convolution is again a Gaussian
+    mixture with every covariance inflated by ``(h/2) I`` -- closed form, no
+    quadrature. Comparing occupancy at scale ``h`` against ``smoothed(gmm, h)``
+    instead of the raw target removes the bandwidth-dependent bias of comparing
+    a smoothed density to an unsmoothed one.
+    """
+    covariance = gmm.covariance + 0.5 * bandwidth * jnp.eye(2)
+    return GMMParams(
+        means=gmm.means,
+        covariance=covariance,
+        covariance_inverse=jnp.linalg.inv(covariance),
+        log_weights=gmm.log_weights,
+        log_normalizers=-0.5
+        * (2 * jnp.log(2 * jnp.pi) + jnp.linalg.slogdet(covariance)[1]),
+    )
+
+
+def multiscale_memory_flow(
+    positions: jax.Array,
+    memory: jax.Array,
+    recency: jax.Array,
+    gmm: GMMParams,
+    stein: SteinParams,
+    density_floor: jax.Array,
+) -> jax.Array:
+    """Normalized multiscale over-coverage repulsion from the memory buffer.
+
+    At each of ``memory_scales`` log-spaced bandwidths between
+    ``fine_bandwidth`` and ``coarse_bandwidth``, blend two *separately
+    normalized fields* by ``memory_balance`` in ``[0, 1]``: the fading trail
+    (0), weighted by ``omega_i``, and the relative over-coverage (1), weighted
+    by ``omega_i e_i`` with
+    ``e_i = [o_h(m_i) - p_h(m_i)]_+ / (p_h(m_i) + density_floor)``. Because
+    :func:`stein_repulsion` divides by the weight sum, blending the two fields
+    makes ``memory_balance`` a genuine interpolation coefficient -- unlike
+    blending the weights themselves, whose effective mixing coefficient drifts
+    with time, bandwidth and the instantaneous total surplus.
+
+    The trail term is a true probability-weighted average; the excess term is
+    deliberately a *sub*-probability one, its deficit being the activity gate
+    described inline below.
+
+    Each scale is divided by ``max_r |grad kappa_h| = sqrt(2/h) e^{-1/2}`` so the
+    scales are commensurate and carry no separate gains.
+
+    Args:
+        positions: Query positions with shape ``(Q, 2)``.
+        memory: Executed-position buffer with shape ``(P, 2)``.
+        recency: Non-negative fading weights with shape ``(P,)``.
+        gmm: Target density terms.
+        stein: Bandwidth endpoints, scale count, and balance.
+        density_floor: Positive density scale stabilizing the relative excess.
+
+    Returns:
+        Scale-averaged repulsion with shape ``(Q, 2)``.
+    """
+    scales = jnp.geomspace(
+        stein.fine_bandwidth, stein.coarse_bandwidth, stein.memory_scales
+    )
+    total = jnp.zeros_like(positions)
+    for index in range(stein.memory_scales):
+        bandwidth = scales[index]
+        occupancy = (kernel(memory[:, None, :], memory[None, :, :], bandwidth) @ recency) / (
+            jnp.sum(recency) * jnp.pi * bandwidth
+        )
+        target = pdf(memory, smoothed(gmm, bandwidth))
+        excess = jnp.maximum(occupancy - target, 0.0) / (target + density_floor)
+        # Activity gate. The normalized excess field is scale-invariant in the excess
+        # (multiplying every e_i by c leaves it unchanged), so it does NOT tend to zero
+        # as over-coverage disappears -- it would jump to zero only at the weight-sum
+        # floor. Multiplying by S/(S+eps_S), with S the recency-mean excess, makes the
+        # excess component genuinely continuous at S=0 while acting as the identity
+        # whenever S >> eps_S, i.e. in normal operation.
+        activity = jnp.sum(recency * excess) / jnp.sum(recency)
+        field = (1.0 - stein.memory_balance) * stein_repulsion(
+            positions, memory, recency, stein, bandwidth
+        ) + stein.memory_balance * (activity / (activity + ACTIVITY_FLOOR)) * stein_repulsion(
+            positions, memory, recency * excess, stein, bandwidth
+        )
+        total += jnp.sqrt(0.5 * jnp.e * bandwidth) * field
+    return total / stein.memory_scales

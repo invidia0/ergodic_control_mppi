@@ -86,9 +86,17 @@ The model dimensions are fixed and are not configuration keys:
 
 Active tuning keys are `mppi.T`, `mppi.K`, `mppi.lambda`, `mppi.alpha`,
 `mppi.exploration`, `mppi.ess_target`, `mppi.lam_min`, `mppi.lam_max`,
-`mppi.memory_length`, `mppi.noise.sigma`, `stein.weight_stein`,
-`stein.ell_self`, `stein.repulsion_weight`, `stein.repulsion_bandwidth`, and
-`stein.theta`. `stein.theta` accepts the inclusive range `[0, 90]` degrees.
+`mppi.noise.sigma`, `stein.weight_stein`, `stein.ell_self`, `stein.theta`,
+`stein.reference_speed`, and the three fading-memory parameters
+`stein.memory_time`, `stein.memory_balance`, `stein.memory_gain`.
+`stein.theta` accepts the inclusive range `[0, 90]` degrees.
+
+The memory term's spatial scales are derived, not tuned: `stein.fill_resolution`
+sets the fine bandwidth (`h_f = 2 delta_res^2`) and the coarse bandwidth comes
+from the target's mode width. `mppi.memory_length` follows from
+`stein.memory_time`. Each can be overridden (`stein.fine_bandwidth`,
+`stein.coarse_bandwidth`, `mppi.memory_length`) but the defaults are the
+measured configuration.
 
 ## Research commands
 

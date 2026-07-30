@@ -28,6 +28,7 @@ class GMMParams:
     """Precomputed terms for a two-dimensional Gaussian mixture."""
 
     means: jax.Array
+    covariance: jax.Array
     covariance_inverse: jax.Array
     log_weights: jax.Array
     log_normalizers: jax.Array
@@ -36,20 +37,25 @@ class GMMParams:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class SteinParams:
-    """Stein-flow geometry and cost weights."""
+    """Stein-flow geometry and fading-memory coverage feedback.
 
+    The memory term is a bank of ``memory_scales`` log-spaced bandwidths between
+    ``fine_bandwidth`` and ``coarse_bandwidth``, each gauge-normalized so one
+    ``memory_gain`` suffices; ``memory_balance`` interpolates trail avoidance
+    against over-coverage correction. Both bandwidths are derived from the robot
+    resolution and the target density rather than tuned.
+    """
+
+    memory_scales: int = field(metadata={"static": True})
     rotation: jax.Array
     self_bandwidth: float
     flow_weight: float
-    repulsion_weight: float
-    repulsion_bandwidth: float
+    coarse_bandwidth: float
+    fine_bandwidth: float
     memory_decay: float
     reference_speed: float
-    deficit_gate: float
-    spiral_bandwidth: float
-    spiral_weight: float
-    spiral_deficit: float
-    eject_fill_gated: float
+    memory_gain: float
+    memory_balance: float
 
 
 @jax.tree_util.register_dataclass

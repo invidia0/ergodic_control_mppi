@@ -100,6 +100,28 @@ def _positive_definite(value: Any, path: str, shape: tuple[int, ...]) -> np.ndar
     return result
 
 
+def _mode_scale(means: np.ndarray, covariances: np.ndarray) -> float:
+    """Coarse bandwidth h_c: characteristic mode width, capped below mode separation.
+
+    h_c estimates occupancy at the scale of *one* mode, so it must be large
+    enough to aggregate that mode's visitation yet small enough not to merge
+    neighbours: ``r_mode^2 <~ h_c << d_mode^2``.
+
+    Same convention as the fine scale: kernel repulsion peaks at ``sqrt(h/2)``,
+    so ``h = 2 r^2`` puts the peak at radius ``r``. Taking the mode radius as
+    the mean per-axis standard deviation, ``r_mode^2 = tr(Sigma)/2``, gives
+    ``h_c = tr(Sigma)`` -- the peak sits one mode radius out. The pairwise mean
+    separation only supplies an upper bound, capping the peak at half the
+    distance to the nearest neighbouring mode.
+    """
+    width = float(np.median(np.trace(covariances, axis1=1, axis2=2)))
+    if means.shape[0] < 2:
+        return width
+    separation = np.sum((means[:, None, :] - means[None, :, :]) ** 2, axis=-1)
+    np.fill_diagonal(separation, np.inf)
+    return min(width, 0.25 * float(separation.min()))
+
+
 def _generate_obstacles(
     count: int,
     x_limits: np.ndarray,
@@ -149,6 +171,26 @@ def load_config(path: str | Path) -> AppConfig:
             raise ValueError(f"Config key 'mppi.{removed}' was removed; the model dimensions are fixed")
     if "weight_pdf" in stein_raw:
         raise ValueError("Config key 'stein.weight_pdf' was removed because it was inactive")
+    for removed in (
+        "memory_mode",
+        "memory_decay",
+        "deficit_gate",
+        "spiral_deficit",
+        "eject_fill_gated",
+        "repulsion_weight",
+        "spiral_weight",
+    ):
+        if removed in stein_raw:
+            raise ValueError(
+                f"Config key 'stein.{removed}' was removed with the two-scale memory term; "
+                "use stein.memory_time, stein.memory_balance and stein.memory_gain"
+            )
+    for renamed, replacement in (
+        ("repulsion_bandwidth", "coarse_bandwidth"),
+        ("spiral_bandwidth", "fine_bandwidth"),
+    ):
+        if renamed in stein_raw:
+            raise ValueError(f"Config key 'stein.{renamed}' was renamed to 'stein.{replacement}'")
     if "history_len" in mppi_raw:
         raise ValueError("Config key 'mppi.history_len' was removed with multi-robot support")
     for removed in ("ell_x", "alpha_cross"):
@@ -203,6 +245,7 @@ def load_config(path: str | Path) -> AppConfig:
     log_normalizers = (-0.5 * (2 * np.log(2 * np.pi) + np.linalg.slogdet(covariances)[1])).astype(np.float32)
     gmm = GMMParams(
         means=jnp.asarray(means),
+        covariance=jnp.asarray(covariances),
         covariance_inverse=jnp.asarray(covariance_inverse),
         log_weights=jnp.log(jnp.asarray(weights)),
         log_normalizers=jnp.asarray(log_normalizers),
@@ -212,16 +255,50 @@ def load_config(path: str | Path) -> AppConfig:
     if theta > 90:
         raise ValueError("Config key 'stein.theta' must be in [0, 90]")
     theta_radians = np.deg2rad(theta)
-    memory_decay = _number(stein_raw.get("memory_decay", 0.99), "stein.memory_decay", 1e-12)
-    if memory_decay >= 1:
-        raise ValueError("Config key 'stein.memory_decay' must be < 1")
-    deficit_gate = _number(stein_raw.get("deficit_gate", 1.0), "stein.deficit_gate", 0.0)
-    if deficit_gate > 1:
-        raise ValueError("Config key 'stein.deficit_gate' must be in [0, 1]")
-    spiral_deficit = _number(stein_raw.get("spiral_deficit", 0.0), "stein.spiral_deficit", 0.0)
-    if spiral_deficit > 1:
-        raise ValueError("Config key 'stein.spiral_deficit' must be in [0, 1]")
+    delta_t = _number(_required(model_raw, "delta_t", "model"), "model.delta_t", 1e-12)
+
+    # One physical memory time replaces the (decay, buffer length) pair, making the
+    # behavior invariant to the replanning rate. The buffer is truncated at 3 tau,
+    # dropping gamma^P ~ 5% of the weight: measured indistinguishable from 5 tau at
+    # 20000 steps while costing (3/5)^2 = 0.36x of the O(Q P^2) occupancy KDE.
+    memory_time = _number(
+        _required(stein_raw, "memory_time", "stein"), "stein.memory_time", 1e-12
+    )
+    memory_decay = math.exp(-delta_t / memory_time)
+    if "memory_length" not in mppi_raw:
+        memory_length = math.ceil(3.0 * memory_time / delta_t)
+    # Fine scale from the desired spatial resolution: kernel repulsion peaks at
+    # distance sqrt(h/2), so h_f = 2 * delta_res^2 peaks at the track spacing.
+    fill_resolution = _number(
+        stein_raw.get("fill_resolution", 0.4), "stein.fill_resolution", 1e-12
+    )
+    fine_bandwidth = _number(
+        stein_raw.get("fine_bandwidth", 2.0 * fill_resolution * fill_resolution),
+        "stein.fine_bandwidth",
+        1e-12,
+    )
+    coarse_bandwidth = _number(
+        stein_raw.get("coarse_bandwidth", _mode_scale(means, covariances)),
+        "stein.coarse_bandwidth",
+        1e-12,
+    )
+    memory_scales = _integer(stein_raw.get("memory_scales", 3), "stein.memory_scales", 1)
+    if memory_scales > 1 and coarse_bandwidth <= fine_bandwidth:
+        raise ValueError(
+            "Config key 'stein.coarse_bandwidth' must exceed 'stein.fine_bandwidth' "
+            "to span a scale bank"
+        )
+    memory_gain = _number(_required(stein_raw, "memory_gain", "stein"), "stein.memory_gain", 0.0)
+    memory_balance = _number(
+        _required(stein_raw, "memory_balance", "stein"), "stein.memory_balance", 0.0
+    )
+    if memory_balance > 1:
+        raise ValueError("Config key 'stein.memory_balance' must be in [0, 1]")
+
     stein = SteinParams(
+        memory_scales=memory_scales,
+        memory_gain=memory_gain,
+        memory_balance=memory_balance,
         rotation=jnp.asarray(
             [[np.cos(theta_radians), -np.sin(theta_radians)],
              [np.sin(theta_radians), np.cos(theta_radians)]],
@@ -233,15 +310,10 @@ def load_config(path: str | Path) -> AppConfig:
             1e-12,
         ),
         flow_weight=_number(_required(stein_raw, "weight_stein", "stein"), "stein.weight_stein", 0.0),
-        repulsion_weight=_number(stein_raw.get("repulsion_weight", 0.0), "stein.repulsion_weight", 0.0),
-        repulsion_bandwidth=_number(stein_raw.get("repulsion_bandwidth", 4.0), "stein.repulsion_bandwidth", 1e-12),
+        coarse_bandwidth=coarse_bandwidth,
+        fine_bandwidth=fine_bandwidth,
         memory_decay=memory_decay,
         reference_speed=_number(stein_raw.get("reference_speed", 0.0), "stein.reference_speed", 0.0),
-        deficit_gate=deficit_gate,
-        spiral_bandwidth=_number(stein_raw.get("spiral_bandwidth", 0.4), "stein.spiral_bandwidth", 1e-12),
-        spiral_weight=_number(stein_raw.get("spiral_weight", 0.0), "stein.spiral_weight", 0.0),
-        spiral_deficit=spiral_deficit,
-        eject_fill_gated=_number(stein_raw.get("eject_fill_gated", 1.0), "stein.eject_fill_gated", 0.0),
     )
 
     map_x = _limits(_required(map_raw, "x_limits", "map"), "map.x_limits")
@@ -265,12 +337,17 @@ def load_config(path: str | Path) -> AppConfig:
     )
     if radius_max < radius_min:
         raise ValueError("Config key 'map.obstacles.max_radius' must be >= min_radius")
+    # Obstacle layout defaults to the run seed, so omitting this key reproduces every
+    # existing config bit-for-bit. Set it to hold the map fixed while sweeping seeds --
+    # otherwise a seed sweep varies the initial state AND the obstacle field together,
+    # and seed spread stops meaning "sensitivity to initial conditions".
+    obstacle_seed = _integer(obstacles_raw.get("seed", seed), "map.obstacles.seed")
     workspace = WorkspaceParams(
         x_limits=jnp.asarray(map_x),
         y_limits=jnp.asarray(map_y),
         out_of_map_cost=_number(_required(map_raw, "oom_cost", "map"), "map.oom_cost", 0.0),
         obstacles=_generate_obstacles(
-            obstacle_count, obstacle_x, obstacle_y, radius_min, radius_max, seed
+            obstacle_count, obstacle_x, obstacle_y, radius_min, radius_max, obstacle_seed
         ),
         obstacle_cost=_number(
             _required(obstacles_raw, "weight", "map.obstacles"),
@@ -299,7 +376,7 @@ def load_config(path: str | Path) -> AppConfig:
         covariance_inverse=jnp.asarray(np.linalg.inv(covariance_np).astype(np.float32)),
     )
     model = DoubleIntegratorParams(
-        delta_t=_number(_required(model_raw, "delta_t", "model"), "model.delta_t", 1e-12),
+        delta_t=delta_t,
         max_accel_lin_abs=_number(
             _required(model_specific, "max_accel_lin_abs", "model.double_integrator"),
             "model.double_integrator.max_accel_lin_abs",

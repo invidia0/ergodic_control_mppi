@@ -5,7 +5,13 @@
       "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/screen.py)",
       "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/confirm.py)",
       "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/refine.py)",
-      "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/lambda_sweep.py)"
+      "Bash(python /tmp/claude-1000/-home-mattia-WORKSPACE-ergodic-control-mppi/bb5e8f3c-2457-40fd-8a9e-5c7e476869ae/scratchpad/lambda_sweep.py)",
+      "Bash(ssh ars-admin@155.185.245.31 'cd /home/ars-admin/ergodic_control_mppi && git fetch --all -q && git checkout single-robot 2>&1 | tail -2 && git log --oneline -1 && echo \"--- PATH uv ---\" && export PATH=\"$HOME/.local/bin:$PATH\" && uv --version')",
+      "Bash(ssh ars-admin@155.185.245.31 'grep -q EXIT_ /home/ars-admin/ergodic_control_mppi/scratch/scenario_sweep.log 2>/dev/null')",
+      "Bash(break)",
+      "Bash(ssh ars-admin@155.185.245.31 'echo \"rows: $\\(grep -cE '\\\\''^M='\\\\'' /home/ars-admin/ergodic_control_mppi/scratch/scenario_sweep.log\\) / 270\"; grep -E '\\\\''^M='\\\\'' /home/ars-admin/ergodic_control_mppi/scratch/scenario_sweep.log | tail -1')",
+      "Bash(JAX_PLATFORMS=cpu uv run python -c ' *)",
+      "Bash(python3 -)"
     ]
   }
 }

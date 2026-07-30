@@ -19,6 +19,8 @@
 \usepackage{multirow}
 \usepackage{siunitx}
 \usepackage{tikz}
+\usepackage[dvipsnames]{xcolor}
+
 \usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
 \newcommand{\ustag}[1]{{\color{black!55}\scriptsize #1}}
 \newcommand{\how}[1]{{\color{black!55}\itshape\footnotesize #1}}
@@ -34,7 +36,7 @@
 \newtheorem{property}{Property}
 
 \newcommand{\mm}[1]{{\color{red}{{#1}}}}
-\newcommand{\cl}[1]{{\color{magenta}{{#1}}}}
+\newcommand{\cl}[1]{{\color{Red}{{#1}}}}
 \newcommand{\ls}[1]{{\color{blue}{{#1}}}}
 
 \newenvironment{proofsketch}{%
@@ -76,13 +78,13 @@ Despite this progress, achieving ergodic exploration that is simultaneously clos
 
 In this work, we address this gap by casting ergodic control as \emph{distribution shaping of the rollout-induced ensemble} within Model Predictive Path Integral (MPPI) control. Rather than explicitly minimizing a global ergodic metric or solving a trajectory optimization problem, we shape the distribution of sampled rollouts so that their predicted visitation statistics follow a prescribed probability flow consistent with the target density. This preserves MPPI's key advantages: real-time replanning, model-agnostic operation, and seamless integration of constraints through cost design.
 
-We construct the target flow using Stein variational gradient dynamics and augment it with a nonreversible curl component that improves mixing in multi-modal distributions while preserving the target invariant density. \cl{To obtain long-run ergodicity, and not merely within-horizon spread, the flow additionally receives feedback from a bounded fading memory of recently executed positions, weighted by the local occupancy deficit relative to the target.} The desired flow is incorporated as an additive rollout cost, allowing MPPI's importance sampling mechanism to implicitly bias trajectories toward ergodic behavior. This avoids backpropagation through the dynamics and does not require model linearization or offline optimization. A rollout-based sensitivity estimator, equivalent to a score-function estimator, can be used to interpret the induced update direction, but the method itself operates entirely through cost shaping.
+We construct the target flow using Stein variational gradient dynamics and augment it with a nonreversible curl component that improves mixing in multi-modal distributions while preserving the target invariant density. \cl{To obtain long-run ergodicity, and not merely within-horizon spread, the flow additionally receives feedback from a bounded fading memory of recently executed positions, weighted by the local over-coverage relative to the target and evaluated over a bank of spatial scales.} The desired flow is incorporated as an additive rollout cost, allowing MPPI's importance sampling mechanism to implicitly bias trajectories toward ergodic behavior. This avoids backpropagation through the dynamics and does not require model linearization or offline optimization. A rollout-based sensitivity estimator, equivalent to a score-function estimator, can be used to interpret the induced update direction, but the method itself operates entirely through cost shaping.
 
 The resulting controller provides a real-time, closed-loop, and \cl{constant-memory (bounded fading-memory)} approach to ergodic coverage, capable of handling constraints and disturbances within a unified sampling-based framework. The main contributions of this work are:
 \begin{itemize}[leftmargin=*]
     \item We formulate real-time ergodic exploration as distribution shaping of the rollout-induced MPPI ensemble.
     \item We introduce a curl-augmented reference flow that improves inter-mode mixing while preserving the target density.
-    \item \cl{We drive long-run coverage with a constant-size fading-memory feedback whose repulsion is weighted by the online occupancy deficit, an in-closed-form surrogate for the ergodic-metric gradient.}
+    \item \cl{We drive long-run coverage with a constant-size fading-memory feedback whose repulsion is weighted by the online relative over-coverage across a bank of spatial scales, a closed-form surrogate for the multiscale ergodic-metric gradient, governed by three interpretable parameters.}
     \item We embed flow matching as an additive rollout cost in MPPI, enabling unified handling of ergodic objectives and constraints.
     \item We provide a conditional asymptotic analysis relating the stationary mismatch of the closed-loop visitation law to the resulting ergodic error, \cl{for the memory-augmented closed-loop Markov chain}.
     \item We validate the proposed method through extensive simulations and software-in-the-loop experiments.
@@ -289,7 +291,7 @@ The construction builds on the \cl{rollout occupancy measure $\hat{\pi}_t$} intr
 \cl{\begin{equation}\label{eq:rbf_kernel}
 \kappa_\ell(\mathbf z',\mathbf z)=\exp\!\big(-\|\mathbf z'-\mathbf z\|^2/\ell\big),
 \end{equation}}
-\cl{parameterized by a single lengthscale $\ell>0$. We keep $\ell$ as an explicit subscript because the reference field ultimately combines this kernel at several lengthscales: the attraction term below sets $\ell$ adaptively, and the memory feedback of Sec.~\ref{sec:memory_flow} reuses the kernel at a coarse and a fine scale.}
+\cl{parameterized by a single lengthscale $\ell>0$. We keep $\ell$ as an explicit subscript because the reference field ultimately combines this kernel at several lengthscales: the attraction term below sets $\ell$ adaptively, and the memory feedback of Sec.~\ref{sec:memory_flow} reuses the kernel over a bank of scales spanning a fine and a coarse extreme.}
 
 \paragraph{Stein reference flow}
 Let $p^\star(\mathbf z)$ denote the target spatial density. \cl{For the target-attractive term we do not fix the lengthscale a priori but set it adaptively from the spread of the source points, through the median heuristic}
@@ -410,201 +412,359 @@ Thus, constant non-singular preconditioning preserves the zero set of the refere
 \subsection{Fading-Memory Coverage Feedback}
 \label{sec:memory_flow}
 
-The reference flow of Sec.~\ref{sec:target_flow}, built from the in-horizon
-ensemble $\hat\pi_t$, spreads the sampled rollouts within a single planning
-horizon but carries no representation of where the robot has already spent
-time. On its own it does not induce long-run ergodic coverage: the score term
-attracts the executed trajectory toward the nearest mode, and the in-horizon
-repulsion cannot prevent it from settling there. We therefore augment the
-repulsion with feedback from a bounded, fading memory of executed visitation.
+The reference flow of Sec.~\ref{sec:target_flow} distributes the sampled
+rollouts within the current planning horizon, but it does not record the
+executed trajectory and therefore cannot explicitly correct accumulated
+visitation mismatch. We introduce this feedback through a bounded fading memory
+of executed positions.
 
-Let $\mathcal M_t=(\mathbf m_{t,1},\dots,\mathbf m_{t,P})$ be a fixed-size
-buffer holding the last $P$ executed spatial positions, oldest first, with
-$\mathbf m_{t,i}=\Pi(\mathbf x_{t-P+i})$. It is maintained by a deterministic
-shift,
+Let
+$\mathcal M_t=(\mathbf m_{t,1},\ldots,\mathbf m_{t,P})$ contain the last $P$
+executed spatial positions, ordered from oldest to newest, with
+$\mathbf m_{t,i}=\Pi(\mathbf x_{t-P+i})$. The buffer evolves according to
 \begin{equation}\label{eq:memory_shift}
 \mathcal M_{t+1}
 =
-\big(\mathbf m_{t,2},\dots,\mathbf m_{t,P},\,\Pi(\mathbf x_{t+1})\big).
+\big(
+\mathbf m_{t,2},\ldots,\mathbf m_{t,P},
+\Pi(\mathbf x_{t+1})
+\big).
 \end{equation}
-With geometric recency weights $\omega_i=\gamma^{\,P-i}$, $\gamma\in(0,1)$
-(so the newest entry has weight $1$ and older ones fade with time constant
-$\tau\approx 1/(1-\gamma)$), the fading memory defines the empirical measure
+A physical memory time $\tau_{\mathcal M}$ determines both the temporal decay
+and the retained horizon:
+\begin{equation}\label{eq:recency_weights}
+\omega_i
+=
+\exp\!\left(
+-\frac{(P-i)\Delta t}{\tau_{\mathcal M}}
+\right),
+\qquad
+P
+=
+\left\lceil
+\frac{3\tau_{\mathcal M}}{\Delta t}
+\right\rceil .
+\end{equation}
+Thus, the memory is truncated after approximately three time constants, where
+its weight has decreased to $e^{-3}\approx0.05$. Expressing the decay in
+physical time makes the retained history approximately invariant to the
+replanning rate.
+
+The corresponding fading empirical measure is
 \begin{equation}\label{eq:fading_measure}
-\hat\pi^{\mathcal M}_t(\mathbf z)
+\hat\pi_t^{\mathcal M}(\mathbf z)
 =
-\frac{1}{\sum_{i}\omega_i}\sum_{i=1}^{P}\omega_i\,
-\delta\!\big(\mathbf z-\mathbf m_{t,i}\big),
+\sum_{i=1}^{P}
+q_{t,i}^{\mathrm{rec}}
+\delta(\mathbf z-\mathbf m_{t,i}),
+\qquad
+q_{t,i}^{\mathrm{rec}}
+=
+\frac{\omega_i}{\sum_j\omega_j}.
 \end{equation}
-and, through a kernel of bandwidth $h$, the \emph{fading occupancy density}
+Here, $q_{t,i}^{\mathrm{rec}}$ is the scalar probability mass assigned to the
+spatial point $\mathbf m_{t,i}$, and
+$\mathbf q_t^{\mathrm{rec}}\in\Delta^{P-1}$ is a probability mass function over
+the memory indices.
+
+At spatial scale $h$, kernel smoothing gives the fading occupancy proxy
 \begin{equation}\label{eq:occupancy_density}
-o^{h}_t(\mathbf z)
+o_t^h(\mathbf z)
 =
-\frac{\sum_{i=1}^{P}\omega_i\,\kappa_h(\mathbf m_{t,i},\mathbf z)}
-{\big(\sum_i\omega_i\big)\,\eta_h},
+\frac{1}{\eta_h}
+\sum_{i=1}^{P}
+q_{t,i}^{\mathrm{rec}}
+\kappa_h(\mathbf m_{t,i},\mathbf z),
 \end{equation}
-where $\eta_h=\int_{\Omega}\kappa_h(\mathbf 0,\mathbf y)\,d\mathbf y$ normalizes
-$o^{h}_t$ to integrate to approximately one. This is an online kernel estimate
-of the very visitation law that Sec.~\ref{sec:guarantees} characterizes
-asymptotically.
+where
+$\eta_h=\int_\Omega\kappa_h(\mathbf 0,\mathbf y)\,d\mathbf y$.
+This constant normalization neglects the position-dependent loss of kernel mass
+near $\partial\Omega$, which is small when the executed trajectory remains
+outside an $O(\sqrt h)$ boundary layer. Since the effective sample size remains
+finite for fixed $\tau_{\mathcal M}$, $o_t^h$ is an online proxy for recent
+occupancy rather than a consistent estimator of the asymptotic visitation law.
 
-Coverage is driven by repelling the plan from over-covered regions only, at two
-complementary spatial scales. The generic building block is the
-\emph{weighted memory-repulsion operator at bandwidth $h$}, evaluated on a
-vector of non-negative per-particle weights
-$\mathbf w=(w_1,\dots,w_P)\in\mathbb R_{\ge0}^{P}$ (one per memory point),
+\paragraph{Scale-dependent over-coverage}
+The occupancy proxy must be compared with the target at the same spatial
+resolution. We therefore define
+\begin{equation}\label{eq:smoothed_target}
+p_h^\star(\mathbf z)
+=
+\frac{1}{\eta_h}
+\int_\Omega
+\kappa_h(\mathbf y,\mathbf z)p^\star(\mathbf y)\,d\mathbf y .
+\end{equation}
+For a Gaussian-mixture target on $\mathbb R^{d_s}$, this convolution preserves
+the mixture weights and means and replaces each covariance
+$\boldsymbol\Sigma_j$ by
+$\boldsymbol\Sigma_j+\tfrac h2\mathbf I$.
+
+The relative over-coverage associated with memory point $\mathbf m_{t,i}$ is
+\begin{equation}\label{eq:relative_excess}
+e_{t,i}^h
+=
+\frac{
+\big[
+o_t^h(\mathbf m_{t,i})
+-
+p_h^\star(\mathbf m_{t,i})
+\big]_+
+}{
+p_h^\star(\mathbf m_{t,i})+\varepsilon_p
+},
+\qquad
+\varepsilon_p=\frac{1}{|\Omega|}.
+\end{equation}
+The positive part selects regions whose recent occupancy exceeds their target
+share. The density floor $\varepsilon_p$ is a modelling constant rather than a
+vanishing numerical tolerance: it measures excess in low-target regions
+relative to the uniform workspace density and prevents isolated transit points
+with $p_h^\star\approx0$ from dominating the normalized feedback.
+
+\paragraph{Trail and over-coverage fields}
+Define the curl-preconditioned push generated by memory point $\mathbf m_{t,i}$
+as
+\begin{equation}\label{eq:individual_memory_push}
+\mathbf g_i^h(\mathbf z)
+=
+\mathbf C
+\nabla_{\mathbf x}
+\kappa_h(\mathbf x,\mathbf z)
+\big|_{\mathbf x=\mathbf m_{t,i}}
+=
+\frac{2}{h}
+\mathbf C(\mathbf z-\mathbf m_{t,i})
+\kappa_h(\mathbf m_{t,i},\mathbf z).
+\end{equation}
+Before preconditioning, this vector points away from $\mathbf m_{t,i}$.
+The rotation $\mathbf C=\mathbf R(\theta)$ introduces a tangential component,
+bending the repulsion into a circulating field.
+
+For any non-negative mass vector $\mathbf q$, define
 \begin{equation}\label{eq:memory_repulsion}
-\boldsymbol\rho^{h}_t(\mathbf z;\mathbf w)
+\boldsymbol\rho_t^h(\mathbf z;\mathbf q)
 =
-\frac{\sum_{i=1}^{P} w_{i}\,
-\mathbf C\,\nabla_{\mathbf x}\kappa_h(\mathbf x,\mathbf z)\big|_{\mathbf x=\mathbf m_{t,i}}}
-{\sum_{i=1}^{P} w_{i}},
+\sum_{i=1}^{P}
+q_i\,\mathbf g_i^h(\mathbf z).
 \end{equation}
-a $\mathbf w$-weighted average of curl-preconditioned pushes away from the
-memory points, the entry $w_i$ being the scalar weight of point
-$\mathbf m_{t,i}$. The two scales below instantiate $\mathbf w$ with the
-coverage-deficit weight vectors
-$\mathbf w^{c}=(w^{c}_{t,i})_{i=1}^{P}$~\eqref{eq:coarse_weight} and
-$\mathbf w^{f}=(w^{f}_{t,i})_{i=1}^{P}$~\eqref{eq:fine_weight}, whose entries are
-defined below. Each gradient
-$\nabla_{\mathbf x}\kappa_h(\mathbf x,\mathbf z)|_{\mathbf x=\mathbf m}
-=\tfrac{2}{h}(\mathbf z-\mathbf m)\,\kappa_h(\mathbf m,\mathbf z)$ points from
-$\mathbf m$ toward $\mathbf z$, i.e.\ repels $\mathbf z$ from $\mathbf m$,
-strongest when the two are close.
-Normalizing by $\sum_i w_i$ makes the operator invariant to the overall scale of
-the weights, so only their relative pattern acts and the field vanishes
-gracefully as $\sum_i w_i\to0$. We apply the same constant preconditioner
-$\mathbf C=\mathbf R(\theta)$ that shapes the attraction~\eqref{eq:stein_operator_A}:
-since $\mathbf C$ rotates each radial push into a tangential one, the repulsion
-makes the robot \emph{circle} an over-covered region, laying down the next
-concentric orbit, rather than fleeing it radially; applying the same $\mathbf C$
-to attraction and repulsion also keeps the composite field on a single,
-consistent curl geometry, and, being non-singular, preserves the equilibrium
-structure (Remark~\ref{rem:preconditioning}).
+If $\sum_iq_i=1$, this is the expected push under the discrete spatial measure
+$\sum_iq_i\delta_{\mathbf m_{t,i}}$; if $\sum_iq_i<1$, its magnitude is reduced
+by the missing mass.
 
-\paragraph{Coarse scale: inter-mode distribution}
-At a coarse (mode-scale) bandwidth $h_c$ we form the weight
-\begin{equation}\label{eq:coarse_weight}
-\begin{aligned}
-w^{c}_{t,i}
-={}&
-(1-\lambda_d)\,\omega_i\\
-&+
-\lambda_d\,\big[\,o^{h_c}_t(\mathbf m_{t,i})-p^\star(\mathbf m_{t,i})\,\big]_{+}\,g_{t,i},
-\end{aligned}
-\end{equation}
-which blends, through the gate $\lambda_d\in[0,1]$, pure recency ($\lambda_d=0$) with a
-coverage deficit ($\lambda_d=1$). With $\lambda_d=1$ the weight is nonzero only
-where a whole mode already holds more than its target share of recent occupancy,
-so the induced push ejects the robot from filled modes and, being silent on
-under-covered ones, distributes dwell time toward $p^\star$. The binary
-\emph{fill gate}
-\begin{equation}\label{eq:fill_gate}
-g_{t,i}
+The recency distribution in~\eqref{eq:fading_measure} produces the
+trail-avoidance field
+\begin{equation}\label{eq:recency_field}
+\boldsymbol\rho_t^{h,\mathrm{rec}}(\mathbf z)
 =
-\mathbf 1\!\big[\,o^{h_f}_t(\mathbf m_{t,i})\ge p^\star(\mathbf m_{t,i})\,\big]
+\boldsymbol\rho_t^h(
+\mathbf z;\mathbf q_t^{\mathrm{rec}}
+).
 \end{equation}
-switches the ejection off until the region is also filled at the fine scale
-$h_f$ (next paragraph), decoupling ejection \emph{strength} from ejection
-\emph{timing}: a strong ejection can be held dormant while a mode is still being
-filled and fire only once the fill is dense.
-
-\paragraph{Fine scale: within-mode fill}
-At a fine (strip-scale) bandwidth $h_f\ll h_c$ we form the weight
-\begin{equation}\label{eq:fine_weight}
-\begin{aligned}
-w^{f}_{t,i}
-={}&
-(1-\lambda_s)\,\omega_i\\
-&+
-\lambda_s\,\big[\,o^{h_f}_t(\mathbf m_{t,i})-p^\star(\mathbf m_{t,i})\,\big]_{+},
-\end{aligned}
+To construct the over-coverage component, let
+\begin{equation}\label{eq:mean_excess}
+S_t^h
+=
+\sum_{i=1}^{P}
+q_{t,i}^{\mathrm{rec}}e_{t,i}^h
 \end{equation}
-which blends, through $\lambda_s\in[0,1]$, the fading immediate trail ($\lambda_s=0$)
-with a fine-scale deficit ($\lambda_s=1$). With $\lambda_s=0$ the most recent
-orbit repels the next one outward by a small tangential (curl-rotated) step,
-producing the dense concentric spiral that fills a mode.
+denote the recency-weighted mean excess and define the sub-probability masses
+\begin{equation}\label{eq:excess_masses}
+q_{t,i}^{h,\mathrm{exc}}
+=
+\frac{
+q_{t,i}^{\mathrm{rec}}e_{t,i}^h
+}{
+S_t^h+\varepsilon_S
+},
+\qquad
+\sum_iq_{t,i}^{h,\mathrm{exc}}
+=
+\frac{S_t^h}{S_t^h+\varepsilon_S},
+\end{equation}
+where $\varepsilon_S>0$ is dimensionless. The corresponding field is
+\begin{equation}\label{eq:excess_field}
+\boldsymbol\rho_t^{h,\mathrm{exc}}(\mathbf z)
+=
+\boldsymbol\rho_t^h(
+\mathbf z;\mathbf q_t^{h,\mathrm{exc}}
+).
+\end{equation}
+The total mass in~\eqref{eq:excess_masses} acts as a continuous activity gate:
+the field approaches its normalized value when
+$S_t^h\gg\varepsilon_S$ and vanishes as $S_t^h\to0$. We use
+$\varepsilon_S=10^{-3}$ throughout.
 
-\paragraph{The two-scale game}
-The coarse and fine terms answer complementary questions and pull on the same
-trajectory in opposition. The coarse term asks ``has this \emph{mode} received
-its target share?'' and, once it has, drives the robot out toward another mode;
-used alone, a mode-scale bandwidth declares a mode ``covered'' after only a
-couple of orbits and ejects before the interior is filled. The fine term asks
-``is this narrow \emph{strip} already visited?'' and steps each orbit onto the
-next unfilled strip, densely tiling the mode; used alone, it has no notion of a
-mode's global share and over-dwells. Running both, tied together by the fill
-gate~\eqref{eq:fill_gate}, produces the target behaviour: \emph{dwell and
-densely fill a mode at the fine scale, and only once it is filled let the coarse
-scale eject and carry the robot to the next mode}. The scale separation
-$h_f\ll h_c$ is precisely what lets the two objectives, dense local fill and
-proportional global distribution, be expressed at once: the scale that decides
-``mode full'' is far coarser than the scale that decides ``strip filled,'' so a
-single bandwidth cannot serve both. In the present work the toggles are fixed at
-$(\lambda_d,\lambda_s)=(1,0)$ with the gate enabled, the configuration found to
-jointly maximize fill density and mode coverage; we retain them as explicit
-parameters because they cleanly separate the two mechanisms and are natural
-ablation axes.
+A single balance parameter $a\in[0,1]$ combines trail avoidance and
+target-relative over-coverage correction:
+\begin{equation}\label{eq:scale_blend}
+\boldsymbol\rho_t^h(\mathbf z;a)
+=
+(1-a)
+\boldsymbol\rho_t^{h,\mathrm{rec}}(\mathbf z)
++
+a
+\boldsymbol\rho_t^{h,\mathrm{exc}}(\mathbf z).
+\end{equation}
+Thus, $a=0$ gives pure trail avoidance, whereas $a=1$ reacts only to recent
+points located in over-covered regions. Combining the two fields after their
+internal normalization gives $a$ a fixed interpretation. In contrast, blending
+their raw weights before normalization would produce the state-dependent
+effective coefficient
+\begin{equation}\label{eq:effective_blend}
+\alpha_t^h
+=
+\frac{aS_t^h}{(1-a)+aS_t^h},
+\end{equation}
+which varies with the instantaneous excess.
 
-\paragraph{Assembled reference field}
-Collecting the attraction~\eqref{eq:stein_reference_flow_A} and the two
-memory-repulsion terms, and optionally normalizing to a fixed reference speed,
-the field actually tracked is
+\paragraph{Multiscale feedback}
+No single bandwidth captures both local re-tracing and mode-level occupancy.
+We therefore use the logarithmic bank
+\begin{equation}\label{eq:scale_bank}
+h_q
+=
+h_f
+\left(\frac{h_c}{h_f}\right)^{q/(Q-1)},
+\qquad
+q=0,\ldots,Q-1,
+\qquad
+0<h_f\le h_c.
+\end{equation}
+For $Q=3$, this gives
+$\{h_f,\sqrt{h_fh_c},h_c\}$. Since the RBF interaction radius is
+$\sqrt{h/2}$, logarithmic spacing produces a constant ratio between successive
+radii, whereas linear spacing in $h$ would cluster them toward the coarse
+scale.
+
+The kernel-gradient magnitude satisfies
+\begin{equation}
+\max_r
+\left\|
+\nabla_{\mathbf x}\kappa_h
+\right\|
+=
+\sqrt{\frac{2}{h}}e^{-1/2},
+\qquad
+r=\sqrt{\frac h2},
+\end{equation}
+so finer kernels would otherwise produce stronger repulsion solely because
+they are narrower. We remove this scale dependence through
+\begin{equation}\label{eq:scale_gauge}
+\overline{\boldsymbol\rho}_t^{\,h}(\mathbf z;a)
+=
+\sqrt{\frac{he}{2}}\,
+\boldsymbol\rho_t^h(\mathbf z;a)
+\end{equation}
+and average the normalized fields:
+\begin{equation}\label{eq:multiscale_repulsion}
+\boldsymbol\rho_t^{\mathrm{MS}}(\mathbf z;a)
+=
+\frac{1}{Q}
+\sum_{q=0}^{Q-1}
+\overline{\boldsymbol\rho}_t^{\,h_q}(\mathbf z;a).
+\end{equation}
+This allows a single gain to govern all scales, which act simultaneously:
+fine kernels respond to local re-tracing, while coarse kernels capture broader
+occupancy concentration. Equation~\eqref{eq:multiscale_repulsion} is a finite
+multiscale surrogate for the occupancy mismatch, not an exact gradient
+decomposition of the ergodic metric.
+
+\paragraph{Augmented reference field}
+The field tracked by MPPI is
 \begin{equation}\label{eq:augmented_reference_flow}
-\begin{aligned}
-\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z)
+\widetilde{\mathbf h}_t^{\mathcal M}(\mathbf z)
 =
-\Pi_{v}\Big[
+\Pi_v\!\left[
 \widetilde{\mathbf h}_t(\mathbf z)
-&+
-r_w\,\boldsymbol\rho^{h_c}_t(\mathbf z;\mathbf w^{c})\\
-&+
-s_w\,\boldsymbol\rho^{h_f}_t(\mathbf z;\mathbf w^{f})
-\Big],
-\end{aligned}
++
+k_{\mathcal M}
+\boldsymbol\rho_t^{\mathrm{MS}}(\mathbf z;a)
+\right],
 \end{equation}
-with coarse and fine gains $r_w,s_w\ge 0$ and the speed gauge
+where $k_{\mathcal M}\ge0$ is the memory gain and
 \begin{equation}\label{eq:speed_gauge}
-\Pi_{v}[\mathbf u]
+\Pi_v[\mathbf u]
 =
 \begin{cases}
-v\,\mathbf u/\max(\|\mathbf u\|,\varepsilon), & v>0,\\[2pt]
-\mathbf u, & v=0,
+v\,\mathbf u/
+\max(\|\mathbf u\|,\varepsilon_v),
+& v>0,\\[2pt]
+\mathbf u,
+& v=0.
 \end{cases}
 \end{equation}
-which, for $v>0$, tracks the flow \emph{direction} at constant speed $v$
-(matching the constant-speed reference of the LQR flow-matching baseline) and,
-for $v=0$, keeps the raw velocity magnitude. The occupancy-awareness carries
-over from the single-scale case: where a region is under-covered the deficit
-weights vanish and the score attraction is free to dwell, while over-covered
-regions repel in proportion to their excess. Since~\eqref{eq:ergodic_metric}
-penalizes $[\,o(\cdot)-p^\star(\cdot)\,]^2$ across scales, $-\nabla$ of that
-discrepancy points down exactly the positive-deficit regions, so each
-memory-repulsion term is a local, closed-form surrogate for the ergodic-metric
-gradient at its scale, realized from $\mathcal M_t$ without an online PDE solve.
-When $v>0$ the normalization discards $\|\widetilde{\mathbf h}^{\mathcal M}_t\|$,
-so the attraction (implicit unit gain) fixes the overall scale and $r_w,s_w$ act
-as \emph{ratios} to it rather than independent magnitudes; moreover the
-geometric span of a single plan is the horizon reach $L=v\,T\,\Delta t$, making
-$v$ and the horizon $T$ partially redundant. These refinements do not change the
-analysis, which requires only that $\widetilde{\mathbf h}^{\mathcal M}_t$ be a
-bounded, continuous function of the augmented state, held fixed during the MPPI
-update.
+For $v>0$, the output has speed $v$ outside the regularization region
+$\|\mathbf u\|<\varepsilon_v$ and is continuously attenuated inside it.
+Consequently, $k_{\mathcal M}$ controls the directional balance between the
+Stein flow and memory feedback rather than their common magnitude.
 
-Crucially, $\mathcal M_t$ is a buffer of fixed size $P$: the controller carries
-a \emph{constant-memory fading history}, of size independent of the run length,
-rather than the growing trajectory history of classical spectral methods, and
-it is not a memoryless map. Its presence augments the closed-loop Markov state,
-which we make explicit in Sec.~\ref{sec:guarantees}.
+The recency component discourages immediate re-tracing, whereas the excess
+component concentrates repulsion on recently visited regions that exceed their
+target-relative occupancy. The latter is a local repulsive surrogate motivated
+by the positive part of the multiscale occupancy mismatch; it is not the exact
+negative variation of the ergodic metric.
+
+The positive floors $\varepsilon_p$ and $\varepsilon_S$ ensure that the
+memory weights and reference field are well defined for every augmented state.
+The continuity and local smoothness properties required by the closed-loop
+analysis are discussed with Assumption~\ref{as:continuity}.
+
+\paragraph{Derived scales and free parameters}
+The scale endpoints are derived from the task. Since the RBF-gradient magnitude
+peaks at separation $\sqrt{h/2}$, we set
+\begin{equation}\label{eq:fine_scale}
+h_f=2\delta_{\mathrm{res}}^2,
+\end{equation}
+where $\delta_{\mathrm{res}}$ is the desired track spacing or sensing
+resolution. For a planar Gaussian-mixture target with components
+$(\boldsymbol\mu_j,\boldsymbol\Sigma_j)$, define
+\begin{equation}\label{eq:coarse_scale}
+h_c
+=
+\min\left\{
+\operatorname{med}_j
+\operatorname{tr}\boldsymbol\Sigma_j,
+\;
+\frac14
+\min_{r\ne s}
+\|\boldsymbol\mu_r-\boldsymbol\mu_s\|^2
+\right\}.
+\end{equation}
+The first term matches the peak-repulsion radius to a characteristic
+per-coordinate component scale; the second bounds the kernel length by half
+the nearest component-centre separation. At the neighbouring centre, the
+kernel value is then at most $e^{-4}$, so inter-component coupling is strongly
+attenuated. For a single component, the second term is omitted. The
+construction requires $h_f\le h_c$; otherwise the requested sensing resolution
+does not admit the assumed fine-to-coarse separation.
+
+Given these task-derived scales and the fixed design constants
+$Q=3$, $\varepsilon_p=1/|\Omega|$, $\varepsilon_S=10^{-3}$, and the
+three-time-constant truncation, the memory feedback has three tuned parameters:
+\[
+(\tau_{\mathcal M},a,k_{\mathcal M}),
+\]
+which determine how long the robot remembers, whether it prioritizes trail
+avoidance or target-relative excess, and how strongly memory affects the
+reference direction.
+
+Finally, $P$ is fixed for fixed $(\tau_{\mathcal M},\Delta t)$ and does not grow
+with the run duration. The controller therefore uses a constant-size fading
+history rather than the growing trajectory history required by classical
+spectral feedback, while the augmented state
+$(\mathbf x_t,\boldsymbol\mu_t,\mathcal M_t)$ preserves the Markov
+representation used in Sec.~\ref{sec:guarantees}.
 }
 
 
 \subsection{Flow Matching as an MPPI Cost}
 \label{sec:fm_cost}
 
-The \cl{fading-memory-augmented} curl-augmented Stein field
-\cl{$\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z)$ of Sec.~\ref{sec:memory_flow}} provides \cl{a desired spatial transport direction at every point of the workspace}.
-We now incorporate this field into MPPI as an additive rollout cost. The goal is not to explicitly perform gradient descent on the control sequence, but to assign lower cost to sampled trajectories whose spatial \cl{motion} is aligned with the reference flow. \cl{To keep the notation of this subsection light we write $\widetilde{\mathbf h}_t$ for the tracked field, understood to be $\widetilde{\mathbf h}^{\mathcal M}_t$ whenever the memory feedback is active.}
+The \cl{fading-memory-augmented reference field
+$\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z)$ of
+Sec.~\ref{sec:memory_flow}} provides \cl{a desired spatial transport direction
+at every point of the workspace}.
+We now incorporate this field into MPPI as an additive rollout cost. The goal is not to explicitly perform gradient descent on the control sequence, but to assign lower cost to sampled trajectories whose spatial \cl{motion} is aligned with the reference flow.
 
 % \paragraph{\cl{Flow-tracking cost}}
 \cl{For each sampled rollout $b$, we penalize the mismatch between the realized spatial displacement and the reference field evaluated at the rollout state, giving the Euler flow-residual cost}
@@ -615,7 +775,7 @@ We now incorporate this field into MPPI as an additive rollout cost. The goal is
 \left\|
 \frac{\mathbf z_{t,k+1}^{(b)}-\mathbf z_{t,k}^{(b)}}{\Delta t}
 -
-\widetilde{\mathbf h}_t(\mathbf z_{t,k}^{(b)})
+\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_{t,k}^{(b)})
 \right\|^2 ,}
 \end{equation}
 where $\mathbf z_{t,k}^{(b)}=\Pi(\mathbf x_{t,k}^{(b)})$ is the spatial projection of the rollout state\cl{ and $\Delta t$ is the horizon integration step of Sec.~\ref{sec:mppi}}; \mm{as with $S^{(b)}$, we write the bare symbol $S_{\mathrm{FM}}^{(b)}$ when the dependence on $(\mathbf{x}_t,\boldsymbol\mu_t,\Xi_t)$ is clear from context.}
@@ -626,8 +786,8 @@ where $\mathbf z_{t,k}^{(b)}=\Pi(\mathbf x_{t,k}^{(b)})$ is the spatial projecti
 \sum_{k=0}^{T-1}
 \left[
 \frac{1}{\Delta t^2}\big\|\Delta\mathbf z_{t,k}^{(b)}\big\|^2
--\frac{2}{\Delta t}\,\widetilde{\mathbf h}_t(\mathbf z_{t,k}^{(b)})^{\top}\Delta\mathbf z_{t,k}^{(b)}
-+\big\|\widetilde{\mathbf h}_t(\mathbf z_{t,k}^{(b)})\big\|^2
+-\frac{2}{\Delta t}\,\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_{t,k}^{(b)})^{\top}\Delta\mathbf z_{t,k}^{(b)}
++\big\|\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_{t,k}^{(b)})\big\|^2
 \right].}
 \end{equation}
 \cl{The final term depends on the sampled controls through the evaluation point $\mathbf z_{t,k}^{(b)}$ and is therefore not constant in general; when the reference field is held fixed during the MPPI update (as in our implementation, see below) it may be dropped as a modeling approximation. Rescaling the remainder by the positive constant $\Delta t^2/2$ yields the first-order surrogate}
@@ -636,12 +796,12 @@ where $\mathbf z_{t,k}^{(b)}=\Pi(\mathbf x_{t,k}^{(b)})$ is the spatial projecti
 =
 \sum_{k=0}^{T-1}
 \left[
--\,\Delta t\;\widetilde{\mathbf h}_t(\mathbf z_{t,k}^{(b)})^{\top}\Delta\mathbf z_{t,k}^{(b)}
+-\,\Delta t\;\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_{t,k}^{(b)})^{\top}\Delta\mathbf z_{t,k}^{(b)}
 +\tfrac12\big\|\Delta\mathbf z_{t,k}^{(b)}\big\|^2
 \right],}
 \end{equation}
 \cl{which is the cost actually implemented in the MPPI update. In contrast, the analysis of Sec.~\ref{sec:guarantees} uses the nonnegative squared residual $S_{\mathrm{FM}}^{(b)}$ of~\eqref{eq:S_FM_def}, whose per-step terms are squares; the two coincide up to the dropped final term and the positive rescaling.}
-\cl{This is minimized precisely when the rollout's spatial increments follow the reference flow, $\Delta\mathbf z_{t,k}^{(b)}\approx\Delta t\,\widetilde{\mathbf h}_t(\mathbf z_{t,k}^{(b)})$, i.e.\ $\dot{\mathbf z}\approx\widetilde{\mathbf h}_t(\mathbf z)$. Unlike a position-alignment reward, it is therefore a genuine first-order flow-tracking objective rather than a reward on absolute position, and it is invariant to a constant spatial shift of the workspace. The reference field $\widetilde{\mathbf h}_t$ is evaluated once from the current rollout ensemble \cl{and fading memory} and held fixed during the MPPI update, so the cost is evaluated directly on sampled rollouts without differentiating through the dynamics or through the reference field.}
+\cl{This is minimized precisely when the rollout's spatial increments follow the reference flow, $\Delta\mathbf z_{t,k}^{(b)}\approx\Delta t\,\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_{t,k}^{(b)})$, i.e.\ $\dot{\mathbf z}\approx\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z)$. Unlike a position-alignment reward, it is therefore a genuine first-order flow-tracking objective rather than a reward on absolute position, and it is invariant to a constant spatial shift of the workspace. The reference field $\widetilde{\mathbf h}^{\mathcal M}_t$ is evaluated once from the current rollout ensemble \cl{and fading memory} and held fixed during the MPPI update, so the cost is evaluated directly on sampled rollouts without differentiating through the dynamics or through the reference field.}
 
 % \paragraph{Integrated MPPI cost}
 The augmented rollout cost is
@@ -654,7 +814,7 @@ S^{(b)}
 \end{equation}
 where $S^{(b)}$ contains the standard MPPI task costs, such as control effort, obstacle avoidance, and terminal penalties, and $\gamma\ge 0$ controls the strength of the flow-matching term.
 
-The costs $\{\bar S^{(b)}\}_{b=1}^{N}$ are then used in the standard MPPI importance weights~\eqref{eq:mppi_weights}. Consequently, rollouts that both satisfy the task constraints and \cl{track} the curl-augmented reference flow receive larger weights in the control update~\eqref{eq:mppi_update}. In this way, the ergodic objective is incorporated without changing the MPPI solver, without solving a separate trajectory optimization problem, and without requiring derivatives of the dynamics.
+The costs $\{\bar S^{(b)}\}_{b=1}^{N}$ are then used in the standard MPPI importance weights~\eqref{eq:mppi_weights}. Consequently, rollouts that both satisfy the task constraints and \cl{track} the fading-memory-augmented reference flow receive larger weights in the control update~\eqref{eq:mppi_update}. In this way, the ergodic objective is incorporated without changing the MPPI solver, without solving a separate trajectory optimization problem, and without requiring derivatives of the dynamics.
 
 
 \section{Closed-Loop Well-Posedness and Ergodic-Error Decomposition}
@@ -933,6 +1093,28 @@ shift/padding map, is jointly continuously differentiable in
 $(\widetilde{\mathbf Y},\Xi)$ in a neighborhood of every finite diagonal-witness
 trajectory used in Sec.~\ref{sec:irreducibility}.
 \end{assumption}
+
+\cl{For the reference field of Sec.~\ref{sec:memory_flow}, global continuity
+follows from the continuity of the kernel, dynamics, projection,
+positive-part function, and finite sums defining the occupancy and memory
+fields. The denominators in~\eqref{eq:relative_excess} and
+\eqref{eq:excess_masses} are bounded below by $\varepsilon_p$ and
+$\varepsilon_S$, respectively, while the regularized speed
+gauge~\eqref{eq:speed_gauge} is continuous. Compactness then implies
+boundedness of the resulting reference field. These properties provide the
+continuity required by the Feller argument of Sec.~\ref{sec:feller}.}
+
+\cl{The transition map is only piecewise continuously differentiable. Its
+nonsmooth sets include the occupancy-coincidence surfaces
+$o_t^{h_q}(\mathbf m_{t,i})=p_{h_q}^\star(\mathbf m_{t,i})$ and the
+regularization boundary at which the norm of the input to $\Pi_v$ equals
+$\varepsilon_v$. Accordingly, the local differentiability clause of
+Assumption~\ref{as:continuity} requires the finite diagonal-witness
+neighbourhoods used in Sec.~\ref{sec:irreducibility} not to intersect these
+sets. This is a local regularity requirement, not a consequence of global
+continuity. If global $C^1$ regularity is desired, the positive part may be
+replaced by its squared positive part and the max-based speed gauge by a smooth
+normalization.}
 
 \begin{assumption}[Nondegenerate sampling]
 \label{as:sampling}
@@ -1731,7 +1913,7 @@ $S_{\mathrm{FM}}^{(b)}$ denotes the nonnegative squared Euler
 residual~\eqref{eq:S_FM_def}, not the implemented
 surrogate~\eqref{eq:S_FM_first_order}; the bounds below use only the squared
 form and hold for any nonnegative weights summing to one, so they remain valid
-when the surrogate drives the importance weights in practice\cl{, and for the fading-memory-augmented field $\widetilde{\mathbf h}^{\mathcal M}_t$, which enters only through the reference value $\widetilde{\mathbf h}_t(\mathbf z_t)$}.}
+when the surrogate drives the importance weights in practice\cl{, and for the fading-memory-augmented field $\widetilde{\mathbf h}^{\mathcal M}_t$, which enters only through the reference value $\widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_t)$}.}
 
 \cl{Define the one-step spatial velocity}
 \begin{equation}\label{eq:discrete_spatial_velocity}
@@ -1774,7 +1956,7 @@ sufficient under nonlinear discretization, projection, or saturation.}
     \cl{\left\|
     \mathbf v_t^{\mathrm{exec}}
     -
-    \widetilde{\mathbf h}_t(\mathbf z_t)
+    \widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_t)
     \right\|^2}
     &\leq
     \cl{2\left\|
@@ -1798,7 +1980,7 @@ nonnegative and sum to one, convexity of the squared norm gives}
     \cl{\left\|
     \overline{\mathbf v}_t
     -
-    \widetilde{\mathbf h}_t(\mathbf z_t)
+    \widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_t)
     \right\|^2
     \leq
     \sum_{b=1}^{N}
@@ -1806,7 +1988,7 @@ nonnegative and sum to one, convexity of the squared norm gives}
     \left\|
     \mathbf v_t^{(b)}
     -
-    \widetilde{\mathbf h}_t(\mathbf z_t)
+    \widetilde{\mathbf h}^{\mathcal M}_t(\mathbf z_t)
     \right\|^2.}
 \end{equation}
 \cl{All rollouts start from $\mathbf z_t$, so each summand is the $k=0$
@@ -1835,7 +2017,7 @@ and the achieved weighted flow residual by}
     \left\|
     \mathbf v^{\mathrm{exec}}
     -
-    \widetilde{\mathbf h}(\mathbf z)
+    \widetilde{\mathbf h}^{\mathcal M}(\mathbf z)
     \right\|^2
     \right\rangle,}\\
     \cl{\varepsilon_{\mathrm{avg}}}

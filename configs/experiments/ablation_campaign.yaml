@@ -1,0 +1,182 @@
+# Full ablation campaign. Levels bracket the shipped configs/mppi_params.yaml;
+# axes are dotted paths into that file. See ergodic_control_mppi/experiments/ablation.py.
+#
+#   python -m ergodic_control_mppi.experiments.ablation --dry-run
+#
+# Stage kinds: ofat (one axis at a time) | grid (pairwise factorial) |
+#              arms (named structural variants) | factorial (arms x density x obstacles)
+
+base_config: configs/mppi_params.yaml
+output_root: results/campaign
+
+defaults:
+  steps: 10000
+  seeds: [43, 44, 45, 46, 47]
+  obstacle_seed: 43      # map held fixed, so seed spread means initial conditions only
+  density: trimodal
+
+densities:
+  # The four from configs/experiments/literature_comparison.yaml, verbatim, so the
+  # ablation and the later baseline comparison score the same targets.
+  unimodal:
+    weights: [1.0]
+    means: [[0.0, 0.0]]
+    covariances: [[[6.0, 0.0], [0.0, 6.0]]]
+  bimodal:
+    weights: [0.5, 0.5]
+    means: [[-5.0, 0.0], [5.0, 0.0]]
+    covariances:
+      - [[2.5, 0.0], [0.0, 2.5]]
+      - [[2.5, 0.0], [0.0, 2.5]]
+  trimodal:
+    weights: [0.33333334, 0.33333334, 0.33333334]
+    means: [[0.0, 6.0], [-6.0, -4.0], [6.0, -4.0]]
+    covariances:
+      - [[3.0, 0.0], [0.0, 2.0]]
+      - [[2.0, 1.0], [1.0, 3.0]]
+      - [[2.0, -1.0], [-1.0, 3.0]]
+  four_mode:
+    weights: [0.25, 0.25, 0.25, 0.25]
+    means: [[-6.0, 6.0], [6.0, 6.0], [-6.0, -6.0], [6.0, -6.0]]
+    covariances:
+      - [[2.0, 0.0], [0.0, 2.0]]
+      - [[2.0, 0.0], [0.0, 2.0]]
+      - [[2.0, 0.0], [0.0, 2.0]]
+      - [[2.0, 0.0], [0.0, 2.0]]
+  # Deliberately multi-scale: one broad mode with two narrow ones inside its
+  # support, plus a distant narrow mode. The scale bank should earn its keep
+  # here, where the three-mode target above gave the intermediate scale nothing
+  # to do (results/multiscale_memory_horizon/summary.txt).
+  multiscale:
+    weights: [0.4, 0.2, 0.2, 0.2]
+    means: [[-3.0, 3.0], [-4.5, 1.5], [-1.5, 4.5], [6.0, -6.0]]
+    covariances:
+      - [[8.0, 0.0], [0.0, 8.0]]
+      - [[0.35, 0.0], [0.0, 0.35]]
+      - [[0.35, 0.0], [0.0, 0.35]]
+      - [[0.6, 0.0], [0.0, 0.6]]
+
+stages:
+
+  # Cheap end-to-end check of runner + analysis + every figure. Runs locally in
+  # under a minute; never quote its numbers.
+  smoke:
+    kind: ofat
+    steps: 200
+    seeds: [43, 44]
+    axes:
+      stein.memory_gain: [5.0, 30.0]
+      stein.memory_scales: [1, 2]
+
+  # Companion to `smoke`: exercises the interaction-matrix figure and the iso-L
+  # overlay, which the one-axis stage above cannot reach.
+  smoke_grid:
+    kind: grid
+    steps: 200
+    seeds: [43]
+    pairs:
+      - name: speed__horizon
+        axes:
+          stein.reference_speed: [2.0, 4.0, 8.0]
+          mppi.T: [50, 150, 350]
+      - name: balance__gain
+        axes:
+          stein.memory_balance: [0.0, 0.85]
+          stein.memory_gain: [5.0, 30.0]
+
+  # Stage 1 -- one factor at a time, 5 levels x 5 seeds. Feeds the tornado plot
+  # and the violin grid; prunes the axis set for stage 2.
+  screening:
+    kind: ofat
+    steps: 10000
+    axes:
+      stein.memory_time:      [2.5, 5.0, 20.0, 40.0]        # tau_M [s]; also sets P
+      stein.memory_balance:   [0.0, 0.35, 0.6, 1.0]         # a
+      stein.memory_gain:      [0.0, 5.0, 30.0, 60.0]        # k_M; 0 = memory off
+      stein.memory_scales:    [1, 2, 4, 5]                  # Q
+      stein.fill_resolution:  [0.1, 0.4, 0.8, 1.2]          # delta_res -> h_f
+      stein.coarse_bandwidth: [1.5, 3.0, 8.0, 12.0]         # h_c; default derives 5.0
+      stein.theta:            [0.0, 15.0, 60.0, 90.0]       # curl angle
+      stein.weight_stein:     [500.0, 1500.0, 6000.0, 12000.0]
+      stein.ell_self:         [0.25, 0.5, 2.0, 4.0]         # attraction bandwidth floor
+      stein.reference_speed:  [0.0, 2.0, 6.0, 8.0]          # v
+      mppi.lambda:            [0.25, 0.5, 2.0, 4.0]
+
+  # Stage 2 -- pairwise interactions, 7x7 x 3 seeds. Each pair tests a stated
+  # claim rather than blindly gridding.
+  interactions:
+    kind: grid
+    steps: 10000
+    seeds: [43, 44, 45]
+    pairs:
+      # The two headline memory knobs.
+      - name: balance__gain
+        axes:
+          stein.memory_balance: [0.0, 0.2, 0.4, 0.6, 0.75, 0.85, 1.0]
+          stein.memory_gain: [0.0, 5.0, 10.0, 15.0, 25.0, 40.0, 60.0]
+      # Scale-bank endpoints: does the derived h_c sit at the free optimum?
+      - name: fine__coarse
+        axes:
+          stein.fill_resolution: [0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8]
+          stein.coarse_bandwidth: [1.0, 2.0, 3.0, 5.0, 7.0, 9.0, 12.0]
+      # Accuracy/cost frontier: the O(Q P^2) occupancy KDE lives here.
+      - name: memory_time__scales
+        axes:
+          stein.memory_time: [2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0]
+          stein.memory_scales: [1, 2, 3, 4, 5, 6, 7]
+      # Reach redundancy L = v*T*dt (core.py:203). Predicts a diagonal iso-L ridge.
+      - name: speed__horizon
+        axes:
+          stein.reference_speed: [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0]
+          mppi.T: [50, 100, 150, 250, 350, 500, 700]
+      # The paper's existing fig:curl_attr axes, on the live code.
+      - name: theta__flow_weight
+        axes:
+          stein.theta: [0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0]
+          stein.weight_stein: [250.0, 500.0, 1000.0, 3000.0, 6000.0, 10000.0, 20000.0]
+      # The paper's existing fig:N_T axes; also feeds the compute story.
+      - name: samples__horizon
+        axes:
+          mppi.K: [125, 250, 500, 1000, 2000, 3000, 4000]
+          mppi.T: [50, 100, 150, 250, 350, 500, 700]
+
+  # Stage 3 -- structural arms at the long horizon, 10 seeds.
+  components:
+    kind: arms
+    steps: 20000
+    seeds: [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    arms:
+      full: {}
+      memory_off: {stein.memory_gain: 0.0}
+      trail_only: {stein.memory_balance: 0.0}
+      excess_only: {stein.memory_balance: 1.0}
+      # Q=1 collapses geomspace(h_f, h_c, 1) to [h_f], i.e. FINE ONLY. That tests
+      # "one scale vs a span", not "one well-chosen scale vs a span" --
+      fine_only: {stein.memory_scales: 1}
+      # -- so this is the honest single-scale control: Q=1 pinned at the bank's
+      # geometric midpoint sqrt(h_f h_c) = sqrt(0.08 * 5.0) = 0.632.
+      one_good_scale:
+        stein.memory_scales: 1
+        stein.fine_bandwidth: 0.632
+      two_scale: {stein.memory_scales: 2}
+      no_curl: {stein.theta: 0.0}
+      weak_flow: {stein.weight_stein: 500.0}
+      no_speed_gauge: {stein.reference_speed: 0.0}
+      # Derived h_c vs the value that won the earlier single-target study.
+      coarse_tuned: {stein.coarse_bandwidth: 3.0}
+      # Buffer truncation at fixed gamma: 3 tau (shipped) vs 5 tau.
+      long_buffer: {mppi.memory_length: 2500}
+
+  # Stage 4 -- does the best combination generalize? Fill in `best` from the
+  # stage 1-3 results before launching this stage.
+  generalization:
+    kind: factorial
+    steps: 20000
+    seeds: [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    densities: [unimodal, bimodal, trimodal, four_mode, multiscale]
+    obstacle_counts: [0, 3, 6, 10]
+    arms:
+      full: {}
+      memory_off: {stein.memory_gain: 0.0}
+      # Placeholder: overwrite with the stage-1/2/3 winner, then re-run --dry-run.
+      best: {}
