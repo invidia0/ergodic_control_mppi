@@ -11,7 +11,9 @@ tot=0; dn=0
 for s in $STAGES; do
   n=${s%%:*}; t=${s##*:}
   c=$(grep -cE '^ROW=' scratch/$n.log 2>/dev/null || echo 0)
-  printf '%-14s %4d/%-4d %5d%%\n' "$n" "$c" "$t" "$((100*c/t))"
+  k=$(grep -cE '^SKIP=' scratch/$n.log 2>/dev/null || echo 0)
+  sk=""; [ "$k" -gt 0 ] && sk=" (${k} skipped)"
+  printf '%-14s %4d/%-4d %5d%%%s\n' "$n" "$c" "$t" "$((100*c/t))" "$sk"
   tot=$((tot+t)); dn=$((dn+c))
 done
 printf '%-14s %4d/%-4d %5d%%\n' TOTAL "$dn" "$tot" "$((100*dn/tot))"

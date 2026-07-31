@@ -61,6 +61,13 @@ ROW_FIELDS = [
     "wall_seconds", "compiled", "device", "git_sha",
 ]
 
+SKIP_FIELDS = ["stage", "cell_id", "arm", "density", "seed", "steps", "axes", "error"]
+
+# Consecutive per-cell failures tolerated before a stage gives up. Isolated bad
+# parameter combinations are expected in a sweep; a run of them means something
+# systemic, which "completing" the campaign would hide.
+MAX_CONSECUTIVE_FAILURES = 10
+
 
 @dataclass(frozen=True)
 class Cell:
@@ -477,6 +484,8 @@ def run_campaign(
     root = campaign.output_root
     _write_manifest(root, campaign, cells, device)
     executed = 0
+    skipped = 0
+    consecutive = 0
     previous_static: tuple | None = None
     for position, cell in enumerate(mine, start=1):
         index_csv = root / f"{cell.stage}.csv"
@@ -487,7 +496,43 @@ def run_campaign(
         if compiled:
             print(f"# recompile: static signature {static}", flush=True)
             previous_static = static
-        row = run_cell(campaign, base, cell, root, device, fourier_order, compiled=compiled)
+        try:
+            row = run_cell(campaign, base, cell, root, device, fourier_order, compiled=compiled)
+        except Exception as error:  # noqa: BLE001 - one bad cell must not end the stage
+            # A sweep can legitimately request an impossible combination (e.g. a
+            # coarse bandwidth below the fine one), and a 30-hour unattended run
+            # must not lose hundreds of good cells to one of them. Record it and
+            # carry on; the figures already render missing cells as blanks.
+            skipped += 1
+            consecutive += 1
+            append_csv(
+                root / f"{cell.stage}_skipped.csv",
+                {
+                    "stage": cell.stage, "cell_id": cell.cell_id, "arm": cell.arm,
+                    "density": cell.density, "seed": cell.seed, "steps": cell.steps,
+                    "axes": json.dumps(
+                        {k: _canonical(v) for k, v in sorted(cell.axes.items())}, sort_keys=True
+                    ),
+                    "error": f"{type(error).__name__}: {error}".replace("\n", " ")[:500],
+                },
+                SKIP_FIELDS,
+            )
+            print(
+                f"SKIP={position}/{len(mine)} stage={cell.stage} arm={cell.arm} "
+                f"seed={cell.seed} {type(error).__name__}: {error}",
+                flush=True,
+            )
+            # Isolated bad combinations are expected; a run of them is not, and
+            # means something systemic (device lost, disk full) that quietly
+            # "completing" the campaign would hide.
+            if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                print(
+                    f"EXIT_FAIL {consecutive} consecutive failures, aborting stage",
+                    flush=True,
+                )
+                raise
+            continue
+        consecutive = 0
         append_csv(index_csv, row, ROW_FIELDS)
         executed += 1
         # Machine-greppable progress line: the remote poll counts these.
@@ -499,7 +544,7 @@ def run_campaign(
         )
         if limit is not None and executed >= limit:
             break
-    print(f"EXIT_OK executed={executed} of {len(mine)}", flush=True)
+    print(f"EXIT_OK executed={executed} of {len(mine)} skipped={skipped}", flush=True)
     return executed
 
 

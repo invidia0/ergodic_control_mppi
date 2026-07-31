@@ -1,5 +1,6 @@
 """Campaign expansion, archive round-trip, and the derived metrics."""
 
+import csv
 import json
 import tempfile
 import unittest
@@ -205,6 +206,54 @@ class StridedOccupancySeriesTest(unittest.TestCase):
             compute_cumulative_team_ergodic_error(
                 path, target, limits, limits, (20, 20), stride=0
             )
+
+
+class InvalidCellTest(unittest.TestCase):
+    """One impossible parameter combination must not abort the whole stage.
+
+    Regression: a fine x coarse sweep asked for h_c = 1.0 with delta_res = 0.8
+    (h_f = 1.28), which load_config rightly rejects -- and the traceback killed
+    the remaining 510 cells of a 30-hour run.
+    """
+
+    def test_stage_survives_and_records_the_skip(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            data = yaml.safe_load(Path(CAMPAIGN).read_text(encoding="utf-8"))
+            data["output_root"] = str(root / "out")
+            data["stages"] = {
+                "mixed": {
+                    "kind": "arms",
+                    "steps": 40,
+                    "seeds": [43],
+                    "arms": {
+                        "ok": {},
+                        # h_f = 2 * 0.8^2 = 1.28 > h_c = 1.0 -> rejected by config.py
+                        "impossible": {
+                            "stein.fill_resolution": 0.8,
+                            "stein.coarse_bandwidth": 1.0,
+                        },
+                        "ok_too": {"stein.memory_gain": 5.0},
+                    },
+                }
+            }
+            config = root / "campaign.yaml"
+            config.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+            out = Path(data["output_root"])
+
+            executed = run_campaign(config, stages=["mixed"], device="cpu")
+
+            self.assertEqual(executed, 2, "the two valid arms must still run")
+            arms = {row["arm"] for row in load_index(out, "mixed")}
+            self.assertEqual(arms, {"ok", "ok_too"})
+
+            skipped = out / "mixed_skipped.csv"
+            self.assertTrue(skipped.exists(), "the skip must be recorded, not swallowed")
+            with skipped.open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["arm"], "impossible")
+            self.assertIn("coarse_bandwidth", rows[0]["error"])
 
 
 class ArchiveRoundTripTest(unittest.TestCase):
