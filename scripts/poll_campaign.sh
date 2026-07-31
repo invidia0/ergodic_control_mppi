@@ -10,8 +10,8 @@ printf '%-14s %9s %6s\n' stage done pct
 tot=0; dn=0
 for s in $STAGES; do
   n=${s%%:*}; t=${s##*:}
-  c=$(grep -cE '^ROW=' scratch/$n.log 2>/dev/null || echo 0)
-  k=$(grep -cE '^SKIP=' scratch/$n.log 2>/dev/null || echo 0)
+  c=$(grep -cE '^ROW=' scratch/$n.log 2>/dev/null | head -1); c=${c:-0}
+  k=$(grep -cE '^SKIP=' scratch/$n.log 2>/dev/null | head -1); k=${k:-0}
   sk=""; [ "$k" -gt 0 ] && sk=" (${k} skipped)"
   printf '%-14s %4d/%-4d %5d%%%s\n' "$n" "$c" "$t" "$((100*c/t))" "$sk"
   tot=$((tot+t)); dn=$((dn+c))
