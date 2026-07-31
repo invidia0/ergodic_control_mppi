@@ -73,6 +73,22 @@ DIVERGING_CMAP = "RdBu_r"
 SEQUENTIAL_CMAP = sequential("Blues")   # magnitude: recency, generic scalars
 EXCESS_CMAP = sequential("Reds")        # magnitude: over-coverage / error
 
+# Field maps (occupancy o_t^h, |rho_t^h|) are drawn full-bleed: the pcolormesh
+# covers the panel, so the light end never sits against SURFACE and the clipping
+# above does not apply. What must clear the ramp instead are the marks drawn on
+# top of it -- the trail, the robot, the mode crosses -- so the ramp is clipped at
+# the *dark* end to leave them headroom. Greys@0.85 is #2e2e2e, against which white
+# reads 13.65:1 and ACCENT 3.71:1. The ink colour #33415C reads only 1.33:1 there,
+# which is why every ink mark over a field map carries a white halo.
+OCCUPANCY_CMAP = sequential("Greys", 0.0, 0.85)
+
+# Executed trail: old -> white, newest -> ACCENT, per the fading-memory reading.
+# Exempt from the light-end rule by construction; its white end is guarded by a
+# hairline stroke instead (see _trail in plotting/mechanism.py), because a white
+# trail crossing a low-occupancy region would otherwise vanish into the ramp.
+TRAIL_CMAP = LinearSegmentedColormap.from_list("trail", ["#FFFFFF", "#F7B0A6", ACCENT])
+TRAIL_STROKE = "#33415C"
+
 # Figure widths in inches. IEEE two-column: 3.35in single, 6.9in double.
 FIGSIZES = {
     "column": (3.35, 2.4),

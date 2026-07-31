@@ -1,12 +1,20 @@
 """Explanatory figures for Sec. III-C, Fading-Memory Coverage Feedback.
 
 Every field, weight and bandwidth drawn here is produced by calling the
-controller's own functions -- ``kernel_gradient``, ``smoothed``, ``pdf``,
-``stein_repulsion``, ``multiscale_memory_flow``, ``stein_gradient`` -- on a memory
-buffer taken from a real run. Nothing is hand-drawn, so a figure cannot drift
-away from the implementation.
+controller's own functions -- ``kernel``, ``kernel_gradient``, ``smoothed``,
+``pdf``, ``stein_repulsion`` -- on a memory buffer taken from a real run. Nothing
+is hand-drawn, so a figure cannot drift away from the implementation; the
+composition of those calls is pinned against ``multiscale_memory_flow`` itself in
+``tests/test_plotting.py``.
 
     python -m ergodic_control_mppi.plotting.mechanism --output-dir theory/pictures
+
+Four figures, in the order Sec. III-C introduces them:
+
+    fig_occupancy       o_t^h and the fading trail that produced it
+    fig_excess_focus    the relative excess e_{t,i}^h, read off one memory point
+    fig_memory_fields   the recency and over-coverage fields, and the curl
+    fig_scale_bank      the gauge, and what each scale contributes
 
 The source run is cached; delete the .npz to regenerate it.
 """
@@ -14,26 +22,31 @@ The source run is cached; delete the .npz to regenerate it.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import jax.numpy as jnp
+import matplotlib.patches as mpatches
+import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import Normalize
+from matplotlib.collections import LineCollection
+from matplotlib.colors import PowerNorm
 
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.mppi.stein import (
+    ACTIVITY_FLOOR,
     kernel,
     kernel_gradient,
-    multiscale_memory_flow,
     pdf,
     smoothed,
-    stein_gradient,
     stein_repulsion,
 )
 from ergodic_control_mppi.plotting.style import (
-    EXCESS_CMAP,
+    OCCUPANCY_CMAP,
     SEQUENTIAL_CMAP,
+    TRAIL_CMAP,
+    TRAIL_STROKE,
     ACCENT,
     NEUTRAL,
     PRIMARY,
@@ -135,189 +148,476 @@ def _context(config, arrays):
     }
 
 
-def _excess(ctx, bandwidth: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Occupancy, scale-matched target, relative excess at the memory points.
+def _field_at(ctx, points, bandwidth: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Occupancy, scale-matched target and relative excess at arbitrary points.
 
-    Mirrors stein.py:174-185 term for term.
+    Term for term eq. (occupancy_density), (smoothed_target) and
+    (relative_excess), which is what ``stein.py:174-178`` evaluates at the memory
+    points. Blocked over the query axis: the full ``(N, P)`` kernel matrix is
+    ~200 MB at N = 180^2, P = 1500.
     """
     memory, recency = ctx["memory"], ctx["recency"]
-    occupancy = (kernel(memory[:, None, :], memory[None, :, :], bandwidth) @ recency) / (
-        jnp.sum(recency) * jnp.pi * bandwidth
+    query = jnp.asarray(points, dtype=jnp.float32).reshape(-1, 2)
+    blocks = max(1, int(np.ceil(query.shape[0] / 4096)))
+    occupancy = np.concatenate([
+        np.asarray(kernel(chunk[:, None, :], memory[None, :, :], bandwidth) @ recency)
+        for chunk in jnp.array_split(query, blocks)
+    ]) / float(jnp.sum(recency) * jnp.pi * bandwidth)
+    target = np.asarray(pdf(query, smoothed(ctx["gmm"], bandwidth)))
+    excess = np.maximum(occupancy - target, 0.0) / (target + ctx["density_floor"])
+    return occupancy, target, excess
+
+
+def _excess(ctx, bandwidth: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """``_field_at`` on the memory buffer, plus the recency-mean excess S_t^h."""
+    occupancy, target, excess = _field_at(ctx, ctx["memory"], bandwidth)
+    recency = np.asarray(ctx["recency"])
+    return occupancy, target, excess, float(recency @ excess / recency.sum())
+
+
+def _grid(ctx, n: int = 180, limits=None):
+    """Regular query grid over the workspace (or a sub-box), for the field maps."""
+    limits_x, limits_y = limits or (ctx["limits_x"], ctx["limits_y"])
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(*limits_x, n), np.linspace(*limits_y, n)
     )
-    target = pdf(memory, smoothed(ctx["gmm"], bandwidth))
-    excess = jnp.maximum(occupancy - target, 0.0) / (target + ctx["density_floor"])
-    activity = jnp.sum(recency * excess) / jnp.sum(recency)
-    return (
-        np.asarray(occupancy), np.asarray(target), np.asarray(excess), float(activity)
+    return grid_x, grid_y, np.stack((grid_x.ravel(), grid_y.ravel()), axis=-1)
+
+
+def _rho(ctx, points, masses, bandwidth: float, rotation=None) -> np.ndarray:
+    """Memory repulsion of eq. (memory_repulsion), as the controller computes it.
+
+    ``stein_repulsion`` divides by the mass sum, so passing the raw recency gives
+    exactly rho(.; q^rec); ``rotation`` overrides C = R(theta) for the panel that
+    isolates the curl.
+    """
+    stein = ctx["stein"]
+    if rotation is not None:
+        stein = replace(stein, rotation=jnp.asarray(rotation, dtype=jnp.float32))
+    return np.asarray(
+        stein_repulsion(
+            jnp.asarray(points, dtype=jnp.float32).reshape(-1, 2),
+            ctx["memory"], jnp.asarray(masses), stein, bandwidth,
+        )
     )
 
 
-def _grid(ctx, step: float = 0.9):
-    """Query grid for the quiver panels."""
-    xs = np.arange(ctx["limits_x"][0] + step, ctx["limits_x"][1], step)
-    ys = np.arange(ctx["limits_y"][0] + step, ctx["limits_y"][1], step)
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    points = np.stack((grid_x.ravel(), grid_y.ravel()), axis=-1)
-    return grid_x, grid_y, jnp.asarray(points, dtype=jnp.float32)
+def _rho_excess(ctx, points, bandwidth: float, rotation=None) -> np.ndarray:
+    """The over-coverage field, gate included -- ``stein.py:188-190`` verbatim."""
+    _, _, excess, activity = _excess(ctx, bandwidth)
+    gate = activity / (activity + ACTIVITY_FLOOR)
+    return gate * _rho(ctx, points, np.asarray(ctx["recency"]) * excess, bandwidth,
+                       rotation=rotation)
 
 
-def _target_contours(axis, ctx, levels: int = 4) -> None:
+def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4):
+    """The executed trail, fading white (old) to ACCENT (newest), plus the robot.
+
+    A white segment crossing a low-occupancy region would read 1.00:1 against the
+    ramp, so a hairline underlay runs beneath it. That keeps the trail traceable
+    everywhere without darkening its faded end, which *is* the message.
+
+    The underlay is one continuous line, not a per-segment ``withStroke``: at
+    dt = 0.02 s consecutive buffer points are ~0.08 m apart, far closer than the
+    line is wide, so each segment's stroke would paint over its neighbours' cores
+    and the whole trail would render in the stroke colour.
+    """
+    memory = np.asarray(ctx["memory"])
+    recency = np.asarray(ctx["recency"])
+    axis.plot(memory[:, 0], memory[:, 1], color=TRAIL_STROKE, alpha=0.45,
+              linewidth=linewidth + 0.7, solid_capstyle="round", zorder=zorder - 1)
+    collection = LineCollection(
+        np.stack((memory[:-1], memory[1:]), axis=1),
+        cmap=TRAIL_CMAP, linewidth=linewidth, capstyle="round", zorder=zorder,
+    )
+    collection.set_array(recency[1:])
+    collection.set_clim(0.0, 1.0)
+    axis.add_collection(collection)
+    axis.plot(*ctx["position"], marker="o", markersize=4.2, color=ACCENT,
+              markeredgecolor="#FFFFFF", markeredgewidth=0.8, zorder=zorder + 1)
+    return collection
+
+
+def _target_contours(axis, ctx, levels: int = 4, color: str = "#9AA7BE",
+                     limits=None, gmm=None) -> None:
     """Recessive target-density contours: context, never a foreground mark."""
-    xs = np.linspace(*ctx["limits_x"], 160)
-    ys = np.linspace(*ctx["limits_y"], 160)
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    density = np.asarray(
-        pdf(jnp.stack((grid_x, grid_y), axis=-1).astype(jnp.float32), ctx["gmm"])
-    )
-    axis.contour(grid_x, grid_y, density, levels=levels,
-                 colors="#9AA7BE", linewidths=0.4, alpha=0.9, zorder=1)
+    grid_x, grid_y, points = _grid(ctx, n=160, limits=limits)
+    density = np.asarray(pdf(jnp.asarray(points, jnp.float32), gmm or ctx["gmm"]))
+    axis.contour(grid_x, grid_y, density.reshape(grid_x.shape), levels=levels,
+                 colors=color, linewidths=0.4, alpha=0.9, zorder=1)
 
 
-def _map_axes(axis, ctx, *, ylabel: bool = False) -> None:
+def _map_axes(axis, ctx, *, ylabel: bool = False, limits=None) -> None:
     """Shared geometry for every workspace panel, so panels align exactly."""
-    axis.set_xlim(*ctx["limits_x"])
-    axis.set_ylim(*ctx["limits_y"])
+    limits_x, limits_y = limits or (ctx["limits_x"], ctx["limits_y"])
+    axis.set_xlim(*limits_x)
+    axis.set_ylim(*limits_y)
     axis.set_aspect("equal")
-    axis.set_xticks([-10, -5, 0, 5, 10])
-    axis.set_yticks([-10, -5, 0, 5, 10])
+    if limits is None:
+        axis.set_xticks([-10, -5, 0, 5, 10])
+        axis.set_yticks([-10, -5, 0, 5, 10])
     axis.set_xlabel(r"$x$ [m]", labelpad=1)
     if ylabel:
         axis.set_ylabel(r"$y$ [m]", labelpad=1)
-    else:
+    elif limits is None:
+        # Panels sharing the workspace crop drop the repeated labels; a zoom keeps
+        # its own, since its range is not the one the neighbour already stated.
         axis.set_yticklabels([])
 
 
 def _modes(axis, ctx, label: str | None = None) -> None:
-    """Mark the target modes identically in every panel."""
+    """Mark the target modes identically in every panel.
+
+    The white halo is not decoration: the ink colour reads 1.33:1 against the dark
+    end of OCCUPANCY_CMAP, so an unhaloed cross disappears over a dense region --
+    which is exactly where the modes sit.
+    """
     means = np.asarray(ctx["params"].gmm.means)
     axis.plot(means[:, 0], means[:, 1], marker="x", linestyle="none",
               color="#33415C", markersize=3.4, markeredgewidth=0.9,
-              zorder=6, label=label)
+              zorder=6, label=label,
+              path_effects=[patheffects.withStroke(linewidth=2.0, foreground="#FFFFFF")])
 
 
-def _inline_colorbar(figure, axis, mappable, label: str) -> None:
+def _inline_colorbar(figure, axis, mappable, label: str, *, backing: bool = False,
+                     corner: str = "lower") -> None:
     """Compact horizontal colorbar *inside* the panel.
 
     An external colorbar steals ~15% of a panel's width and, when only some
     panels carry one, leaves their titles at different heights. Putting it
     inside keeps every map the same size.
+
+    ``backing`` lays a translucent white pad underneath, needed whenever the bar
+    sits over a filled field map: the ink used for its label and ticks reads
+    1.33:1 against the dark end of the ramp.
     """
-    cax = axis.inset_axes((0.06, 0.055, 0.42, 0.035))
+    bottom = 0.075 if corner == "lower" else 0.80
+    if backing:
+        pad = axis.inset_axes((0.035, bottom - 0.04, 0.50, 0.185), zorder=7)
+        pad.set_facecolor("#FFFFFF")
+        pad.patch.set_alpha(0.84)
+        pad.set_xticks([])
+        pad.set_yticks([])
+        for spine in pad.spines.values():
+            spine.set_visible(False)
+    cax = axis.inset_axes((0.075, bottom, 0.38, 0.032), zorder=8)
     bar = figure.colorbar(mappable, cax=cax, orientation="horizontal")
     bar.outline.set_linewidth(0.4)
     bar.outline.set_edgecolor("#5C6B87")
+    cax.xaxis.set_major_locator(plt.MaxNLocator(2))
+    cax.minorticks_off()
     cax.tick_params(labelsize=5.6, length=1.4, pad=1, colors="#33415C")
     cax.set_title(label, fontsize=6.0, pad=2, color="#33415C")
 
 
-def figure_pipeline(ctx, output: Path) -> Path:
-    """Fig. A -- one buffer, three colourings: memory, excess, resulting field.
+def _field_map(axis, grid_x, grid_y, values, *, cmap=OCCUPANCY_CMAP, norm=None, vmax=None):
+    """Full-bleed field under everything else."""
+    if norm is None:
+        norm = PowerNorm(0.5, vmin=0.0, vmax=vmax if vmax is not None else values.max())
+    # A grid over a filled field is noise, and axisbelow puts it *above* the mesh.
+    axis.grid(False)
+    return axis.pcolormesh(grid_x, grid_y, values.reshape(grid_x.shape), cmap=cmap,
+                           norm=norm, shading="auto", zorder=0, rasterized=True)
 
-    Every panel is the same workspace map of the same memory points, so the
-    pipeline reads left to right as one object being re-weighted.
+
+def figure_occupancy(ctx, output: Path) -> Path:
+    """Fig. 1 -- the occupancy proxy the memory maintains, and the trail behind it.
+
+    One map, because there is one object: eq. (occupancy_density) at the coarse
+    scale, with the buffer that generated it drawn on top fading white (oldest)
+    to accent (the robot). PowerNorm(1/2) rather than a linear norm -- occupancy
+    is a sum of P narrow kernels, so linearly the halo around the track is
+    invisible and only a thin ridge survives.
     """
-    stein = ctx["stein"]
-    coarse = float(stein.coarse_bandwidth)
-    _, _, excess, activity = _excess(ctx, coarse)
-    memory = np.asarray(ctx["memory"])
-    recency = np.asarray(ctx["recency"])
-    acts = excess > 0.0
+    coarse = float(ctx["stein"].coarse_bandwidth)
+    grid_x, grid_y, points = _grid(ctx, n=220)
+    occupancy, _, _ = _field_at(ctx, points, coarse)
 
-    with plt.rc_context(rc=paper_style("double")):
-        figure, axes = plt.subplots(1, 3, figsize=(6.9, 2.35))
-
-        # (a) what the controller retains, against everywhere it has been.
-        axis = axes[0]
-        _target_contours(axis, ctx)
-        axis.plot(ctx["full_path"][:, 0], ctx["full_path"][:, 1],
-                  color="#B9C2D4", linewidth=0.3, alpha=0.9, zorder=2,
-                  label="executed path")
-        order = np.argsort(recency)
-        scatter = axis.scatter(memory[order, 0], memory[order, 1], c=recency[order],
-                               s=2.4, cmap=SEQUENTIAL_CMAP, vmin=0.0, vmax=1.0,
-                               linewidths=0, zorder=3)
-        _modes(axis, ctx, label="target modes")
+    with plt.rc_context(rc=paper_style("column")):
+        figure, axis = plt.subplots(figsize=(3.35, 3.15), constrained_layout=True)
+        mesh = _field_map(axis, grid_x, grid_y, occupancy)
+        _target_contours(axis, ctx, levels=3, color="#8894AB")
+        _trail(axis, ctx)
+        _modes(axis, ctx)
         _map_axes(axis, ctx, ylabel=True)
-        axis.set_title(r"(a) fading memory $\mathcal{M}_t$")
-        _inline_colorbar(figure, axis, scatter, r"recency $\omega_i$")
-        axis.legend(loc="lower right", fontsize=5.8, handletextpad=0.35,
-                    borderpad=0.25, handlelength=1.1, labelspacing=0.2,
-                    framealpha=0.9)
-
-        # (b) the hinge, shown spatially: inert points simply do not colour.
-        axis = axes[1]
-        _target_contours(axis, ctx)
-        axis.scatter(memory[~acts, 0], memory[~acts, 1], s=1.8, color="#A8B2C6",
-                     linewidths=0, zorder=2)
-        order = np.argsort(excess[acts])
-        active = axis.scatter(memory[acts][order, 0], memory[acts][order, 1],
-                              c=excess[acts][order], s=2.6, cmap=EXCESS_CMAP,
-                              linewidths=0, zorder=3)
-        _modes(axis, ctx)
-        _map_axes(axis, ctx)
-        axis.set_title(f"(b) over-coverage ({100 * acts.mean():.0f}% acts)")
-        _inline_colorbar(figure, axis, active, r"excess $e^{h_c}_{t,i}$")
-
-        # (c) the field those weights produce. Length carries magnitude, so the
-        # colour channel stays free rather than repeating it.
-        axis = axes[2]
-        grid_x, grid_y, points = _grid(ctx, step=1.15)
-        repulsion = np.asarray(
-            multiscale_memory_flow(
-                points, ctx["memory"], ctx["recency"], ctx["gmm"], stein, ctx["density_floor"]
-            )
-        )
-        attraction = np.asarray(
-            stein_gradient(points, ctx["particles"], ctx["gmm"], stein, ctx["bandwidth"])
-        )
-        axis.streamplot(
-            grid_x, grid_y,
-            attraction[:, 0].reshape(grid_x.shape), attraction[:, 1].reshape(grid_x.shape),
-            color="#B9C2D4", linewidth=0.3, density=0.55, arrowsize=0.0, zorder=2,
-        )
-        axis.quiver(points[:, 0], points[:, 1], repulsion[:, 0], repulsion[:, 1],
-                    color="#C0392F", width=0.0055, headwidth=3.4, headlength=3.8,
-                    zorder=4)
-        _modes(axis, ctx)
-        _map_axes(axis, ctx)
-        axis.set_title(r"(c) repelling field")
-        axis.text(0.055, 0.055,
-                  "grey: attraction $\\widetilde{\\mathbf{h}}_t$\n"
-                  "red: $k_{\\mathcal{M}}\\boldsymbol{\\rho}^{\\mathrm{MS}}_t$",
-                  transform=axis.transAxes, fontsize=5.9, va="bottom",
-                  color="#33415C", linespacing=1.5)
-
-        figure.tight_layout(pad=0.3, w_pad=0.5)
+        axis.set_title(rf"occupancy $o^{{h_c}}_t$,  $h_c={coarse:.2f}$")
+        _inline_colorbar(figure, axis, mesh, r"$o^{h_c}_t(\mathbf{z})$  [m$^{-2}$]")
         path = save(figure, output)
         plt.close(figure)
-
-    print(f"  activity gate S/(S+eps_S) = {activity / (activity + 1e-3):.4f}  (S = {activity:.4g})")
     return path
 
 
+def _focus_point(ctx, bandwidth: float) -> tuple[int, np.ndarray]:
+    """The most over-served memory point *inside a mode*, and the excess vector.
+
+    Restricted to Mahalanobis radius < 2 of the nearest mode on purpose. The
+    unrestricted argmax lands on a transit point where p*_h ~ 0 and the excess
+    collapses to o/eps_p -- that illustrates the density floor, not the coverage
+    mechanism the figure is about.
+    """
+    memory = np.asarray(ctx["memory"])
+    _, _, excess = _field_at(ctx, memory, bandwidth)
+    means = np.asarray(ctx["gmm"].means)
+    delta = memory[:, None, :] - means[None, :, :]
+    radius = np.sqrt(
+        np.einsum("pmi,mij,pmj->pm", delta, np.asarray(ctx["gmm"].covariance_inverse), delta)
+    ).min(axis=1)
+    inside = radius < 2.0
+    return int(np.argmax(np.where(inside, excess, -np.inf))), excess
+
+
+def figure_excess_focus(ctx, output: Path) -> Path:
+    """Fig. 2 -- the relative excess, read off one memory point.
+
+    (a) locates the point in the run, (b) resolves its neighbourhood, and (c) is
+    the arithmetic of eq. (relative_excess): the only place the positive part and
+    the density floor are visible rather than asserted.
+    """
+    bandwidth = float(ctx["stein"].coarse_bandwidth)
+    index, excess = _focus_point(ctx, bandwidth)
+    memory = np.asarray(ctx["memory"])
+    focus = memory[index]
+    half = 3.5
+    # Keep the box inside Omega: outside it the fields are defined but meaningless.
+    box = tuple(
+        (min(max(c, lo + half), hi - half) - half, min(max(c, lo + half), hi - half) + half)
+        for c, (lo, hi) in zip(focus, (ctx["limits_x"], ctx["limits_y"]))
+    )
+
+    grid_x, grid_y, points = _grid(ctx, n=200)
+    occupancy, _, _ = _field_at(ctx, points, bandwidth)
+    zoom_x, zoom_y, zoom_points = _grid(ctx, n=160, limits=box)
+    zoom_occupancy, _, _ = _field_at(ctx, zoom_points, bandwidth)
+
+    # The three numbers the caption quotes, straight from the controller's formula.
+    occupancy_i, target_i, excess_i = (float(v[0]) for v in _field_at(ctx, focus[None], bandwidth))
+    floor = float(ctx["density_floor"])
+
+    with plt.rc_context(rc=paper_style("double")):
+        figure = plt.figure(figsize=(6.9, 2.5), constrained_layout=True)
+        grid = figure.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.25])
+
+        # (a) where in the run this point is.
+        axis = figure.add_subplot(grid[0, 0])
+        _field_map(axis, grid_x, grid_y, occupancy, vmax=occupancy.max())
+        _trail(axis, ctx, linewidth=1.4)
+        _modes(axis, ctx)
+        _map_axes(axis, ctx, ylabel=True)
+        axis.set_title(r"(a) $o^{h_c}_t$ over $\Omega$")
+
+        # (b) a true magnification of (a) -- same quantity, same ramp, same limits,
+        # so the eye carries the colour across. What is added is the target it is
+        # compared against (contours) and the kernel scale that sets both.
+        zoom = figure.add_subplot(grid[0, 1])
+        _field_map(zoom, zoom_x, zoom_y, zoom_occupancy, vmax=occupancy.max())
+        _target_contours(zoom, ctx, levels=6, color=PRIMARY, limits=box)
+        _trail(zoom, ctx, linewidth=1.6)
+        radius = float(np.sqrt(0.5 * bandwidth))
+        zoom.add_patch(plt.Circle(focus, radius, fill=False, edgecolor="#FFFFFF",
+                                  linewidth=1.2, zorder=5))
+        zoom.add_patch(plt.Circle(focus, radius, fill=False, edgecolor="#1F2937",
+                                  linewidth=0.7, zorder=5))
+        zoom.plot([focus[0], focus[0] + radius], [focus[1], focus[1]],
+                  color="#1F2937", linewidth=0.7, zorder=5,
+                  path_effects=[patheffects.withStroke(linewidth=1.9, foreground="#FFFFFF")])
+        zoom.plot(*focus, marker="o", markersize=3.6, color="#FFFFFF",
+                  markeredgecolor="#1F2937", markeredgewidth=0.9, zorder=6)
+        halo = [patheffects.withStroke(linewidth=2.0, foreground="#FFFFFF")]
+        # The point label sits outside the circle on a leader; inside, it lands on
+        # the arc no matter where it is put.
+        zoom.annotate(r"$\mathbf{m}_{t,i^\star}$", xy=focus, xytext=(-50, 20),
+                      textcoords="offset points", fontsize=6.5, color="#1F2937",
+                      zorder=7, path_effects=halo,
+                      arrowprops=dict(arrowstyle="-", color="#1F2937", linewidth=0.5,
+                                      shrinkA=1, shrinkB=3))
+        zoom.annotate(r"$\sqrt{h_c/2}$", xy=focus, xytext=(5, 5),
+                      textcoords="offset points", fontsize=6.5, color="#1F2937",
+                      zorder=7, path_effects=halo)
+        _modes(zoom, ctx)
+        _map_axes(zoom, ctx, limits=box)
+        zoom.set_title(r"(b) grey: $o^{h_c}_t$,  blue: $p^\star_{h_c}$")
+        axis.indicate_inset(
+            (box[0][0], box[1][0], 2 * half, 2 * half), inset_ax=zoom,
+            edgecolor="#1F2937", linewidth=0.6, alpha=0.9,
+        )
+
+        # (c) the arithmetic, on a cut through the point.
+        cut = figure.add_subplot(grid[0, 2])
+        xs = np.linspace(*box[0], 400)
+        cut_points = np.stack((xs, np.full_like(xs, focus[1])), axis=-1)
+        occupancy_cut, target_cut, _ = _field_at(ctx, cut_points, bandwidth)
+        cut.fill_between(xs, target_cut, occupancy_cut, where=occupancy_cut > target_cut,
+                         color=ACCENT, alpha=0.20, linewidth=0, zorder=2)
+        cut.plot(xs, occupancy_cut, color="#1F2937", linewidth=1.1, zorder=4)
+        cut.plot(xs, target_cut, color=PRIMARY, linewidth=1.1, zorder=4)
+        cut.axvline(focus[0], color=NEUTRAL, linewidth=0.6, zorder=1)
+        peak = int(np.argmax(occupancy_cut))
+        cut.annotate(r"$o^{h_c}_t$", xy=(xs[peak], occupancy_cut[peak]), xytext=(4, 3),
+                     textcoords="offset points", fontsize=6.8, color="#1F2937")
+        low = int(np.argmax(target_cut))
+        cut.annotate(r"$p^\star_{h_c}$", xy=(xs[low], target_cut[low]), xytext=(-20, -2),
+                     textcoords="offset points", fontsize=6.8, color=PRIMARY)
+        cut.annotate(
+            rf"$e^{{h_c}}_{{t,i^\star}}="
+            rf"\dfrac{{[{occupancy_i:.4f}-{target_i:.4f}]_+}}"
+            rf"{{{target_i:.4f}+{floor:.4f}}}={excess_i:.2f}$",
+            xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top",
+            fontsize=6.6, color="#1F2937",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#FFFFFF", alpha=0.9,
+                      edgecolor="#98A4BA", linewidth=0.4),
+        )
+        cut.set_xlim(*box[0])
+        cut.set_ylim(0, max(occupancy_cut.max(), target_cut.max()) * 1.55)
+        cut.set_xlabel(rf"$x$ [m] at $y={focus[1]:.1f}$", labelpad=1)
+        cut.set_ylabel("density [m$^{-2}$]", labelpad=2)
+        cut.set_title(r"(c) shaded: $[o^{h_c}_t-p^\star_{h_c}]_+$")
+
+        path = save(figure, output)
+        plt.close(figure)
+
+    print(f"  focus i* = {index}/{len(memory)} at {np.round(focus, 2).tolist()}  "
+          f"o = {occupancy_i:.4f}  p* = {target_i:.4f}  e = {excess_i:.2f}  "
+          f"(global max e = {excess.max():.2f})")
+    return path
+
+
+def figure_memory_fields(ctx, output: Path) -> Path:
+    """Fig. 3 -- the two mass vectors give two fields, and C tilts both.
+
+    (a) and (b) share one colour scale on purpose: the two fields are built from
+    the same points and the same kernel, and differ only in how mass is spread
+    over them, so normalising each to its own maximum would erase the result.
+    (c) is the only panel that isolates C, by drawing the same query points twice.
+    """
+    bandwidth = float(ctx["stein"].coarse_bandwidth)
+    recency = np.asarray(ctx["recency"])
+    grid_x, grid_y, points = _grid(ctx, n=170)
+    stream_x, stream_y, stream_points = _grid(ctx, n=34)
+
+    magnitudes, streams = [], []
+    for masses in (None, "excess"):
+        if masses is None:
+            field = _rho(ctx, points, recency, bandwidth)
+            stream = _rho(ctx, stream_points, recency, bandwidth)
+        else:
+            field = _rho_excess(ctx, points, bandwidth)
+            stream = _rho_excess(ctx, stream_points, bandwidth)
+        magnitudes.append(np.linalg.norm(field, axis=-1))
+        streams.append(stream)
+    shared_max = max(m.max() for m in magnitudes)
+
+    index, _ = _focus_point(ctx, bandwidth)
+    focus = np.asarray(ctx["memory"])[index]
+    half = 2.4
+    curl_box = tuple(
+        (min(max(c, lo + half), hi - half) - half, min(max(c, lo + half), hi - half) + half)
+        for c, (lo, hi) in zip(focus, (ctx["limits_x"], ctx["limits_y"]))
+    )
+    _, _, curl_points = _grid(ctx, n=5, limits=curl_box)
+    straight = _rho(ctx, curl_points, recency, bandwidth, rotation=np.eye(2))
+    turned = _rho(ctx, curl_points, recency, bandwidth)
+
+    titles = (r"(a) trail field $\boldsymbol{\rho}^{h_c}_t(\cdot\,;\mathbf{q}^{\mathrm{rec}}_t)$",
+              r"(b) over-coverage $\boldsymbol{\rho}^{h_c}_t(\cdot\,;\mathbf{q}^{h_c,\mathrm{exc}}_t)$")
+
+    with plt.rc_context(rc=paper_style("double")):
+        figure, axes = plt.subplots(1, 3, figsize=(6.9, 2.5), constrained_layout=True)
+
+        for column, (axis, magnitude, stream) in enumerate(zip(axes, magnitudes, streams)):
+            mesh = _field_map(axis, grid_x, grid_y, magnitude, vmax=shared_max)
+            axis.streamplot(
+                stream_x, stream_y,
+                stream[:, 0].reshape(stream_x.shape), stream[:, 1].reshape(stream_x.shape),
+                color=ACCENT, linewidth=0.45, density=0.7, arrowsize=0.45, zorder=3,
+            )
+            _modes(axis, ctx)
+            _map_axes(axis, ctx, ylabel=(column == 0))
+            axis.set_title(titles[column], fontsize=7.6)
+            if column == 1:
+                _inline_colorbar(figure, axis, mesh,
+                                 r"$\|\boldsymbol{\rho}^{h_c}_t\|$  (shared)")
+
+        # (c) the same query points pushed twice: once with C = I, once with the
+        # shipped C = R(theta). Arrows are unit length -- the panel is about
+        # direction, and equal lengths make the constant offset legible where
+        # true magnitudes (which (a) and (b) already carry) would hide it.
+        axis = axes[2]
+        axis.grid(False)
+        axis.set_facecolor("#FFFFFF")
+        memory = np.asarray(ctx["memory"])
+        axis.plot(memory[:, 0], memory[:, 1], color="#33415C", linewidth=0.8,
+                  alpha=0.45, zorder=2)
+        for vectors, color, label in ((straight, "#7E8CA3", r"$\mathbf{C}=\mathbf{I}$"),
+                                      (turned, ACCENT, r"$\mathbf{C}=\mathbf{R}(\theta)$")):
+            unit = vectors / np.maximum(np.linalg.norm(vectors, axis=-1, keepdims=True), 1e-12)
+            axis.quiver(curl_points[:, 0], curl_points[:, 1], unit[:, 0], unit[:, 1],
+                        color=color, width=0.008, headwidth=3.2, headlength=3.6,
+                        scale=7.0, scale_units="width", zorder=3, label=label)
+
+        # One measured arc, so the reader knows what to compare. Every other pair
+        # in the panel repeats it: C is linear, so it turns the sum, not each term.
+        anchor = int(np.argmin(np.linalg.norm(curl_points - np.mean(curl_box, axis=1), axis=1)))
+        angles = [float(np.degrees(np.arctan2(v[anchor, 1], v[anchor, 0])))
+                  for v in (straight, turned)]
+        axis.add_patch(mpatches.Arc(curl_points[anchor], 1.4, 1.4, angle=0.0,
+                                    theta1=min(angles), theta2=max(angles),
+                                    color="#1F2937", linewidth=0.7, zorder=6))
+        axis.annotate(r"$\theta$", xy=curl_points[anchor], xytext=(11, 9),
+                      textcoords="offset points", fontsize=7.0, color="#1F2937", zorder=7,
+                      path_effects=[patheffects.withStroke(linewidth=2.0, foreground="#FFFFFF")])
+        _modes(axis, ctx)
+        _map_axes(axis, ctx, limits=curl_box)
+        theta = float(np.degrees(np.arctan2(ctx["stein"].rotation[1, 0],
+                                            ctx["stein"].rotation[0, 0])))
+        axis.set_title(rf"(c) $\mathbf{{C}}$ turns every push by $\theta={theta:.0f}^\circ$",
+                       fontsize=7.6)
+        axis.legend(loc="upper left", fontsize=6.0, handletextpad=0.4, borderpad=0.3,
+                    handlelength=1.3, labelspacing=0.25, framealpha=0.92)
+
+        path = save(figure, output)
+        plt.close(figure)
+
+    print(f"  |rho| max: trail {magnitudes[0].max():.4g}  excess {magnitudes[1].max():.4g}")
+    return path
+
+
+def _scale_field(ctx, points, bandwidth: float) -> np.ndarray:
+    """One term of the bank: the gauged, balance-blended field at ``bandwidth``.
+
+    ``stein.py:186-191`` verbatim, for a single scale.
+    """
+    balance = float(ctx["stein"].memory_balance)
+    blended = (1.0 - balance) * _rho(ctx, points, np.asarray(ctx["recency"]), bandwidth)
+    blended += balance * _rho_excess(ctx, points, bandwidth)
+    return float(np.sqrt(0.5 * np.e * bandwidth)) * blended
+
+
 def figure_scale_bank(ctx, output: Path) -> Path:
-    """Fig. B -- why there are Q scales, and why none carries its own gain.
+    """Fig. 4 -- why there are Q scales, and why none carries its own gain.
 
-    (a) stacks raw above gauged so "before/after" is spatial rather than encoded
-    by dash-vs-solid, which would compete with the hue identifying the scale.
-
-    (b) reads the excess along the buffer at both endpoints. The buffer is a thin
-    curve, so plotting the two scales as maps makes them look alike -- the real
-    difference is the spatial *frequency* each responds to, which a profile shows
-    directly: the fine scale reacts to local retracing, the coarse scale to
-    mode-wide over-service. Fig. A already grounds the buffer in the workspace,
-    so no third map is needed here.
+    Left, stacked: raw above gauged, so "before/after" is spatial rather than
+    encoded by dash-vs-solid, which would compete with the hue identifying the
+    scale. Right: what each gauged scale contributes as a field, under one shared
+    colour scale -- the point of the gauge is that they are commensurate, which
+    per-panel normalization would hide.
     """
     stein = ctx["stein"]
     scales = ctx["scales"]
-    memory = np.asarray(ctx["memory"])
     # Ordinal ramp: h_0 < h_1 < h_2 is ordered, so it takes one hue light->dark,
     # not three categorical hues.
     colors = [SEQUENTIAL_CMAP(v) for v in np.linspace(0.12, 1.0, len(scales))]
 
+    grid_x, grid_y, points = _grid(ctx, n=200)
+    contributions = [np.linalg.norm(_scale_field(ctx, points, float(h)), axis=-1)
+                     for h in scales]
+    shared_max = max(c.max() for c in contributions)
+
     with plt.rc_context(rc=paper_style("double")):
-        figure = plt.figure(figsize=(6.9, 2.55), constrained_layout=True)
-        grid = figure.add_gridspec(2, 2, width_ratios=[1.0, 1.15])
+        # Height is set so the two stacked profile axes and the square maps end
+        # up the same height: taller and the maps float in slack, shorter and the
+        # profiles are too squat to read.
+        figure = plt.figure(figsize=(6.9, 2.2), constrained_layout=True)
+        grid = figure.add_gridspec(2, 4, width_ratios=[1.2, 1.0, 1.0, 1.0])
         ax_raw = figure.add_subplot(grid[0, 0])
         ax_gauged = figure.add_subplot(grid[1, 0], sharex=ax_raw)
 
@@ -347,42 +647,31 @@ def figure_scale_bank(ctx, output: Path) -> Path:
         ax_gauged.set_ylabel("gauged", labelpad=2)
         ax_gauged.set_xlabel(r"$r=\|\mathbf{z}-\mathbf{m}_{t,i}\|$ [m]", labelpad=1)
         ax_raw.tick_params(labelbottom=False)
-        ax_raw.set_ylim(0, 3.5)
+        ax_raw.set_ylim(0, 4.0)
         ax_gauged.set_ylim(0, 1.3)
         ax_raw.set_title("(a) raw: peaks differ 8x", pad=3)
         ax_gauged.set_title(r"$\times\sqrt{he/2}$: peaks coincide at 1", pad=3,
                             fontsize=6.5, fontweight="normal")
 
-        # (b) excess along the buffer at both endpoints, on a shared absolute
-        # axis. Normalising each curve to its own max was tried and discarded:
-        # it made the two look alike, because on a thin trail the *shape* barely
-        # differs. What actually differs is magnitude -- the fine scale sees an
-        # order of magnitude more relative over-coverage -- so the axis is shared
-        # and logarithmic, which shows that gap and the fine scale's higher
-        # spatial frequency at the same time.
-        axis = figure.add_subplot(grid[:, 1])
-        arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(memory, axis=0), axis=1))))
-        peaks_by_scale = {}
-        for bandwidth, color, symbol in (
-            (float(stein.fine_bandwidth), colors[0], r"$h_f$"),
-            (float(stein.coarse_bandwidth), colors[-1], r"$h_c$"),
-        ):
-            _, _, excess, _ = _excess(ctx, bandwidth)
-            peaks_by_scale[symbol] = float(excess.max())
-            axis.plot(arc, np.maximum(excess, 1e-3), color=color, linewidth=0.8,
-                      label=rf"{symbol}$={bandwidth:.2f}$")
-        axis.set_yscale("log")
-        axis.set_xlim(arc[0], arc[-1])
-        axis.set_ylim(1e-2, 60)
-        axis.set_xlabel("arc length along the buffer [m]  (oldest to newest)", labelpad=1)
-        axis.set_ylabel(r"relative excess $e^h_{t,i}$", labelpad=2)
-        ratio = peaks_by_scale[r"$h_f$"] / max(peaks_by_scale[r"$h_c$"], 1e-9)
-        axis.set_title(rf"(b) the fine scale sees {ratio:.0f}$\times$ more excess")
-        axis.legend(loc="lower right", fontsize=6.0, handletextpad=0.4,
-                    borderpad=0.3, handlelength=1.4, labelspacing=0.25)
+        # (b)-(d) what each gauged scale actually contributes over the workspace.
+        for index, (bandwidth, magnitude) in enumerate(zip(scales, contributions)):
+            axis = figure.add_subplot(grid[:, index + 1])
+            mesh = _field_map(axis, grid_x, grid_y, magnitude, vmax=shared_max)
+            axis.plot(*np.asarray(ctx["memory"]).T, color=ACCENT, linewidth=0.7,
+                      alpha=0.85, zorder=3)
+            _modes(axis, ctx)
+            _map_axes(axis, ctx, ylabel=(index == 0))
+            axis.set_title(rf"({'bcd'[index]}) $h_{index}={bandwidth:.2f}$", pad=3)
+            if index == len(scales) - 1:
+                _inline_colorbar(figure, axis, mesh,
+                                 r"$\sqrt{he/2}\,\|\boldsymbol{\rho}^h_t\|$  (shared)",
+                                 backing=True)
 
         path = save(figure, output)
         plt.close(figure)
+
+    print("  gauged scale peaks: "
+          + "  ".join(f"h={h:.2f}: {c.max():.4g}" for h, c in zip(scales, contributions)))
     return path
 
 
@@ -475,7 +764,9 @@ def main() -> None:
     print(f"scale bank: {np.round(ctx['scales'], 3).tolist()}  P = {len(arrays['memory'])}")
 
     written = [
-        figure_pipeline(ctx, args.output_dir / "fig_memory_pipeline.pdf"),
+        figure_occupancy(ctx, args.output_dir / "fig_occupancy.pdf"),
+        figure_excess_focus(ctx, args.output_dir / "fig_excess_focus.pdf"),
+        figure_memory_fields(ctx, args.output_dir / "fig_memory_fields.pdf"),
         figure_scale_bank(ctx, args.output_dir / "fig_scale_bank.pdf"),
     ]
     if args.extra:
