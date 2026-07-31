@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
 
 # Categorical palette (Tableau 10 subset). Shared with plotting/literature.py so
 # a scenario keeps its color across every figure in the paper.
@@ -36,10 +39,39 @@ PRIMARY = "#4E79A7"
 ACCENT = "#E15759"
 NEUTRAL = "#98A4BA"
 
+SURFACE = "#DCE2EC"  # axes.facecolor; every ramp below is validated against it
+
+
+def sequential(hue: str = "Blues", low: float = 0.55, high: float = 0.95) -> LinearSegmentedColormap:
+    """Single-hue ramp clipped so its light end still reads against SURFACE.
+
+    The chart surface is light *and* blue, so a ramp running to near-white loses
+    its low end into the background -- measured WCAG contrast of the lightest
+    step against SURFACE:
+
+        Blues full   #f7fbff   1.25:1   invisible
+        Blues @0.35  #a6cee4   1.28:1   invisible
+        Blues @0.55  #5ba3d0   2.12:1   ok      <- default here
+        Reds  @0.55  #f6583e   2.53:1   ok
+        cividis      #f3db42   1.07:1   invisible (and multi-hue)
+
+    2:1 is the floor for the lightest step of an ordinal ramp. Darkening the
+    surface does not help -- it lowers contrast with a light-ended ramp further
+    (#CBD5E3 gives 1.13:1) -- so the ramp is clipped instead of the surface
+    changed. Verified with the dataviz palette validator, not by eye.
+    """
+    base = plt.get_cmap(hue)
+    return LinearSegmentedColormap.from_list(
+        f"{hue}_{low:g}_{high:g}", base(np.linspace(low, high, 256))
+    )
+
+
 # Diverging map for "% change vs the shipped default": blue = better (negative),
-# white = default, red = worse. Sequential map for absolute error panels.
+# white = default, red = worse. Its near-surface midpoint is deliberate -- on a
+# diverging scale zero should read as nothing.
 DIVERGING_CMAP = "RdBu_r"
-SEQUENTIAL_CMAP = "cividis"
+SEQUENTIAL_CMAP = sequential("Blues")   # magnitude: recency, generic scalars
+EXCESS_CMAP = sequential("Reds")        # magnitude: over-coverage / error
 
 # Figure widths in inches. IEEE two-column: 3.35in single, 6.9in double.
 FIGSIZES = {

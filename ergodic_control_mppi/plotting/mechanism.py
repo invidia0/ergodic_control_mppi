@@ -32,6 +32,8 @@ from ergodic_control_mppi.mppi.stein import (
     stein_repulsion,
 )
 from ergodic_control_mppi.plotting.style import (
+    EXCESS_CMAP,
+    SEQUENTIAL_CMAP,
     ACCENT,
     NEUTRAL,
     PRIMARY,
@@ -159,7 +161,8 @@ def _grid(ctx, step: float = 0.9):
     return grid_x, grid_y, jnp.asarray(points, dtype=jnp.float32)
 
 
-def _target_contours(axis, ctx, levels: int = 5) -> None:
+def _target_contours(axis, ctx, levels: int = 4) -> None:
+    """Recessive target-density contours: context, never a foreground mark."""
     xs = np.linspace(*ctx["limits_x"], 160)
     ys = np.linspace(*ctx["limits_y"], 160)
     grid_x, grid_y = np.meshgrid(xs, ys)
@@ -167,89 +170,98 @@ def _target_contours(axis, ctx, levels: int = 5) -> None:
         pdf(jnp.stack((grid_x, grid_y), axis=-1).astype(jnp.float32), ctx["gmm"])
     )
     axis.contour(grid_x, grid_y, density, levels=levels,
-                 colors="#5C6B87", linewidths=0.45, alpha=0.75)
+                 colors="#9AA7BE", linewidths=0.4, alpha=0.9, zorder=1)
 
 
-def _square(axis, ctx) -> None:
+def _map_axes(axis, ctx, *, ylabel: bool = False) -> None:
+    """Shared geometry for every workspace panel, so panels align exactly."""
     axis.set_xlim(*ctx["limits_x"])
     axis.set_ylim(*ctx["limits_y"])
     axis.set_aspect("equal")
-    axis.set_xlabel(r"$x$ [m]")
+    axis.set_xticks([-10, -5, 0, 5, 10])
+    axis.set_yticks([-10, -5, 0, 5, 10])
+    axis.set_xlabel(r"$x$ [m]", labelpad=1)
+    if ylabel:
+        axis.set_ylabel(r"$y$ [m]", labelpad=1)
+    else:
+        axis.set_yticklabels([])
+
+
+def _modes(axis, ctx, label: str | None = None) -> None:
+    """Mark the target modes identically in every panel."""
+    means = np.asarray(ctx["params"].gmm.means)
+    axis.plot(means[:, 0], means[:, 1], marker="x", linestyle="none",
+              color="#33415C", markersize=3.4, markeredgewidth=0.9,
+              zorder=6, label=label)
+
+
+def _inline_colorbar(figure, axis, mappable, label: str) -> None:
+    """Compact horizontal colorbar *inside* the panel.
+
+    An external colorbar steals ~15% of a panel's width and, when only some
+    panels carry one, leaves their titles at different heights. Putting it
+    inside keeps every map the same size.
+    """
+    cax = axis.inset_axes((0.06, 0.055, 0.42, 0.035))
+    bar = figure.colorbar(mappable, cax=cax, orientation="horizontal")
+    bar.outline.set_linewidth(0.4)
+    bar.outline.set_edgecolor("#5C6B87")
+    cax.tick_params(labelsize=5.6, length=1.4, pad=1, colors="#33415C")
+    cax.set_title(label, fontsize=6.0, pad=2, color="#33415C")
 
 
 def figure_pipeline(ctx, output: Path) -> Path:
-    """Fig. A -- buffer, over-coverage excess, weighted repelling field."""
+    """Fig. A -- one buffer, three colourings: memory, excess, resulting field.
+
+    Every panel is the same workspace map of the same memory points, so the
+    pipeline reads left to right as one object being re-weighted.
+    """
     stein = ctx["stein"]
     coarse = float(stein.coarse_bandwidth)
-    occupancy, target, excess, activity = _excess(ctx, coarse)
+    _, _, excess, activity = _excess(ctx, coarse)
     memory = np.asarray(ctx["memory"])
     recency = np.asarray(ctx["recency"])
-    masses = recency / recency.sum()
+    acts = excess > 0.0
 
     with plt.rc_context(rc=paper_style("double")):
-        figure, axes = plt.subplots(1, 3, figsize=(6.9, 2.45))
+        figure, axes = plt.subplots(1, 3, figsize=(6.9, 2.35))
 
-        # (a) the fading memory: what the controller retains (coloured by recency
-        # weight) against everywhere it has actually been (faint grey) -- the
-        # visual definition of "fading".
+        # (a) what the controller retains, against everywhere it has been.
         axis = axes[0]
         _target_contours(axis, ctx)
         axis.plot(ctx["full_path"][:, 0], ctx["full_path"][:, 1],
-                  color="#B9C2D4", linewidth=0.25, alpha=0.8, zorder=1,
-                  label="executed path (forgotten)")
+                  color="#B9C2D4", linewidth=0.3, alpha=0.9, zorder=2,
+                  label="executed path")
         order = np.argsort(recency)
-        scatter = axis.scatter(
-            memory[order, 0], memory[order, 1], c=recency[order],
-            s=2.6, cmap="Blues", norm=Normalize(0.0, 1.0), linewidths=0, zorder=3,
-        )
-        axis.plot(*ctx["params"].gmm.means.T, "*", color=ACCENT, markersize=5,
-                  markeredgewidth=0, zorder=5)
-        axis.plot(*ctx["position"], "o", color="#111111", markersize=2.6,
-                  markeredgewidth=0, zorder=6)
-        _square(axis, ctx)
-        axis.set_ylabel(r"$y$ [m]")
+        scatter = axis.scatter(memory[order, 0], memory[order, 1], c=recency[order],
+                               s=2.4, cmap=SEQUENTIAL_CMAP, vmin=0.0, vmax=1.0,
+                               linewidths=0, zorder=3)
+        _modes(axis, ctx, label="target modes")
+        _map_axes(axis, ctx, ylabel=True)
         axis.set_title(r"(a) fading memory $\mathcal{M}_t$")
-        bar = figure.colorbar(scatter, ax=axis, fraction=0.046, pad=0.03)
-        bar.set_label(r"$\omega_i$", labelpad=1)
-        bar.ax.tick_params(labelsize=6)
-        axis.legend(loc="upper left", fontsize=5.0, handletextpad=0.3,
-                    borderpad=0.22, handlelength=1.2)
+        _inline_colorbar(figure, axis, scatter, r"recency $\omega_i$")
+        axis.legend(loc="lower right", fontsize=5.8, handletextpad=0.35,
+                    borderpad=0.25, handlelength=1.1, labelspacing=0.2,
+                    framealpha=0.9)
 
-        # Inset: the recency weights and the 3-tau truncation.
-        inset = axis.inset_axes((0.055, 0.055, 0.40, 0.30))
-        age_seconds = np.arange(len(recency))[::-1] * float(ctx["params"].model.delta_t)
-        inset.plot(age_seconds, recency, color=PRIMARY, linewidth=0.8)
-        tau = -float(ctx["params"].model.delta_t) / np.log(float(stein.memory_decay))
-        inset.axvline(tau, color=ACCENT, linewidth=0.6, linestyle="--")
-        inset.text(tau * 1.15, 0.55, r"$\tau_{\mathcal{M}}$", color=ACCENT, fontsize=5.5)
-        inset.set_xlabel("age [s]", fontsize=5.5, labelpad=0)
-        inset.set_ylabel(r"$\omega_i$", fontsize=5.5, labelpad=0)
-        inset.tick_params(labelsize=4.5, length=1.3, pad=1)
-        inset.set_facecolor("#EEF2F8")
-
-        # (b) the hinge: only points above the diagonal act.
+        # (b) the hinge, shown spatially: inert points simply do not colour.
         axis = axes[1]
-        over = occupancy > target
-        axis.scatter(target[~over], occupancy[~over], s=1.4, color=NEUTRAL,
-                     linewidths=0, label="under-covered (inert)")
-        axis.scatter(target[over], occupancy[over], s=1.6, color=ACCENT,
-                     linewidths=0, label="over-covered (acts)")
-        span = np.array([min(target.min(), occupancy.min()), max(target.max(), occupancy.max())])
-        axis.plot(span, span, color="#33415C", linewidth=0.7, linestyle="--")
-        axis.text(0.96, 0.06,
-                  f"$[\\cdot]_+$ keeps {100.0 * over.mean():.0f}% of points",
-                  transform=axis.transAxes, ha="right", va="bottom", fontsize=6.0)
-        axis.set_xscale("log")
-        axis.set_yscale("log")
-        axis.set_xlabel(r"$p^\star_h(\mathbf{m}_{t,i})$")
-        axis.set_ylabel(r"$o^h_t(\mathbf{m}_{t,i})$")
-        axis.set_title(r"(b) over-coverage at $h_c$")
-        axis.legend(loc="upper left", fontsize=5.5, handletextpad=0.3,
-                    borderpad=0.25, labelspacing=0.25)
+        _target_contours(axis, ctx)
+        axis.scatter(memory[~acts, 0], memory[~acts, 1], s=1.8, color="#A8B2C6",
+                     linewidths=0, zorder=2)
+        order = np.argsort(excess[acts])
+        active = axis.scatter(memory[acts][order, 0], memory[acts][order, 1],
+                              c=excess[acts][order], s=2.6, cmap=EXCESS_CMAP,
+                              linewidths=0, zorder=3)
+        _modes(axis, ctx)
+        _map_axes(axis, ctx)
+        axis.set_title(f"(b) over-coverage ({100 * acts.mean():.0f}% acts)")
+        _inline_colorbar(figure, axis, active, r"excess $e^{h_c}_{t,i}$")
 
-        # (c) the weighted repelling field over the attraction.
+        # (c) the field those weights produce. Length carries magnitude, so the
+        # colour channel stays free rather than repeating it.
         axis = axes[2]
-        grid_x, grid_y, points = _grid(ctx)
+        grid_x, grid_y, points = _grid(ctx, step=1.15)
         repulsion = np.asarray(
             multiscale_memory_flow(
                 points, ctx["memory"], ctx["recency"], ctx["gmm"], stein, ctx["density_floor"]
@@ -258,25 +270,24 @@ def figure_pipeline(ctx, output: Path) -> Path:
         attraction = np.asarray(
             stein_gradient(points, ctx["particles"], ctx["gmm"], stein, ctx["bandwidth"])
         )
-        magnitude = np.linalg.norm(repulsion, axis=-1)
         axis.streamplot(
             grid_x, grid_y,
             attraction[:, 0].reshape(grid_x.shape), attraction[:, 1].reshape(grid_x.shape),
-            color="#8A97AE", linewidth=0.35, density=0.65, arrowsize=0.35,
+            color="#B9C2D4", linewidth=0.3, density=0.55, arrowsize=0.0, zorder=2,
         )
-        quiver = axis.quiver(
-            points[:, 0], points[:, 1], repulsion[:, 0], repulsion[:, 1], magnitude,
-            cmap="Reds", scale=None, width=0.006, headwidth=3.4,
-        )
-        axis.plot(*ctx["params"].gmm.means.T, "*", color=ACCENT, markersize=5,
-                  markeredgewidth=0, zorder=5)
-        _square(axis, ctx)
-        axis.set_title(r"(c) $k_{\mathcal{M}}\boldsymbol{\rho}^{\mathrm{MS}}_t$ on $\widetilde{\mathbf{h}}_t$")
-        bar = figure.colorbar(quiver, ax=axis, fraction=0.046, pad=0.03)
-        bar.set_label(r"$\|\boldsymbol{\rho}^{\mathrm{MS}}_t\|$", labelpad=1)
-        bar.ax.tick_params(labelsize=6)
+        axis.quiver(points[:, 0], points[:, 1], repulsion[:, 0], repulsion[:, 1],
+                    color="#C0392F", width=0.0055, headwidth=3.4, headlength=3.8,
+                    zorder=4)
+        _modes(axis, ctx)
+        _map_axes(axis, ctx)
+        axis.set_title(r"(c) repelling field")
+        axis.text(0.055, 0.055,
+                  "grey: attraction $\\widetilde{\\mathbf{h}}_t$\n"
+                  "red: $k_{\\mathcal{M}}\\boldsymbol{\\rho}^{\\mathrm{MS}}_t$",
+                  transform=axis.transAxes, fontsize=5.9, va="bottom",
+                  color="#33415C", linespacing=1.5)
 
-        figure.tight_layout(pad=0.35, w_pad=0.9)
+        figure.tight_layout(pad=0.3, w_pad=0.5)
         path = save(figure, output)
         plt.close(figure)
 
@@ -285,115 +296,134 @@ def figure_pipeline(ctx, output: Path) -> Path:
 
 
 def figure_scale_bank(ctx, output: Path) -> Path:
-    """Fig. B -- the gauge, the matched target, and what each scale asks.
+    """Fig. B -- why there are Q scales, and why none carries its own gain.
 
-    Layout: two analytic line panels on top, the fine/coarse comparison of the
-    *same* buffer adjacent on the bottom row.
+    (a) stacks raw above gauged so "before/after" is spatial rather than encoded
+    by dash-vs-solid, which would compete with the hue identifying the scale.
+
+    (b) reads the excess along the buffer at both endpoints. The buffer is a thin
+    curve, so plotting the two scales as maps makes them look alike -- the real
+    difference is the spatial *frequency* each responds to, which a profile shows
+    directly: the fine scale reacts to local retracing, the coarse scale to
+    mode-wide over-service. Fig. A already grounds the buffer in the workspace,
+    so no third map is needed here.
     """
     stein = ctx["stein"]
     scales = ctx["scales"]
     memory = np.asarray(ctx["memory"])
+    # Ordinal ramp: h_0 < h_1 < h_2 is ordered, so it takes one hue light->dark,
+    # not three categorical hues.
+    colors = [SEQUENTIAL_CMAP(v) for v in np.linspace(0.12, 1.0, len(scales))]
 
     with plt.rc_context(rc=paper_style("double")):
-        figure, axes = plt.subplots(2, 2, figsize=(6.9, 4.6))
+        figure = plt.figure(figsize=(6.9, 2.55), constrained_layout=True)
+        grid = figure.add_gridspec(2, 2, width_ratios=[1.0, 1.15])
+        ax_raw = figure.add_subplot(grid[0, 0])
+        ax_gauged = figure.add_subplot(grid[1, 0], sharex=ax_raw)
 
-        # (a) raw vs gauged kernel gradient magnitude.
-        axis = axes[0, 0]
-        radii = np.linspace(1e-3, 4.5, 400)
+        radii = np.linspace(1e-3, 3.6, 400)
         probe = jnp.stack((radii, jnp.zeros_like(radii)), axis=-1)
         origin = jnp.zeros_like(probe)
-        colors = [PRIMARY, "#59A14F", "#B07AA1", "#F28E2B", "#76B7B2"]
+        peaks = []
         for index, (bandwidth, color) in enumerate(zip(scales, colors)):
-            gradient = np.linalg.norm(
-                np.asarray(kernel_gradient(probe, origin, bandwidth)), axis=-1
-            )
-            gauge = float(np.sqrt(0.5 * np.e * bandwidth))
-            axis.plot(radii, gradient, color=color, linewidth=0.7, linestyle="--", alpha=0.75)
-            axis.plot(radii, gauge * gradient, color=color, linewidth=1.1,
-                      label=rf"$h_{index}={bandwidth:.2f}$")
-            axis.axvline(np.sqrt(bandwidth / 2.0), color=color, linewidth=0.45,
-                         linestyle=":", alpha=0.8)
-        axis.axhline(1.0, color="#33415C", linewidth=0.5, linestyle="-.")
-        axis.set_yscale("log")
-        # The gauged peaks must all land on 1.0 -- that is the panel's self-check.
-        axis.set_ylim(1e-2, 4.0)
-        axis.set_xlim(0.0, 4.0)
-        axis.set_xlabel(r"$r=\|\mathbf{z}-\mathbf{m}_{t,i}\|$ [m]")
-        axis.set_ylabel(r"$\|\nabla_{\mathbf{x}}\kappa_h\|$")
-        axis.set_title("(a) per-scale gauge")
-        axis.legend(loc="lower left", fontsize=5.5, handletextpad=0.3,
-                    borderpad=0.25, labelspacing=0.2)
-        axis.text(0.97, 0.94, "dashed: raw\nsolid: gauged",
-                  transform=axis.transAxes, ha="right", va="top", fontsize=5.5)
+            raw = np.linalg.norm(np.asarray(kernel_gradient(probe, origin, bandwidth)), axis=-1)
+            gauged = float(np.sqrt(0.5 * np.e * bandwidth)) * raw
+            peaks.append(gauged.max())
+            ax_raw.plot(radii, raw, color=color, linewidth=1.0)
+            ax_gauged.plot(radii, gauged, color=color, linewidth=1.0)
+            # Direct label at the peak instead of a legend box.
+            ax_raw.annotate(rf"$h_{index}\!=\!{bandwidth:.2f}$",
+                            xy=(float(radii[int(np.argmax(raw))]), raw.max()),
+                            xytext=(2.5, 1.0), textcoords="offset points",
+                            fontsize=6.0, color=color)
 
-        # (b) the scale-matched target removes a bandwidth-dependent bias.
-        axis = axes[0, 1]
-        coarse = float(stein.coarse_bandwidth)
-        line_y = ctx["slice_y"]
-        xs = np.linspace(*ctx["limits_x"], 400)
-        slice_points = jnp.stack((xs, jnp.full_like(xs, line_y)), axis=-1)
-        raw = np.asarray(pdf(slice_points, ctx["gmm"]))
-        matched = np.asarray(pdf(slice_points, smoothed(ctx["gmm"], coarse)))
-        occupancy_slice = np.asarray(
-            (kernel(ctx["memory"][None, :, :], slice_points[:, None, :], coarse) @ ctx["recency"])
-            / (jnp.sum(ctx["recency"]) * jnp.pi * coarse)
-        )
-        axis.plot(xs, occupancy_slice, color=PRIMARY, linewidth=1.1, label=r"$o^{h_c}_t$")
-        axis.plot(xs, matched, color="#33415C", linewidth=1.0, label=r"$p^\star_{h_c}$")
-        axis.plot(xs, raw, color=ACCENT, linewidth=0.9, linestyle="--", label=r"$p^\star$")
-        axis.fill_between(
-            xs, matched, raw, where=raw > matched, color=ACCENT, alpha=0.18,
-            linewidth=0, label="bias if unmatched",
-        )
-        axis.set_xlabel(rf"$x$ [m] at $y={line_y:.0f}$")
-        axis.set_ylabel("density")
-        axis.set_title(r"(b) scale-matched target $p^\star_{h_c}$")
-        axis.legend(loc="upper right", fontsize=5.5, handletextpad=0.3,
-                    borderpad=0.25, labelspacing=0.2)
+        # Self-check, not decoration: the gauge is correct iff every scale peaks
+        # at exactly 1. Fail loudly rather than ship a wrong figure.
+        if not np.allclose(peaks, 1.0, atol=1e-5):
+            raise AssertionError(f"gauge broken: peak magnitudes {peaks} != 1")
 
-        # (c), (d) the same buffer read at the fine and at the coarse scale.
-        for column, (bandwidth, tag, label, question) in enumerate(
-            (
-                (float(stein.fine_bandwidth), "c", r"$h_f$", "is this track filled?"),
-                (float(stein.coarse_bandwidth), "d", r"$h_c$", "has this mode had its share?"),
-            )
+        ax_gauged.axhline(1.0, color="#5C6B87", linewidth=0.5, zorder=1)
+        ax_raw.set_ylabel(r"$\|\nabla\kappa_h\|$", labelpad=2)
+        ax_gauged.set_ylabel("gauged", labelpad=2)
+        ax_gauged.set_xlabel(r"$r=\|\mathbf{z}-\mathbf{m}_{t,i}\|$ [m]", labelpad=1)
+        ax_raw.tick_params(labelbottom=False)
+        ax_raw.set_ylim(0, 3.5)
+        ax_gauged.set_ylim(0, 1.3)
+        ax_raw.set_title("(a) raw: peaks differ 8x", pad=3)
+        ax_gauged.set_title(r"$\times\sqrt{he/2}$: peaks coincide at 1", pad=3,
+                            fontsize=6.5, fontweight="normal")
+
+        # (b) excess along the buffer at both endpoints, on a shared absolute
+        # axis. Normalising each curve to its own max was tried and discarded:
+        # it made the two look alike, because on a thin trail the *shape* barely
+        # differs. What actually differs is magnitude -- the fine scale sees an
+        # order of magnitude more relative over-coverage -- so the axis is shared
+        # and logarithmic, which shows that gap and the fine scale's higher
+        # spatial frequency at the same time.
+        axis = figure.add_subplot(grid[:, 1])
+        arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(memory, axis=0), axis=1))))
+        peaks_by_scale = {}
+        for bandwidth, color, symbol in (
+            (float(stein.fine_bandwidth), colors[0], r"$h_f$"),
+            (float(stein.coarse_bandwidth), colors[-1], r"$h_c$"),
         ):
-            axis = axes[1, column]
             _, _, excess, _ = _excess(ctx, bandwidth)
-            _target_contours(axis, ctx, levels=4)
-            order = np.argsort(excess)
-            scatter = axis.scatter(
-                memory[order, 0], memory[order, 1], c=excess[order],
-                s=1.8, cmap="Reds", linewidths=0,
-            )
-            _square(axis, ctx)
-            if column == 0:
-                axis.set_ylabel(r"$y$ [m]")
-            axis.set_title(rf"({tag}) excess at {label} = {bandwidth:.2f}: {question}")
-            bar = figure.colorbar(scatter, ax=axis, fraction=0.046, pad=0.03)
-            bar.set_label(r"$e^{h}_{t,i}$", labelpad=1)
-            bar.ax.tick_params(labelsize=6)
+            peaks_by_scale[symbol] = float(excess.max())
+            axis.plot(arc, np.maximum(excess, 1e-3), color=color, linewidth=0.8,
+                      label=rf"{symbol}$={bandwidth:.2f}$")
+        axis.set_yscale("log")
+        axis.set_xlim(arc[0], arc[-1])
+        axis.set_ylim(1e-2, 60)
+        axis.set_xlabel("arc length along the buffer [m]  (oldest to newest)", labelpad=1)
+        axis.set_ylabel(r"relative excess $e^h_{t,i}$", labelpad=2)
+        ratio = peaks_by_scale[r"$h_f$"] / max(peaks_by_scale[r"$h_c$"], 1e-9)
+        axis.set_title(rf"(b) the fine scale sees {ratio:.0f}$\times$ more excess")
+        axis.legend(loc="lower right", fontsize=6.0, handletextpad=0.4,
+                    borderpad=0.3, handlelength=1.4, labelspacing=0.25)
 
-        figure.tight_layout(pad=0.35, w_pad=0.9, h_pad=0.9)
         path = save(figure, output)
         plt.close(figure)
     return path
 
 
 def figure_extra(ctx, output_dir: Path) -> list[Path]:
-    """Rebuttal-only: the activity gate and the effective blend coefficient.
+    """Rebuttal-only: matched target, activity gate, effective blend.
 
-    Deliberately not in the submission -- see the plan. Kept runnable so the
-    answer exists if a reviewer asks about eps_S or about blending normalized
-    fields instead of blending the weights.
+    Deliberately not in the submission. Kept runnable so the answer exists if a
+    reviewer asks why the occupancy is compared against a smoothed target, what
+    eps_S is for, or why the two fields are blended after normalization rather
+    than blending their weights.
     """
     stein = ctx["stein"]
     paths = []
     with plt.rc_context(rc=paper_style("double")):
-        figure, axes = plt.subplots(1, 2, figsize=(6.9, 2.45))
+        figure, axes = plt.subplots(1, 3, figsize=(6.9, 2.3))
+
+        # Why p*_h and not p*: comparing a smoothed occupancy against an
+        # unsmoothed target manufactures excess that is pure bandwidth artefact.
+        axis = axes[0]
+        coarse = float(stein.coarse_bandwidth)
+        line_y = ctx["slice_y"]
+        xs = np.linspace(*ctx["limits_x"], 400)
+        slice_points = jnp.stack((xs, jnp.full_like(xs, line_y)), axis=-1)
+        raw = np.asarray(pdf(slice_points, ctx["gmm"]))
+        matched = np.asarray(pdf(slice_points, smoothed(ctx["gmm"], coarse)))
+        axis.fill_between(xs, matched, raw, where=raw > matched, color=ACCENT,
+                          alpha=0.16, linewidth=0)
+        axis.plot(xs, matched, color=PRIMARY, linewidth=1.1)
+        axis.plot(xs, raw, color=ACCENT, linewidth=1.0)
+        axis.annotate(r"$p^\star_{h_c}$", xy=(xs[300], matched[300]),
+                      xytext=(3, 3), textcoords="offset points",
+                      fontsize=6, color=PRIMARY)
+        axis.annotate(r"$p^\star$", xy=(xs[int(np.argmax(raw))], raw.max()),
+                      xytext=(3, 1), textcoords="offset points",
+                      fontsize=6, color=ACCENT)
+        axis.set_xlabel(rf"$x$ [m] at $y={line_y:.0f}$", labelpad=1)
+        axis.set_ylabel("density", labelpad=2)
+        axis.set_title("shaded: excess that\nan unmatched target invents", fontsize=6.5)
 
         # Gate: field magnitude as total excess vanishes.
-        axis = axes[0]
+        axis = axes[1]
         activities = np.geomspace(1e-6, 1e1, 200)
         axis.plot(activities, activities / (activities + 1e-3), color=PRIMARY,
                   linewidth=1.1, label=r"gated: $S/(S+\varepsilon_S)$")
@@ -403,11 +433,11 @@ def figure_extra(ctx, output_dir: Path) -> list[Path]:
         axis.set_xscale("log")
         axis.set_xlabel(r"total relative excess $S^h_t$")
         axis.set_ylabel("field scale")
-        axis.set_title("activity gate restores continuity at $S=0$")
+        axis.set_title("the gate restores continuity\nas over-coverage vanishes", fontsize=6.5)
         axis.legend(loc="lower right", fontsize=6)
 
         # Effective blend coefficient of the retired weight-blending design.
-        axis = axes[1]
+        axis = axes[2]
         grid_a = np.linspace(0.0, 1.0, 200)
         grid_s = np.geomspace(1e-3, 1e1, 200)
         mesh_a, mesh_s = np.meshgrid(grid_a, grid_s)
@@ -417,8 +447,9 @@ def figure_extra(ctx, output_dir: Path) -> list[Path]:
         axis.set_yscale("log")
         axis.set_xlabel(r"requested balance $a$")
         axis.set_ylabel(r"$S^h_t$")
-        axis.set_title(r"drift $\alpha^h_t-a$ if the weights are blended")
-        figure.colorbar(image, ax=axis, fraction=0.046, pad=0.03)
+        axis.set_title(r"drift $\alpha^h_t-a$ if the weights" "\n" r"are blended instead", fontsize=6.5)
+        bar = figure.colorbar(image, ax=axis, fraction=0.046, pad=0.03)
+        bar.ax.tick_params(labelsize=5.5)
 
         figure.tight_layout(pad=0.35, w_pad=1.1)
         paths.append(save(figure, output_dir / "fig_design_choices.pdf"))
