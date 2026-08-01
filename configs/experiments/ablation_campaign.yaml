@@ -224,8 +224,17 @@ stages:
   # generalize" for every headline arm, so this stage only has to cover the one
   # configuration that does not exist until stages 1-3 are read.
   #
-  # BEFORE LAUNCHING: uncomment `best` and fill in the winner. Left empty it
-  # would duplicate `full`, which the duplicate-arm guard in ablation.py refuses.
+  # `full` is re-run here rather than borrowed from `core`: cell_id hashes the
+  # stage, and plot_generalization looks up its ("full", density, count)
+  # reference within one stage. It is not wasted -- it is also the theta = 30
+  # (shipped) point of the curl sweep below.
+  #
+  # Stages 1-3 read as: memory carries everything (memory_off loses 80/80 in
+  # `core`), while the scale bank is worth ~3% against a well-chosen single
+  # scale and `a` is nearly inert. The levels below therefore leave the
+  # structural knobs alone and move only what measurably paid: k_M and tau
+  # (screening, -19%/-18%), h_c (components, 0.93x with -41% ergodicity), the
+  # flow weight, and T (better MSE at 2.2x less compute).
   generalization:
     kind: factorial
     steps: 20000
@@ -233,8 +242,46 @@ stages:
     densities: [trimodal, four_mode, multiscale, unimodal]
     obstacle_counts: [3, 6, 0, 10]
     arms:
-      # best:
-      #   stein.memory_balance: ...
-      #   stein.memory_gain: ...
-      #   stein.coarse_bandwidth: ...
+      # Every level here was tuned on trimodal alone (stages 1-3 never left the
+      # reference environment), so this arm is a hypothesis about the package,
+      # not a result. If it loses, bisect it before believing any single level.
+      best:
+        stein.memory_gain: 60.0        # screening -18.8%; every top cell of balance__gain sits here
+        stein.memory_time: 2.5         # screening -18.0%; best column of memory_time__scales
+        stein.coarse_bandwidth: 3.0    # components 0.93x, 6/10 wins, -41% ergodicity vs derived 5.0
+        stein.weight_stein: 6000.0     # screening -6.3%; weak_flow (500) is 2.37x worse
+        stein.theta: 0.0               # set by the sweep below -- revise if curl survives it
+        mppi.T: 150                    # interactions: better MSE than 350 at 2.2x less compute
+
+      # Curl sweep. `no_curl` won on the reference environment (components:
+      # 0.98x, 6/10, -29% ergodicity) but the claim theta makes -- "direct
+      # transits, reaches all modes" -- is about traversal between separated
+      # modes, which one density cannot falsify. These four levels bracket the
+      # shipped 30 over all 16 environments. If theta_0 wins across densities,
+      # the curl comes out of both the paper and stein.py.
+      #
+      # 60 and 90 are deliberately absent: screening already scored them at
+      # +45% and +232% MSE, and no reading of the mechanism proposes them.
+      theta_0: {stein.theta: 0.0}
+      theta_15: {stein.theta: 15.0}
+      theta_45: {stein.theta: 45.0}
+      # theta_30 is `full`.
+
+      # T on its own. Two interaction grids agreed that 150 beats the shipped
+      # 350 on MSE at 2.2x less compute, but both were 3 seeds on trimodal at
+      # 10000 steps -- and these stages run 20000, where a longer horizon may
+      # yet pay. Inside `best` it would be confounded with five other changes,
+      # so it gets its own one-axis arm.
+      horizon_150: {mppi.T: 150}
+
+      # The theta sweep above judges curl at the shipped horizon. If T drops to
+      # 150 the curl verdict has to survive the move, so this fills the fourth
+      # corner of theta {0, 30} x T {150, 350} -- the other three being
+      # `theta_0`, `full` and `horizon_150`. Kill the curl only if theta_0 wins
+      # at BOTH horizons; a flip here means curl and horizon are coupled and
+      # the paper keeps theta with that caveat stated.
+      theta_0_horizon_150:
+        stein.theta: 0.0
+        mppi.T: 150
+
       full: {}
