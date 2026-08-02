@@ -361,6 +361,10 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         boundary_margin=_number(map_raw.get("boundary_margin", 0.0), "map.boundary_margin", 0.0),
         boundary_weight=_number(map_raw.get("boundary_weight", 0.0), "map.boundary_weight", 0.0),
+        # The occupancy grid is a runtime input, not a YAML knob; empty means unused.
+        grid=jnp.zeros((0, 0), dtype=jnp.float32),
+        grid_origin=jnp.asarray([map_x[0], map_y[0]], dtype=jnp.float32),
+        grid_resolution=resolution,
     )
     mppi = MPPIParams(
         samples=samples,

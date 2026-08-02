@@ -19,6 +19,8 @@ class SimulationResult:
         paths: Executed states with normalized shape ``(N, R, 6)``.
         optimal_trajectories: Final plans with shape ``(R, T, 6)``.
         surrogates: Final shared position paths with shape ``(R, T, 2)``.
+        ess_fractions: Per-step effective sample-size fractions with shape ``(N,)``.
+        temperatures: Per-step adapted temperatures with shape ``(N,)``.
         initial_states: Initial states with shape ``(R, 6)``.
         device: JAX device platform used for execution.
     """
@@ -26,6 +28,8 @@ class SimulationResult:
     paths: np.ndarray
     optimal_trajectories: np.ndarray
     surrogates: np.ndarray
+    ess_fractions: np.ndarray
+    temperatures: np.ndarray
     initial_states: np.ndarray
     device: str
 
@@ -51,6 +55,11 @@ def select_device(requested: str = "auto") -> jax.Device:
     return jax.devices("cpu")[0]
 
 
+def controller_key(seed: int) -> jax.Array:
+    """Return the controller half of the stable run-seed split."""
+    return jax.random.split(jax.random.PRNGKey(seed))[0]
+
+
 def random_state(key: jax.Array, params: ControllerParams) -> jax.Array:
     """Sample one finite initial state within configured map limits."""
     keys = jax.random.split(key, 6)
@@ -69,7 +78,11 @@ def random_state(key: jax.Array, params: ControllerParams) -> jax.Array:
 
 
 def run_simulation(
-    config: AppConfig, device: str = "auto", progress: bool = False
+    config: AppConfig,
+    device: str = "auto",
+    progress: bool = False,
+    initial_state: jax.Array | np.ndarray | None = None,
+    preflight_steps: int = 0,
 ) -> SimulationResult:
     """Initialize and execute the configured single-robot controller.
 
@@ -77,24 +90,33 @@ def run_simulation(
         config: Validated simulation configuration.
         device: Requested JAX device selection.
         progress: Whether to print periodic closed-loop progress.
+        initial_state: Explicit start state with shape ``(6,)``, or ``None`` to sample
+            one from the configured seed. Supplying it lets a replayed trial start
+            exactly where the original one did.
+        preflight_steps: Stationary planning iterations retained before motion starts.
 
     Returns:
         Host-resident simulation arrays and the selected device platform.
     """
     selected = select_device(device)
     params = jax.device_put(config.controller, selected)
-    root_key = jax.random.PRNGKey(config.run.seed)
-
-    simulation_key, state_key = jax.random.split(root_key)
-    initial_states = random_state(state_key, params)[None, :]
+    # The key is split the same way either way, so a seed keeps its meaning.
+    simulation_key, state_key = jax.random.split(jax.random.PRNGKey(config.run.seed))
+    if initial_state is None:
+        initial_states = random_state(state_key, params)[None, :]
+    else:
+        initial_states = jnp.asarray(initial_state, dtype=jnp.float32).reshape(1, 6)
     controls = jnp.zeros((params.mppi.horizon, 3), dtype=jnp.float32)
-    result = jax.jit(run_single, static_argnames=("steps", "progress"))(
+    result = jax.jit(
+        run_single, static_argnames=("steps", "progress", "preflight_steps")
+    )(
         params,
-        initial_states[0],
+        jax.device_put(initial_states[0], selected),
         jax.device_put(controls, selected),
         simulation_key,
         steps=config.run.steps,
         progress=progress,
+        preflight_steps=preflight_steps,
     )
     paths = result.path[:, None, :]
     optimal = result.optimal_trajectory[None, :, :]
@@ -103,6 +125,8 @@ def run_simulation(
         paths=np.asarray(paths),
         optimal_trajectories=np.asarray(optimal),
         surrogates=np.asarray(surrogates),
+        ess_fractions=np.asarray(result.ess_fraction),
+        temperatures=np.asarray(result.temperature),
         initial_states=np.asarray(initial_states),
         device=selected.platform,
     )

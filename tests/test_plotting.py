@@ -14,13 +14,11 @@ import matplotlib.pyplot as plt
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.plotting.simulation import plot_simulation
 from ergodic_control_mppi.plotting.style import (
-    ACCENT,
     EXCESS_CMAP,
     OCCUPANCY_CMAP,
     SEQUENTIAL_CMAP,
     SURFACE,
     TRAIL_CMAP,
-    TRAIL_STROKE,
     paper_style,
 )
 from ergodic_control_mppi.simulation import run_simulation
@@ -88,36 +86,37 @@ class RampContrastTest(unittest.TestCase):
         )
 
     def test_marks_clear_the_field_ramp(self):
-        """A field map is full-bleed, so its ramp is the background for the marks.
+        """Marks remain legible without decorative white halos."""
+        from ergodic_control_mppi.plotting.mechanism import (
+            FLOW_COLOR,
+            ROBOT_COLOR,
+            TARGET_COLOR,
+        )
 
-        The occupancy/field maps are drawn edge to edge, so what a mark on top has
-        to clear is the darkest step of OCCUPANCY_CMAP, not SURFACE. The trail's
-        recent end and the robot wear ACCENT; the faded end and every halo are
-        white. Both must stay legible if the ramp is ever re-clipped.
-        """
         darkest = OCCUPANCY_CMAP(1.0)
-        for name, color in (("white", (1.0, 1.0, 1.0)), ("accent", ACCENT)):
+        for name, color, background, minimum in (
+            ("old trail", TRAIL_CMAP(0.0), OCCUPANCY_CMAP(0.0), 1.3),
+            ("new trail", TRAIL_CMAP(1.0), darkest, 5.0),
+            ("robot", ROBOT_COLOR, darkest, 1.5),
+            ("target", TARGET_COLOR, darkest, 1.5),
+            ("mode", "#33415C", darkest, 3.0),
+            ("flow", FLOW_COLOR, darkest, 2.0),
+        ):
             with self.subTest(mark=name):
-                ratio = _contrast(matplotlib.colors.to_rgb(color), darkest)
+                ratio = _contrast(matplotlib.colors.to_rgb(color), background)
                 self.assertGreaterEqual(
-                    ratio, 3.0,
-                    f"{name} reads {ratio:.2f}:1 on the darkest field step "
-                    f"{matplotlib.colors.to_hex(darkest)}; clip OCCUPANCY_CMAP lighter",
+                    ratio, minimum,
+                    f"{name} reads only {ratio:.2f}:1 against its field background",
                 )
 
-    def test_trail_ramp_is_exempt_but_stroked(self):
-        """TRAIL_CMAP's white end is deliberate; the underlay is what saves it.
-
-        It is the one ramp that may fail the surface rule -- fading to invisible is
-        the message. This asserts the exemption is paid for: the ramp does start at
-        white, and TRAIL_STROKE is dark enough to outline it.
-        """
-        white_end = matplotlib.colors.to_hex(TRAIL_CMAP(0.0)).lower()
-        self.assertEqual(white_end, "#ffffff")
-        self.assertGreaterEqual(
-            _contrast(matplotlib.colors.to_rgb(TRAIL_STROKE), (1.0, 1.0, 1.0)), 3.0,
-            "TRAIL_STROKE cannot outline a white trail",
-        )
+    def test_trail_ramp_darkens_with_recency(self):
+        samples = np.asarray([TRAIL_CMAP(value)[:3] for value in np.linspace(0, 1, 9)])
+        luminance = np.asarray([_relative_luminance(color) for color in samples])
+        self.assertTrue(np.all(np.diff(luminance) < 0.0))
+        for endpoint in (TRAIL_CMAP(0.0), TRAIL_CMAP(1.0)):
+            self.assertNotIn(
+                matplotlib.colors.to_hex(endpoint).lower(), ("#000000", "#ffffff")
+            )
 
 
 class MechanismFieldTest(unittest.TestCase):

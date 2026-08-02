@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ergodic_control_mppi_ros</name>
+  <version>0.1.0</version>
+  <description>ROS 2 launch and target-density visualization for ergodic_control_mppi.</description>
+  <maintainer email="mattia@example.com">Mattia Mantovani</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>mockamap</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>odom_visualization</exec_depend>
+  <exec_depend>quadrotor_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros2bag</exec_depend>
+  <exec_depend>rosbag2_storage_default_plugins</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>so3_control</exec_depend>
+  <exec_depend>so3_quadrotor_simulator</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

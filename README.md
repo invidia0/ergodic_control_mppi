@@ -79,6 +79,19 @@ The CLI accepts `--device auto|cpu|gpu`. `auto` uses a GPU when JAX exposes one
 and otherwise falls back to CPU. Controller imports do not query devices,
 print, log, or import plotting.
 
+### ROS 2 Jazzy scene
+
+With `DISPLAY` and `XAUTHORITY` exported for the host XWayland session, run:
+
+```bash
+docker compose -f docker/ros2/compose.yaml up --build
+```
+
+This opens one RViz window with the Perlin map, configured target density,
+native SO3 drone, and live trail. For headless use, run the image with
+`ros2 launch ergodic_control_mppi_ros scene.launch.py rviz:=false`; the launch
+also accepts `config:=PATH`.
+
 The model dimensions are fixed and are not configuration keys:
 
 - state `(6,)`: `[px, py, vx, vy, yaw, yaw_rate]`
@@ -112,10 +125,47 @@ Trial CSV rows preserve the established scalar fields, including
 `redundancy_metric`, `R_pair`, `D_min_pair`, and `runtime_ms`. Existing CSVs
 are not regenerated automatically.
 
+## ROS 2 UAV deployment
+
+The same controller flies a fixed-altitude single UAV on the SO3 quadrotor simulator, with
+a map adapter, an independent safety guard, and a recorder that pairs every flight with an
+ideal offline run on the identical grid, start state and seed. See
+[`ros2/ergodic_control_mppi_ros/README.md`](ros2/ergodic_control_mppi_ros/README.md) for the
+build, topic map, launch arguments, safety budget, and outputs.
+
+```bash
+docker compose -f docker/ros2/compose.yaml build uav
+docker compose -f docker/ros2/compose.yaml run --rm uav \
+    ros2 launch ergodic_control_mppi_ros uav.launch.py run_id:=smoke steps:=200 rviz:=false
+```
+
+`configs/uav_profile.yaml` is the deployment configuration; `configs/mppi_params.yaml`
+remains the paper configuration and is untouched by deployment work.
+
+The preregistered fixed-altitude pillar campaign uses full-height columns with no ring
+obstacles, selects maps from geometry before evaluating the controller, and is resumable:
+
+```bash
+scripts/run_pillar_campaign.sh
+# Explicitly discard and regenerate only this campaign:
+scripts/run_pillar_campaign.sh --overwrite
+```
+
+Its qualification table, offline sensitivity rows, five bagged flights, exact ideal twins,
+snapshot, and report are written under `results/uav/pillar/`.
+
 ## Validation
 
 ```bash
 uv run python -m compileall ergodic_control_mppi scripts tests
 JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests -v
 uv lock --check
+```
+
+The ROS package has its own tests, which need the container:
+
+```bash
+docker compose -f docker/ros2/compose.yaml run --rm uav \
+    bash -lc 'cd /ros_ws && colcon test --packages-select ergodic_control_mppi_ros \
+              && colcon test-result --verbose'
 ```

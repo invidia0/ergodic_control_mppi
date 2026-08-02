@@ -1,0 +1,92 @@
+services:
+  scene:
+    build:
+      context: ../..
+      dockerfile: docker/ros2/Dockerfile
+    environment:
+      DISPLAY: ${DISPLAY:?DISPLAY must be set}
+      XAUTHORITY: /tmp/host.xauthority
+    volumes:
+      - type: bind
+        source: ${XAUTHORITY:?XAUTHORITY must point to the host XWayland authority file}
+        target: /tmp/host.xauthority
+        read_only: true
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+        read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+  # Visual replay of a recorded bag. Needs both halves: the X11 mounts the `scene` service
+  # has, and the workspace bind mount the `uav` service has -- bags live under
+  # results/uav/<run>/bag inside the repository. Plays recorded data only; it starts no
+  # simulator and no controller, so nothing shown here can be mistaken for a fresh run.
+  replay:
+    build:
+      context: ../..
+      dockerfile: docker/ros2/Dockerfile
+    working_dir: /workspace
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      DISPLAY: ${DISPLAY:?DISPLAY must be set}
+      XAUTHORITY: /tmp/host.xauthority
+      # Playback and RViz need no GPU compute, and importing the package pulls in JAX.
+      JAX_PLATFORMS: cpu
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+    volumes:
+      - type: bind
+        source: ${XAUTHORITY:?XAUTHORITY must point to the host XWayland authority file}
+        target: /tmp/host.xauthority
+        read_only: true
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+        read_only: true
+      - type: bind
+        source: ../..
+        target: /workspace
+      - type: bind
+        source: ../../ros2/ergodic_control_mppi_ros
+        target: /ros_ws/src/ergodic_control_mppi_ros
+    security_opt:
+      - no-new-privileges:true
+
+  # Headless coverage trials. No display mounts; results land in the bind-mounted
+  # repository so a screening script on the host can read them as runs finish.
+  uav:
+    build:
+      context: ../..
+      dockerfile: docker/ros2/Dockerfile
+    working_dir: /workspace
+    # Run as the invoking user so results written into the bind-mounted repository are
+    # owned by them, not by root. Override on a box where the uid differs.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      # Every `compose run` joins the same project bridge network, so two concurrent runs
+      # see each other's DDS discovery and a node can latch onto the wrong map. Give each
+      # run its own domain (ROS_DOMAIN_ID=7 docker compose run ...) to keep them separate.
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+    volumes:
+      - type: bind
+        source: ../..
+        target: /workspace
+      - type: bind
+        source: ../../ros2/ergodic_control_mppi_ros
+        target: /ros_ws/src/ergodic_control_mppi_ros
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - ros2
+      - launch
+      - ergodic_control_mppi_ros
+      - uav.launch.py
+      - "rviz:=false"

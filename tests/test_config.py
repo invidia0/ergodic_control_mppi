@@ -89,12 +89,12 @@ class ConfigTest(unittest.TestCase):
         self.assertAlmostEqual(stein.memory_decay, np.exp(-delta_t / tau), places=9)
         self.assertEqual(config.controller.mppi.memory_length, math.ceil(3.0 * tau / delta_t))
         self.assertAlmostEqual(stein.fine_bandwidth, 2.0 * raw["stein"]["fill_resolution"] ** 2, places=9)
-        # h_c = median trace(Sigma) = 5 for this density, below its 0.25 * min separation cap of 34.
-        self.assertAlmostEqual(stein.coarse_bandwidth, 5.0, places=6)
+        # h_c = median trace(Sigma) = 11, below its mode-separation cap.
+        self.assertAlmostEqual(stein.coarse_bandwidth, 11.0, places=6)
         self.assertGreater(stein.coarse_bandwidth, stein.fine_bandwidth)
 
     def test_coarse_scale_capped_by_mode_separation(self):
-        # min squared separation 2.25 -> cap 0.5625 wins over the 5.0 mode width.
+        # min squared separation 2.25 -> cap 0.5625 wins over the 11.0 mode width.
         config = load_config(self._mutate(
             lambda data: data["density"].update(means=[[0.0, 0.0], [1.5, 0.0], [0.0, 1.5]])
         ))

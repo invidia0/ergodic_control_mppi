@@ -22,9 +22,9 @@ mppi:
 
 # Map and obstacle costs
 map:
-  x_limits: [-10.0, 10.0]
+  x_limits: [-20.0, 20.0]
   y_limits: [-10.0, 10.0]
-  resolution: 0.2  # visualization grid resolution
+  resolution: 0.15  # visualization grid resolution
   oom_cost: 1e3
   boundary_margin: 1.5   # soft inward margin band [m] near map edges
   boundary_weight: 100.0 # penalty for hugging the inside of the edge (stops corner-dwelling, frees far modes)
@@ -33,7 +33,7 @@ map:
     num_obstacles: 3
     min_radius: 0.5
     max_radius: 1.5
-    x_limits: [-8.0, 8.0]
+    x_limits: [-16.0, 16.0]
     y_limits: [-8.0, 8.0]
     weight: 1e3
     safe_distance: 0.3
@@ -46,12 +46,12 @@ density:
     - 0.33333334
   means:
     - [0.0, 6.0]
-    - [-6.0, -4.0]
-    - [6.0, -4.0]
+    - [-12.0, -4.0]
+    - [12.0, -4.0]
   covariances:
-    - [[3.0, 0.0], [0.0, 2.0]]
-    - [[2.0, 1.0], [1.0, 3.0]]
-    - [[2.0, -1.0], [-1.0, 3.0]]
+    - [[12.0, 0.0], [0.0, 2.0]]
+    - [[8.0, 2.0], [2.0, 3.0]]
+    - [[8.0, -2.0], [-2.0, 3.0]]
 
 # Stein flow settings
 stein:

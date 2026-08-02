@@ -21,11 +21,16 @@ class MPPIStepResult(NamedTuple):
     weights: jax.Array
 
 
+def effective_sample_fraction(weights: jax.Array, samples: int) -> jax.Array:
+    """Return MPPI effective sample size divided by the rollout count."""
+    return 1.0 / (jnp.sum(weights * weights) * samples)
+
+
 def adapt_temperature(
     temperature: jax.Array, weights: jax.Array, params: ControllerParams
 ) -> jax.Array:
     """Adapt MPPI temperature toward the configured effective sample size."""
-    ess_fraction = 1.0 / (jnp.sum(weights * weights) * params.mppi.samples)
+    ess_fraction = effective_sample_fraction(weights, params.mppi.samples)
     updated = temperature * jnp.exp(0.05 * (params.mppi.ess_target - ess_fraction))
     return jnp.clip(updated, params.mppi.temperature_min, params.mppi.temperature_max)
 
@@ -68,11 +73,33 @@ def stage_cost(state: jax.Array, params: ControllerParams) -> jax.Array:
     )
     encroach = jnp.maximum(params.workspace.boundary_margin - gap, 0.0)
     margin_cost = params.workspace.boundary_weight * encroach * encroach
-    return (
+    total = (
         collision * params.workspace.obstacle_cost
         + outside * params.workspace.out_of_map_cost
         + margin_cost
     )
+    return total + _grid_cost(position, params)
+
+
+def _grid_cost(position: jax.Array, params: ControllerParams) -> jax.Array:
+    """Charge the runtime occupancy grid, if one was supplied.
+
+    The grid shape is static under JIT, so an empty grid compiles this away and leaves
+    the circular-obstacle cost byte-identical. Nearest-cell lookup is sufficient because
+    rollout samples are spaced ``speed * delta_t`` apart, well under one cell; positions
+    outside the grid are clamped, since the grid covers the workspace and leaving it is
+    already charged by the out-of-map term.
+    """
+    grid = params.workspace.grid
+    if not grid.size:
+        return jnp.zeros(position.shape[:-1], dtype=jnp.float32)
+    height, width = grid.shape
+    cell = jnp.floor(
+        (position - params.workspace.grid_origin) / params.workspace.grid_resolution
+    ).astype(jnp.int32)
+    column = jnp.clip(cell[..., 0], 0, width - 1)
+    row = jnp.clip(cell[..., 1], 0, height - 1)
+    return grid[row, column] * params.workspace.obstacle_cost
 
 
 def _rollouts(

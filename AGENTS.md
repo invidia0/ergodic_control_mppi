@@ -107,6 +107,11 @@ uv run python -m ergodic_control_mppi.experiments.literature --help
 uv run python -m compileall ergodic_control_mppi scripts tests
 JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests -v
 uv lock --check
+
+# "check Jeff" = poll the ablation campaign on the RTX 5090 box that runs it.
+# Read-only (greps remote scratch/*.log), safe against a live campaign.
+ssh ars-admin@155.185.245.31 "bash -s" < scripts/poll_campaign.sh
+ssh ars-admin@155.185.245.31 "bash -s" < scripts/poll_pillar_tuning.sh
 ```
 
 ## Refactor boundaries

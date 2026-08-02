@@ -79,7 +79,17 @@ class MPPIParams:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class WorkspaceParams:
-    """Workspace boundaries, obstacle geometry, and constraint costs."""
+    """Workspace boundaries, obstacle geometry, and constraint costs.
+
+    The occupancy grid is a runtime input rather than a YAML knob: offline runs leave
+    it empty and keep the circular-obstacle behavior unchanged, while a deployment
+    supplies a rasterized map. Both sources are charged ``obstacle_cost``.
+
+    Attributes:
+        grid: Occupancy with shape ``(H, W)``, ``1.0`` where blocked, empty when unused.
+        grid_origin: World coordinates of the lower-left corner of cell ``(0, 0)``.
+        grid_resolution: Grid cell size in workspace units.
+    """
 
     x_limits: jax.Array
     y_limits: jax.Array
@@ -89,6 +99,9 @@ class WorkspaceParams:
     safe_distance: float
     boundary_margin: float
     boundary_weight: float
+    grid: jax.Array
+    grid_origin: jax.Array
+    grid_resolution: float
 
 
 @jax.tree_util.register_dataclass
