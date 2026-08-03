@@ -10,6 +10,7 @@ from ergodic_control_mppi.experiments.uav_pillar_tuning import (
     CAP_FIELDS,
     FIELDS,
     SCREEN_ARMS,
+    build_report,
     dry_run,
     evaluate,
     run_stage,
@@ -89,6 +90,22 @@ class GateTest(unittest.TestCase):
         self.assertEqual(result["screen_winner"], "T500")
         self.assertTrue(result["screen"]["T500"]["eligible"])
         self.assertFalse(result["screen"]["common_cap"]["eligible"])
+
+    def test_report_exposes_per_map_terminal_negative(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = [self._row("base", seed, False) for seed in range(43, 49)]
+            for row in rows:
+                row["stage"] = "approach"
+            with (root / "run_cap.csv").open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=CAP_FIELDS)
+                writer.writeheader()
+                writer.writerows(rows)
+            report = build_report(root)
+        self.assertIn("| base | 511 | 6 | 0 | 0 | 0 |", report)
+        self.assertIn("Holdout primary: **NOT RUN**", report)
+        self.assertIn("**Negative result:**", report)
+        self.assertIn("one dwell-qualified visit to each target mode", report)
 
 
 if __name__ == "__main__":

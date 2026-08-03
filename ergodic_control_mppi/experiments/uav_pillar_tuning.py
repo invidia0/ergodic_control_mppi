@@ -436,9 +436,9 @@ def build_report(root: Path) -> str:
         "1.2 m minimum centre spacing, zero rings) and a 1.04 m seven-cell safety budget.",
         f"Development maps: **{selection.get('development', 'pending')}**; holdout maps: "
         f"**{selection.get('holdout', 'pending')}**. Selection is geometry-only.", "",
-        "Every cell is evaluated at 10,000 steps. A cell without one complete "
-        "visit–dwell–exit tour stops there; survivors rerun deterministically to 20,000 "
-        "steps for repeat-loop evidence. Rejected 10k rows remain archived.", "",
+        "Every cell is evaluated at 10,000 steps. A cell without one dwell-qualified "
+        "visit to each target mode stops there; survivors rerun deterministically to "
+        "20,000 steps for repeat-loop evidence. Rejected 10k rows remain archived.", "",
         "## T/K/cap falsification screen", "",
         "| arm | 10k attempts | 10k tours | 20k runs | second tours | ESS median | cap max | MSE ratio | eligible |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
@@ -452,12 +452,64 @@ def build_report(root: Path) -> str:
         )
     lines.extend([
         "", f"Screen base: **{result['screen_winner']}**.", "",
-        "## Development and holdout gates", "",
-        f"Approach winner: **{result['approach_winner'] or 'none'}**.",
-        f"Holdout primary: **{'PASS' if result['holdout_pass'] else 'PENDING/FAIL'}**.",
-        f"Holdout repeatability: **{'PASS' if result['repeat_pass'] else 'PENDING/FAIL'}**.",
-        "",
-        "No waypoint guidance, replay model, or controller-performance map selection is used.",
+        "## Development gate", "",
+        "| arm | 10k attempts | 10k tours | 20k runs | second tours | ESS median | cap max | MSE ratio | eligible |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ])
+    for arm, summary in result["approach"].items():
+        lines.append(
+            f"| {arm} | {summary['runs']} | {summary['reached']} | "
+            f"{summary['full_runs']} | {summary['repeats']} | "
+            f"{summary['ess_median']:.3f} | {summary['cap_max']:.3f} | "
+            f"{summary['mse_ratio']:.3f} | {'yes' if summary['eligible'] else 'no'} |"
+        )
+    lines.extend([
+        "", "| arm | map | 10k attempts | 10k tours | 20k runs | second tours |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    for arm, summary in result["approach"].items():
+        for map_seed, per_map in summary["per_map"].items():
+            lines.append(
+                f"| {arm} | {map_seed} | {per_map['runs']} | {per_map['reached']} | "
+                f"{per_map['full_runs']} | {per_map['repeats']} |"
+            )
+    approach_attempts = sum(summary["runs"] for summary in result["approach"].values())
+    holdout_attempts = sum(summary["runs"] for summary in result["holdout"].values())
+    if approach_attempts and not result["approach_winner"]:
+        approach_status = "none — development gate failed"
+        holdout_status = repeat_status = "NOT RUN"
+    else:
+        approach_status = result["approach_winner"] or "pending"
+        holdout_status = (
+            "PASS" if result["holdout_pass"] else "FAIL" if holdout_attempts else "PENDING"
+        )
+        repeat_status = (
+            "PASS" if result["repeat_pass"] else "FAIL" if holdout_attempts else "PENDING"
+        )
+    lines.extend([
+        "", f"Approach winner: **{approach_status}**.",
+        f"Holdout primary: **{holdout_status}**.",
+        f"Holdout repeatability: **{repeat_status}**.",
+    ])
+    if approach_attempts and not result["approach_winner"]:
+        lines.extend([
+            "", "**Negative result:** no approach arm achieved at least four of six 10k "
+            "tours on every development map. Holdout and online flights were not run.",
+        ])
+    if holdout_attempts:
+        lines.extend([
+            "", "| holdout map | 10k attempts | 10k tours | 20k runs | second tours | ESS median | cap max | collisions |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for map_seed, summary in result["holdout"].items():
+            lines.append(
+                f"| {map_seed} | {summary['runs']} | {summary['reached']} | "
+                f"{summary['full_runs']} | {summary['repeats']} | "
+                f"{summary['ess_median']:.3f} | {summary['cap_max']:.3f} | "
+                f"{summary['collisions']} |"
+            )
+    lines.extend([
+        "", "No waypoint guidance, replay model, or controller-performance map selection is used.",
         "The online-versus-offline visitation root cause remains unresolved; these gates only "
         "test whether the gap persists.",
     ])
