@@ -133,12 +133,16 @@ OUTCOMES = (
 # here -- Nature's red-orange-to-blue was the alternative -- puts "worse" reds directly under
 # the dot panel's "worse" reds and invites reading the two as one scale. Being sequential
 # also makes the stack read as ordered layers rather than five unrelated categories.
-# Matplotlib's `Blues` sampled at 0.22/0.40/0.58/0.76/0.97 -- the near-white end trimmed off,
-# or the bottom band would be indistinguishable from the page. Single-hue on purpose: the
-# panel is one quantity decomposed into parts, not five categories, and leaving the colour to
-# the two verdict panels above keeps the reading order right. Amber-to-navy, cyan-to-magenta
-# and a grey ramp were all tried; the saturated ones pulled the eye away from the verdicts.
-BAND_COLOURS = ("#ccdff1", "#94c4df", "#519ccc", "#1f6eb3", "#083776")
+# The paper's shared categorical steps, in stacking order. Five *named outcomes* are an
+# identity encoding, not a magnitude one, so discrete hues say what a single-hue ramp only
+# implied by position: these are five different measurements, not five levels of one.
+# Same steps as VIOLIN_COLOURS and STEP_COLOURS, and validated the same way against the
+# panel (#DCE2EC) -- adjacent-pair checks, since a stack only ever abuts its neighbours.
+# The order is load-bearing for two reasons: lavender must not neighbour the periwinkle
+# (dE 1.1 for deuteranopes), and the warm pair sits at the top of the stack, furthest from
+# the diverging red/green verdict panels above, so "worse" orange does not line up under
+# "worse" red and invite reading the two panels as one scale.
+BAND_COLOURS = ("#7FADFF", "#5FC97A", "#C08CFF", "#F0A04B", "#EC7BA8")
 
 
 def load_arms(path: Path) -> dict[str, dict[int, dict[str, str]]]:
@@ -402,14 +406,26 @@ def holm_by_axis(table, arms: list[str], pvalues: list[float]) -> list[bool]:
 # all three panels come from one family. Both carry a light grey neutral: the warm ivory that
 # preceded it sat within a few points of the shipped column's highlight.
 # Eleven bins for the dots, five for the strip, sharing one neutral so both panels speak the
-# same diverging language. Red-yellow-green: red and green carry "bad" and "good" without a
-# legend, which a red-blue or magenta-amber ramp -- both tried -- does not. The neutral is a
-# light grey rather than the warm ivory it replaced: a warm neutral on a warm ramp reads as a
-# low value on the scale instead of as the absence of one.
+# same diverging language. Two hues and a grey, not a rainbow: the red-yellow-green ramp this
+# replaced ran three hues, so a mid-scale value read as its own category rather than as a
+# position between the poles. The poles are the rose and the green of the paper's shared
+# steps, deepened away from the neutral and lightened toward it -- each half validated on the
+# white panel as an ordinal ramp (monotone lightness, adjacent dL >= 0.06, one hue per side).
+# Rose and green still carry "bad" and "good" without consulting a legend, which is what a
+# red-blue or magenta-amber ramp -- both tried -- does not.
+#
+# The palest bin on each side deliberately sits under the 2:1 contrast floor an ordinal ramp
+# would normally hold: it abuts the neutral and means "almost no change", so it has to stay
+# recessive. Darkening it to clear the floor makes a null look like an effect.
+#
+# The neutral is a light grey rather than the warm ivory it replaced: a warm neutral on a warm
+# ramp reads as a low value on the scale instead of as the absence of one. The top bin keeps
+# its hue break -- the shared periwinkle now -- because it is an open-ended ">4x" bin rather
+# than one more step.
 NEUTRAL_BIN = "#d9d9d9"
-DOT_COLOURS = ["#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b", NEUTRAL_BIN,
-               "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#2c7fb8"]
-STRIP_COLOURS = ["#d73027", "#fdae61", NEUTRAL_BIN, "#a6d96a", "#1a9850"]
+DOT_COLOURS = ["#8C2340", "#BB3D63", "#D96087", "#E98BAB", "#F4AEC4", NEUTRAL_BIN,
+               "#ADE2BD", "#7ACF95", "#48B570", "#1F8449", "#3D7BD9"]
+STRIP_COLOURS = ["#BB3D63", "#E98BAB", NEUTRAL_BIN, "#7ACF95", "#1F8449"]
 DOT_EDGES = [-9, -2.0, -1.5, -1.0, -0.5, -0.15, 0.15, 0.5, 1.0, 1.5, 2.0, 9]
 
 
