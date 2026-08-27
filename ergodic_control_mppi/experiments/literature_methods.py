@@ -223,7 +223,13 @@ def _limit_speed(v: np.ndarray, desired_speed: float) -> np.ndarray:
 
 
 def _clamp_controls_np(u: np.ndarray, model_params) -> np.ndarray:
-    return np.asarray(model.clamp(jnp.asarray(u), model_params), dtype=np.float64)
+    """Clamp in float32, matching `models.double_integrator.clamp` bit for bit.
+
+    See `_double_integrator_step_np` for why this is a hand-written copy rather than a call.
+    """
+    limits = np.array([model_params.max_accel_lin_abs, model_params.max_accel_lin_abs,
+                       model_params.max_accel_ang_abs], dtype=np.float32)
+    return np.clip(np.asarray(u, dtype=np.float32), -limits, limits).astype(np.float64)
 
 
 
@@ -246,7 +252,34 @@ def _clip_state_to_map_np(
 
 
 def _double_integrator_step_np(x: np.ndarray, u: np.ndarray, model_params) -> np.ndarray:
-    return np.asarray(model.step(jnp.asarray(x), jnp.asarray(u), model_params), dtype=np.float64)
+    """Advance the double integrator, matching `models.double_integrator.step` bit for bit.
+
+    A transcription rather than a call, for one reason: the baselines step this from a
+    Python loop 20 000 times per run, and dispatching two JAX primitives per call cost
+    412 us against 7.6 us here -- 46% of every baseline's runtime spent in tracing overhead
+    for six multiply-adds.
+
+    The arithmetic must be *float32*, because that is what the original does. It takes
+    float64 in, but ``jax_enable_x64`` is off, so ``jnp.asarray`` silently narrows and the
+    whole computation happens in single precision before being widened again on the way
+    out. A float64 transcription would be the more natural code and would quietly change
+    every trajectory: this loop is chaotic enough that one ULP flips a run's outcome.
+    ``tests.test_baselines.IntegratorTranscriptionTest`` pins the equality.
+    """
+    params = model_params
+    x = np.asarray(x, dtype=np.float32)
+    # `model.step` clamps its own control before integrating. `_tracker_step_np` also clamps
+    # before calling, so dropping this was invisible on the real path and only showed up
+    # against unclamped input -- which is exactly what the transcription test feeds it.
+    u = np.asarray(_clamp_controls_np(u, params), dtype=np.float32)
+    dt = np.float32(params.delta_t)
+    half = np.float32(0.5)
+    dt_squared = np.float32(params.delta_t ** 2)
+    position = x[..., :2] + x[..., 2:4] * dt + half * u[..., :2] * dt_squared
+    velocity = x[..., 2:4] + u[..., :2] * dt
+    yaw = x[..., 4:5] + x[..., 5:6] * dt + half * u[..., 2:3] * dt_squared
+    yaw_rate = x[..., 5:6] + u[..., 2:3] * dt
+    return np.concatenate((position, velocity, yaw, yaw_rate), axis=-1).astype(np.float64)
 
 
 

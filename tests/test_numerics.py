@@ -12,6 +12,7 @@ from ergodic_control_mppi.models.double_integrator import clamp, step
 from ergodic_control_mppi.mppi.core import (
     _flow_tracking_cost,
     _rollouts,
+    _smooth,
     mppi_step,
     sample_epsilon,
     stage_cost,
@@ -177,6 +178,34 @@ class NumericalTest(unittest.TestCase):
         cost_one, _, _ = _rollouts(params, jnp.zeros(6), controls, epsilon, jnp.array(1.0))
         cost_two, _, _ = _rollouts(params, jnp.zeros(6), controls, epsilon, jnp.array(2.0))
         np.testing.assert_allclose(cost_two[:-1], 2 * cost_one[:-1], rtol=1e-6)
+
+    def test_control_smoothing_window_and_edges(self):
+        """A window of 1 is inert; wider windows average with exact edge normalisation."""
+        controls = jnp.asarray(
+            np.arange(24, dtype=np.float32).reshape(8, 3) ** 1.5, dtype=jnp.float32
+        )
+        # Inert at 1 -- this is what lets the field ship default-on-nothing. Identity, not
+        # approximate identity: on a loop this sensitive a one-ULP shift in the default path
+        # would contaminate every comparison made across the change.
+        self.assertIs(_smooth(controls, 1), controls)
+        self.assertIs(_smooth(controls, 0), controls)
+
+        raw = np.asarray(controls)
+        for window in (2, 3, 5):
+            got = np.asarray(_smooth(controls, window))
+            for index in range(raw.shape[0]):
+                # np.convolve(mode="same") centres an even kernel one tap to the right, so
+                # the reference window is [i - w//2, i + (w-1)//2], clipped to the sequence.
+                low = max(0, index - window // 2)
+                high = min(raw.shape[0], index + (window - 1) // 2 + 1)
+                np.testing.assert_allclose(
+                    got[index], raw[low:high].mean(axis=0), rtol=1e-5, atol=1e-5
+                )
+        # A window spanning the horizon collapses the sequence onto its own mean.
+        np.testing.assert_allclose(
+            np.asarray(_smooth(controls, raw.shape[0]))[raw.shape[0] // 2],
+            raw.mean(axis=0), rtol=1e-5, atol=1e-5,
+        )
 
     def test_displacement_flow_cost_and_translation_invariance(self):
         flow = jnp.array(

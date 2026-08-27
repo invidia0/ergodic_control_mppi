@@ -33,6 +33,7 @@ from ergodic_control_mppi.plotting.style import (
     DIVERGING_CMAP,
     NEUTRAL,
     PRIMARY,
+    TABLEAU,
     paper_style,
     save,
 )
@@ -625,7 +626,7 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
     else:
         labels_list = list(labels.values())
 
-    tints = ["#2E4A6B", "#4E79A7", "#7FA6CC", "#B3C8DF", "#D9E2EC"][: len(values)]
+    tints = TABLEAU[: len(values)]
 
     with plt.rc_context(rc=paper_style("double")):
         figure, axes = plt.subplots(1, 2, figsize=(6.9, 2.7),
@@ -637,18 +638,18 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
         )
         shape = stages["shape"]
         axis.text(0, 0, f"{stages['total_ms']:.2f}\nms/step", ha="center", va="center",
-                  fontsize=7.5, fontweight="bold")
+                  fontsize=8.5, fontweight="bold")
         axis.legend(
             wedges,
             [f"{name}  {value:.2f} ms ({100 * value / stages['total_ms']:.0f}%)"
              for name, value in zip(labels_list, values)],
-            loc="upper center", bbox_to_anchor=(0.5, -0.02), fontsize=5.2,
+            loc="upper center", bbox_to_anchor=(0.5, -0.02), fontsize=6.2,
             frameon=False, handlelength=1.0,
         )
         axis.set_title(
             f"(a) per-step budget\n$K$={shape['K']}, $T$={shape['T']}, "
             f"$P$={shape['P']}, $Q$={shape['Q']}",
-            fontsize=7,
+            fontsize=8,
         )
 
         axis = axes[1]
@@ -663,7 +664,7 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
             "Q": ("memory_ms", 1.0, r"KDE $\propto Q$"),
         }
         for (name, rows_list), color in zip(
-            sorted(scaling.items()), ["#2E4A6B", "#4E79A7", ACCENT, "#59A14F"]
+            sorted(scaling.items()), TABLEAU[:4]
         ):
             key, slope, label = drives[name]
             levels = np.asarray([row["level"] for row in rows_list], dtype=np.float64)
@@ -677,8 +678,8 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
         axis.set_yscale("log")
         axis.set_xlabel("parameter, relative to its smallest level")
         axis.set_ylabel("stage time, relative")
-        axis.set_title("(b) cost scaling (dotted: predicted slope)", fontsize=7)
-        axis.legend(fontsize=5.5, loc="upper left", handlelength=1.2, labelspacing=0.25)
+        axis.set_title("(b) cost scaling (dotted: predicted slope)", fontsize=8)
+        axis.legend(fontsize=6.5, loc="upper left", handlelength=1.2, labelspacing=0.25)
         figure.tight_layout(pad=0.35, w_pad=1.0)
         path = save(figure, output)
         plt.close(figure)

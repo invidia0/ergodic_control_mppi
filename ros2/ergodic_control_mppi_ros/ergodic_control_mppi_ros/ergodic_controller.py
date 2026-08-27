@@ -24,7 +24,6 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from ergodic_control_mppi.config import load_config
-from ergodic_control_mppi.mppi.core import effective_sample_fraction
 from ergodic_control_mppi.mppi.single import initialize_single, single_step
 from ergodic_control_mppi.simulation import controller_key, select_device
 
@@ -80,6 +79,18 @@ def limit_yaw_rate(current: float, target: float, max_rate: float, delta_t: floa
     return math.atan2(math.sin(current + step), math.cos(current + step))
 
 
+def state_trace_u32(step_index: int, predicted: np.ndarray, observed: np.ndarray) -> str:
+    """Encode the predicted and consumed float32 states without losing ULPs."""
+    bits = np.concatenate(
+        (
+            np.asarray([step_index], dtype=np.uint32),
+            np.asarray(predicted, dtype=np.float32).view(np.uint32),
+            np.asarray(observed, dtype=np.float32).view(np.uint32),
+        )
+    )
+    return ",".join(str(int(value)) for value in bits)
+
+
 class ErgodicController(Node):
     """Publish raw ergodic setpoints and the matching one-second safety path."""
 
@@ -94,6 +105,9 @@ class ErgodicController(Node):
         self.max_yaw_rate = self.declare_parameter("max_yaw_rate", math.pi).value
         self.seed = int(self.declare_parameter("seed", -1).value)
         self.preflight_steps = int(self.declare_parameter("preflight_steps", 0).value)
+        self.predicted_feedback = bool(
+            self.declare_parameter("predicted_feedback", False).value
+        )
         if self.preflight_steps < 0:
             raise ValueError("preflight_steps must be non-negative")
 
@@ -150,6 +164,7 @@ class ErgodicController(Node):
             f"safety grid {occupancy.shape} at {resolution} m, {int(occupancy.sum())} blocked cells"
         )
         selected = select_device(self.device)
+        self.selected_device = selected
         workspace = replace(
             self.config.controller.workspace,
             grid=jnp.asarray(occupancy),
@@ -162,16 +177,32 @@ class ErgodicController(Node):
         self.device_label = selected.platform
 
         started = time.perf_counter()
-        self.step = jax.jit(single_step, static_argnums=())
+
+        def feedback_step(params, carry, observation):
+            """Apply measured feedback inside the compiled online transition."""
+            corrected = carry._replace(
+                state=observation, memory=carry.memory.at[-1].set(observation[:2])
+            )
+            return single_step(params, corrected)
+
+        self.step = jax.jit(feedback_step, static_argnums=())
         state = observation_from(self.odometry)
-        initial_carry = initialize_single(
-            self.params,
-            jnp.asarray(state),
-            jnp.zeros((self.params.mppi.horizon, 3), dtype=jnp.float32),
-            controller_key(self.seed),
+        device_state = jax.device_put(state, selected)
+        stationary_memory = jnp.broadcast_to(
+            device_state[:2], (self.params.mppi.memory_length, 2)
+        )
+        zero_step = jax.device_put(np.int32(0), selected)
+        initial_carry = jax.device_put(
+            initialize_single(
+                self.params,
+                device_state,
+                jnp.zeros((self.params.mppi.horizon, 3), dtype=jnp.float32),
+                controller_key(self.seed),
+            ),
+            selected,
         )
         # Compile without consuming the carry that defines the experiment.
-        compiled_carry, _ = self.step(self.params, initial_carry)
+        compiled_carry, _ = self.step(self.params, initial_carry, device_state)
         jax.block_until_ready(compiled_carry.state)
         self.compile_seconds = time.perf_counter() - started
 
@@ -180,11 +211,11 @@ class ErgodicController(Node):
         carry = initial_carry
         for index in range(WARMUP_STEPS):
             begin = time.perf_counter()
-            carry, _ = self.step(self.params, carry)
+            carry, _ = self.step(self.params, carry, device_state)
             carry = carry._replace(
-                state=jnp.asarray(state),
-                memory=jnp.broadcast_to(jnp.asarray(state[:2]), carry.memory.shape),
-                step_index=jnp.asarray(0, dtype=jnp.int32),
+                state=device_state,
+                memory=stationary_memory,
+                step_index=zero_step,
             )
             jax.block_until_ready(carry.state)
             durations.append((time.perf_counter() - begin) * 1e3)
@@ -217,13 +248,11 @@ class ErgodicController(Node):
         else:
             self.carry = initial_carry
             for _ in range(self.preflight_steps):
-                self.carry, _ = self.step(self.params, self.carry)
+                self.carry, _ = self.step(self.params, self.carry, device_state)
                 self.carry = self.carry._replace(
-                    state=jnp.asarray(state),
-                    memory=jnp.broadcast_to(
-                        jnp.asarray(state[:2]), self.carry.memory.shape
-                    ),
-                    step_index=jnp.asarray(0, dtype=jnp.int32),
+                    state=device_state,
+                    memory=stationary_memory,
+                    step_index=zero_step,
                 )
                 jax.block_until_ready(self.carry.state)
         self.commanded_yaw = float(state[4])
@@ -235,13 +264,13 @@ class ErgodicController(Node):
             return
         # Replace the model's prediction with what was measured, in the state and in the
         # newest fading-memory sample, so the buffer holds executed positions.
-        observation = jnp.asarray(observation_from(self.odometry))
-        carry = self.carry._replace(
-            state=observation, memory=self.carry.memory.at[-1].set(observation[:2])
+        predicted = np.asarray(jax.device_get(self.carry.state), dtype=np.float32)
+        observed = (
+            predicted if self.predicted_feedback else observation_from(self.odometry)
         )
-
+        observation = jax.device_put(observed, self.selected_device)
         begin = time.perf_counter()
-        self.carry, result = self.step(self.params, carry)
+        self.carry, result = self.step(self.params, self.carry, observation)
         trajectory = np.asarray(jax.block_until_ready(result.optimal_trajectory))
         control = np.asarray(result.control)
         elapsed = (time.perf_counter() - begin) * 1e3
@@ -249,7 +278,12 @@ class ErgodicController(Node):
 
         stamp = self.get_clock().now()
         self.publish_command(stamp, trajectory, control)
-        self.publish_diagnostics(stamp, elapsed, result.weights)
+        self.publish_diagnostics(
+            stamp,
+            elapsed,
+            result.weights,
+            state_trace_u32(int(self.carry.step_index), predicted, observed),
+        )
         now = stamp.nanoseconds * 1e-9
         if now >= self.plan_due:
             self.publish_path(self.plan_publisher, stamp, trajectory[:, :2])
@@ -307,10 +341,15 @@ class ErgodicController(Node):
             path.poses.append(pose)
         publisher.publish(path)
 
-    def publish_diagnostics(self, stamp, elapsed: float, weights) -> None:
+    def publish_diagnostics(self, stamp, elapsed: float, weights, state_trace: str) -> None:
         now = stamp.nanoseconds * 1e-9
         jitter = 0.0 if self.last_publish is None else abs(now - self.last_publish - self.delta_t)
         self.last_publish = now
+        weights_array = np.asarray(jax.device_get(weights))
+        ess_fraction = 1.0 / (
+            float(np.sum(weights_array * weights_array)) * self.params.mppi.samples
+        )
+        temperature = float(self.carry.temperature)
         status = DiagnosticStatus(
             level=DiagnosticStatus.OK if elapsed <= self.deadline_ms else DiagnosticStatus.WARN,
             name="ergodic_controller",
@@ -321,16 +360,17 @@ class ErgodicController(Node):
                 KeyValue(key="jitter_ms", value=f"{jitter * 1e3:.6f}"),
                 KeyValue(key="deadline_ok", value=str(elapsed <= self.deadline_ms)),
                 KeyValue(key="step_index", value=str(int(self.carry.step_index))),
+                KeyValue(key="state_trace_u32", value=state_trace),
                 KeyValue(
                     key="ess_fraction",
-                    value=f"{float(effective_sample_fraction(weights, self.params.mppi.samples)):.8f}",
+                    value=f"{ess_fraction:.8f}",
                 ),
-                KeyValue(key="temperature", value=f"{float(self.carry.temperature):.8f}"),
+                KeyValue(key="temperature", value=f"{temperature:.8f}"),
                 KeyValue(
                     key="temperature_at_cap",
                     value=str(
-                        float(self.carry.temperature)
-                        >= self.params.mppi.temperature_max * (1.0 - 1e-6)
+                        temperature
+                        >= float(self.params.mppi.temperature_max) * (1.0 - 1e-6)
                     ),
                 ),
             ],

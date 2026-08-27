@@ -1162,13 +1162,13 @@ STEP_STAGES = (
 # but a different hue set -- these four are validated as a *ring*, where the last wedge
 # touches the first. Checked with the dataviz palette validator against a white surface:
 # lightness band, chroma floor, adjacent-pair CVD and normal-vision separation all pass in
-# this cyclic order (worst adjacent pair dE 12.7 tritan / 16.7 protan). Two pairs that look
+# this cyclic order (worst adjacent pair dE 16.7 protan). Two pairs that look
 # fine and are not: periwinkle/lavender is dE 1.1 for deuteranopes, and periwinkle/teal is
 # 14.6 even in normal vision -- neither may end up adjacent, which is why the order below
 # separates them rather than following the violin palette's hues.
 STEP_COLOURS = {
     "rollouts_KT": "#7FADFF",     # periwinkle, the paper's subject colour
-    "memory_QP2": "#F0A04B",      # amber
+    "memory_QP2": "#5FC97A",      # green -- the lightest that clears the lightness band
     "sample_epsilon": "#C08CFF",  # lavender -- never adjacent to the periwinkle
     "attraction_T2": "#FF8F87",   # coral
     "_residual": "#B9C0CC",       # grey: unattributed overhead is not a stage

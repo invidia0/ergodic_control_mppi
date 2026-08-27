@@ -10,6 +10,7 @@ from ergodic_control_mppi_ros.ergodic_controller import (
     grid_from,
     limit_yaw_rate,
     observation_from,
+    state_trace_u32,
     yaw_of,
 )
 
@@ -36,6 +37,14 @@ class ObservationTest(unittest.TestCase):
         for yaw in (-3.0, -1.0, 0.0, 1.0, 3.0):
             message = _odometry(0, 0, 0, 0, yaw, 0)
             self.assertAlmostEqual(yaw_of(message.pose.pose.orientation), yaw, places=6)
+
+    def test_state_trace_preserves_float32_bits(self):
+        predicted = np.array([0.0, -0.0, 1.0, -1.0, np.inf, -np.inf], dtype=np.float32)
+        observed = np.nextafter(predicted, np.float32(np.inf), dtype=np.float32)
+        values = np.fromstring(state_trace_u32(7, predicted, observed), dtype=np.uint32, sep=",")
+        self.assertEqual(int(values[0]), 7)
+        np.testing.assert_array_equal(values[1:7], predicted.view(np.uint32))
+        np.testing.assert_array_equal(values[7:], observed.view(np.uint32))
 
 
 class YawRateLimitTest(unittest.TestCase):

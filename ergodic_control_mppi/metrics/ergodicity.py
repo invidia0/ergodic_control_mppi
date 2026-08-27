@@ -403,3 +403,101 @@ def compute_cumulative_fourier_ergodic_metric(
     index = np.arange(steps - 1, -1, -stride, dtype=np.int64)[::-1]
     difference = coefficients[index] - phi_k[None, :]
     return np.sum(lambda_k[None, :] * difference * difference, axis=1)
+
+
+# --- Ball (multiscale) ergodic metric --------------------------------------
+#
+# The metric the analysis of Sec. "guarantees" is actually stated in:
+#
+#     E_K = int_0^R int_Omega [ rho_K(B(x,r)) - p*(B(x,r)) ]^2 dx dr,
+#
+# the squared disagreement in the mass the two measures assign to every ball,
+# integrated over centres and radii. The Fourier metric above is what the
+# Experiments section reports and what the baselines are scored on; this one
+# exists so the bounds of Prop. "ergodic_error_decomposition" can be evaluated
+# on their own left-hand side rather than on a proxy. They are not
+# interchangeable and are never pooled.
+#
+# rho_K(B(x,r)) is a convolution of the mass grid with a disc indicator, so the
+# whole inner integral is one FFT per radius. Zero-padding is not optional: a
+# circular convolution would wrap a ball off the west edge onto the east one and
+# silently credit coverage across the workspace.
+
+
+def _disc_mass_field(
+    mass: ArrayLike, radius: float, cell_x: float, cell_y: float
+) -> ArrayLike:
+    """Mass inside a disc of world-unit ``radius`` centred on each cell, via zero-padded FFT.
+
+    The disc is built in world units rather than in cells, so a grid whose cells are not
+    exactly square -- the deployment's 267x134 raster over a 40x20 workspace is square only
+    to 0.4% -- still gets a circle rather than an ellipse, at any aspect ratio.
+    """
+    height, width = mass.shape
+    pad_y, pad_x = height * 2, width * 2
+    offsets_y = np.fft.fftfreq(pad_y, d=1.0 / pad_y) * cell_y
+    offsets_x = np.fft.fftfreq(pad_x, d=1.0 / pad_x) * cell_x
+    disc = (
+        offsets_y[:, None] ** 2 + offsets_x[None, :] ** 2 <= radius * radius
+    ).astype(np.float64)
+    spectrum = np.fft.rfft2(mass, s=(pad_y, pad_x)) * np.fft.rfft2(disc)
+    return np.fft.irfft2(spectrum, s=(pad_y, pad_x))[:height, :width]
+
+
+def compute_ball_ergodic_metric(
+    occupancy: ArrayLike,
+    target_density_grid: ArrayLike,
+    map_x_limits: tuple[float, float],
+    map_y_limits: tuple[float, float],
+    max_radius: float | None = None,
+    radii: int = 24,
+    reachable_mask: ArrayLike | None = None,
+) -> float:
+    """Multiscale ball ergodic metric between an occupancy grid and a target. Lower is better.
+
+    Both inputs are treated as *mass* grids (each renormalized to unit total), so the
+    returned value carries units of area squared times length and is comparable only
+    between calls sharing a workspace, ``max_radius`` and ``radii``.
+
+    Args:
+        occupancy: Visitation mass with shape ``(bins_y, bins_x)``, e.g. from
+            :func:`compute_team_occupancy_grid`.
+        target_density_grid: Target on the same grid; renormalized here.
+        map_x_limits: Workspace ``x`` bounds.
+        map_y_limits: Workspace ``y`` bounds.
+        max_radius: Largest ball radius ``R``; defaults to half the shorter workspace side,
+            beyond which every ball covers the whole workspace and contributes nothing.
+        radii: Number of midpoint quadrature nodes on ``[0, R]``.
+        reachable_mask: Optional mask restricting both measures to reachable cells.
+
+    Returns:
+        The scalar metric.
+    """
+    if radii < 1:
+        raise ValueError("radii must be >= 1")
+    _validate_map_limits(map_x_limits, map_y_limits)
+
+    target = _restrict_to_mask(_normalize_density(target_density_grid), reachable_mask)
+    visited = _restrict_to_mask(_normalize_density(occupancy), reachable_mask)
+    if visited.shape != target.shape:
+        raise ValueError(
+            f"occupancy grid shape {visited.shape} does not match target shape {target.shape}"
+        )
+
+    height, width = target.shape
+    cell_x = (map_x_limits[1] - map_x_limits[0]) / width
+    cell_y = (map_y_limits[1] - map_y_limits[0]) / height
+    span = min(map_x_limits[1] - map_x_limits[0], map_y_limits[1] - map_y_limits[0])
+    radius = 0.5 * span if max_radius is None else float(max_radius)
+    if radius <= 0.0:
+        raise ValueError("max_radius must be positive")
+
+    difference = visited - target
+    cell_area = cell_x * cell_y
+    step = radius / radii
+    nodes = (np.arange(radii, dtype=np.float64) + 0.5) * step
+    total = 0.0
+    for node in nodes:
+        residual = _disc_mass_field(difference, node, cell_x, cell_y)
+        total += float(np.sum(residual * residual)) * cell_area * step
+    return total

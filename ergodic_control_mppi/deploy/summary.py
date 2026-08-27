@@ -107,7 +107,8 @@ def tracking_stats(
     loop) and start at different moments, so they are aligned by timestamp -- comparing
     them by index would difference two unrelated instants and report an error the size of
     the workspace. Velocity error is differenced from the same aligned pairs rather than
-    taken from odometry twist, so both columns describe one consistent comparison.
+    taken from odometry twist, so both columns describe one consistent comparison -- but on
+    the control grid, since the odometry period is far too short to difference across.
 
     Args:
         actual_times: Odometry timestamps in seconds, shape ``(N,)``.
@@ -135,12 +136,25 @@ def tracking_stats(
         [np.interp(times, commanded_times[order], commanded[order, axis]) for axis in (0, 1)]
     )
     error = np.linalg.norm(measured - reference, axis=1)
-    gaps = np.diff(times)
-    valid = gaps > 0
-    velocity_error = (
-        np.linalg.norm(np.diff(measured, axis=0) - np.diff(reference, axis=0), axis=1)[valid]
-        / gaps[valid]
-    )
+    # Difference the velocity on the *command* grid, not the odometry grid. Odometry arrives
+    # at ~1 kHz, so differencing a millimetre-scale position error across a 1 ms gap reports
+    # metres per second of quantization noise: on flight jeff_539_s52 that read 0.229 m/s
+    # against a true tracking error of 0.010 m/s, a factor of 22.
+    grid = commanded_times[order]
+    grid = grid[(grid >= lower) & (grid <= upper)]
+    if grid.size < 2:
+        velocity_error = np.zeros(1)
+    else:
+        sampled = np.column_stack([np.interp(grid, times, measured[:, axis]) for axis in (0, 1)])
+        tracked = np.column_stack(
+            [np.interp(grid, commanded_times[order], commanded[order, axis]) for axis in (0, 1)]
+        )
+        gaps = np.diff(grid)
+        valid = gaps > 0
+        velocity_error = (
+            np.linalg.norm(np.diff(sampled, axis=0) - np.diff(tracked, axis=0), axis=1)[valid]
+            / gaps[valid]
+        )
     if velocity_error.size == 0:
         velocity_error = np.zeros(1)
     return {

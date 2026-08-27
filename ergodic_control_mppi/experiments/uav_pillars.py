@@ -105,6 +105,35 @@ def _table(headers: list[str], rows: list[list[object]]) -> str:
     return "\n".join(lines)
 
 
+def geometry_sentence(geometry: dict) -> str:
+    """Describe the flown obstacle field from its manifest rather than restating it."""
+    if not geometry:
+        return "Obstacle geometry is not recorded in these manifests."
+    low, high = geometry.get("pillar_radius_m", ("?", "?"))
+    floor, ceiling = geometry.get("pillar_height_m", ("?", "?"))
+    return (
+        f"The field is {geometry.get('pillar_count', '?')} vertical pillars of "
+        f"{low}–{high} m radius and {floor}–{ceiling} m height, at "
+        f"{geometry.get('pillar_min_distance_m', '?')} m minimum centre spacing, with "
+        f"{geometry.get('ring_count', '?')} tilted ring obstacles."
+    )
+
+
+def inflation_text(root: Path, run_ids) -> str:
+    """Report the inflation the flights actually used, from the recorded safety budget."""
+    radii = set()
+    for run_id in run_ids:
+        manifest = root / run_id / "manifest.json"
+        if manifest.exists():
+            budget = json.loads(manifest.read_text(encoding="utf-8")).get("safety_budget", {})
+            if "inflation_radius_m" in budget:
+                radii.add(round(float(budget["inflation_radius_m"]), 3))
+    if not radii:
+        return "configured"
+    # More than one means the archive mixes geometries, which the validity table also fails.
+    return " / ".join(f"{radius:.2f} m" for radius in sorted(radii))
+
+
 def _grid_hash(path: Path) -> str:
     with np.load(path / "arrays.npz", allow_pickle=False) as arrays:
         return hashlib.sha1(np.asarray(arrays["occupancy"]).tobytes()).hexdigest()[:12]
@@ -242,18 +271,19 @@ def build_report(root: Path) -> str:
         for field in ("occupancy_mse", "fourier_ergodic", "wall_seconds")
     )
     fixed_online = complete_online and len({row["config_hash"] for row in uav.values()}) == 1
-    geometry = {
-        "pillar_count": 45,
-        "pillar_radius_m": [0.3, 0.6],
-        "pillar_height_m": [2.0, 3.0],
-        "pillar_min_distance_m": 1.2,
-        "ring_count": 0,
-    }
-    fixed_geometry = complete_online and all(
-        json.loads((root / run_id / "manifest.json").read_text(encoding="utf-8"))
-        .get("map_parameters") == geometry
+    # The obstacle density is a campaign variable -- the same arms are run at more than one
+    # pillar count -- so the check is that every flight shares *one* geometry, not that it
+    # matches a literal. The geometry actually flown is then reported rather than restated.
+    flown = {
+        run_id: json.loads((root / run_id / "manifest.json").read_text(encoding="utf-8"))
+        .get("map_parameters")
         for run_id in uav
+    }
+    geometry = next(iter(flown.values()), {}) or {}
+    fixed_geometry = complete_online and (
+        len({json.dumps(value, sort_keys=True) for value in flown.values()}) == 1
     )
+    inflation = inflation_text(root, sorted(uav))
     fixed_online_map = complete_online and all(
         _grid_hash(root / run_id) == map_hashes[representative] for run_id in uav
     )
@@ -283,7 +313,7 @@ The maps were selected from geometry alone before controller evaluation. Control
 | all 162 unique offline rows archived and finite | {'PASS' if finite_offline else 'FAIL'} |
 | five UAV flights and five exact twins archived and finite | {'PASS' if finite_online else 'FAIL'} |
 | fixed online configuration hash | {'PASS' if fixed_online else 'FAIL'} |
-| fixed 45-pillar, zero-ring flight manifests | {'PASS' if fixed_geometry else 'FAIL'} |
+| one {geometry.get('pillar_count', '?')}-pillar, {geometry.get('ring_count', '?')}-ring geometry across every flight | {'PASS' if fixed_geometry else 'FAIL'} |
 | every flight matches the selected raw occupancy | {'PASS' if fixed_online_map else 'FAIL'} |
 | same-seed occupancy hash repeats | {'PASS' if deterministic else 'FAIL'} |
 | selected map hashes are distinct | {'PASS' if distinct else 'FAIL'} |
@@ -297,7 +327,7 @@ The maps were selected from geometry alone before controller evaluation. Control
 
 {_table(['seed', 'status', 'free fraction', 'blocked mode segments', 'selected', 'representative'], map_rows)}
 
-Each selected map is connected after the 1.14 m safety inflation and blocks at least two of three straight mode-to-mode segments. Pillars have 0.3–0.6 m radius, 2–3 m height, and no tilted ring obstacles.
+Each selected map is connected after the {inflation} safety inflation and blocks at least two of three straight mode-to-mode segments. {geometry_sentence(geometry)}
 
 ## Offline bandwidth sensitivity
 

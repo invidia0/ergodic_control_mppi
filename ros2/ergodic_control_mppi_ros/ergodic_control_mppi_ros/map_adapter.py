@@ -67,11 +67,21 @@ def to_message(grid: np.ndarray, origin: tuple[float, float], resolution: float)
     return message
 
 
-def clip_visual_points(points: np.ndarray, height: float) -> np.ndarray:
-    """Return a visualization-only cloud capped at the target-density plane."""
-    clipped = np.asarray(points, dtype=np.float32).reshape(-1, 3).copy()
-    clipped[:, 2] = np.minimum(clipped[:, 2], height)
-    return clipped
+def standing_visual_points(points: np.ndarray, base: float) -> np.ndarray:
+    """Return the visualization-only cloud as columns standing on the density plane.
+
+    Only the part of each obstacle at or above ``base`` is kept, so the pillars rise out of
+    the plane the vehicle flies in and it reads as threading *between* them.
+
+    This replaced a clamp of every z down to a fixed 0.04 m, which flattened each 2-3 m
+    pillar into a disk on the floor, 0.71 m below the flight altitude -- in RViz the vehicle
+    then appeared to fly over a field of pancakes rather than through a forest.
+
+    Visualization only: the planning occupancy comes from ``build_safety_grid``, which
+    slices the *raw* cloud around the flight altitude and is not affected by this.
+    """
+    cloud = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    return cloud[cloud[:, 2] >= base]
 
 
 class MapAdapter(Node):
@@ -98,7 +108,6 @@ class MapAdapter(Node):
         self.max_speed = self.declare_parameter("max_speed", 2.0).value
         self.brake_accel = self.declare_parameter("brake_accel", 6.0).value
         self.reaction_time = self.declare_parameter("reaction_time", 0.10).value
-        self.visual_height = self.declare_parameter("visual_height", 0.04).value
         # Two scalars rather than one array parameter: launch cannot marshal a list of
         # per-element substitutions, so a list here would silently arrive unset.
         self.start_xy = (
@@ -205,7 +214,7 @@ class MapAdapter(Node):
         self.map_publisher.publish(raw_out)
         self.visual_publisher.publish(
             point_cloud2.create_cloud_xyz32(
-                message.header, clip_visual_points(points, self.visual_height).tolist()
+                message.header, standing_visual_points(points, self.altitude).tolist()
             )
         )
         message_out = to_message(inflated, self.origin, self.resolution)

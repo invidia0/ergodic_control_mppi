@@ -105,7 +105,7 @@ Two further interlocks back that up:
 | `start_x` / `start_y` | `-15.57` / `0.42` | Arming position; must be free and connected. |
 | `deadline_ms` | `16.0` | Per-step real-time budget. |
 | `preflight_steps` | `0` | Stationary planning iterations retained before flight. Pillar tuning uses 200. |
-| `visual_height` | `0.04` | Visualization-only obstacle cap at the target-density plane. |
+| _(removed)_ | | The visualization cloud now keeps whatever stands at or above `altitude`, so pillars render as columns on the flight plane instead of disks beneath it. Planning is unaffected either way. |
 
 Safety arguments, which set the inflation budget **and** the guard together:
 

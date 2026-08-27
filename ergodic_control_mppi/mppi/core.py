@@ -102,6 +102,31 @@ def _grid_cost(position: jax.Array, params: ControllerParams) -> jax.Array:
     return grid[row, column] * params.workspace.obstacle_cost
 
 
+def _smooth(controls: jax.Array, window: int) -> jax.Array:
+    """Moving-average the control sequence along the horizon.
+
+    Post-hoc smoothing of the weighted update, as the original MPPI paper does with a
+    Savitzky-Golay filter. It trades a broken optimality reading -- the returned sequence is
+    no longer the argmin of anything -- for lower variance in a plan built from a weighted
+    average of noisy rollouts. ``window <= 1`` returns the input untouched, and since the
+    field is static that branch is resolved at trace time and costs nothing.
+
+    If smoothness is wanted for its own sake, colored sampling noise buys it *inside* the
+    optimization instead of after it; this exists to measure whether the variance is worth
+    attacking at all.
+    """
+    if window <= 1:
+        return controls
+    kernel = jnp.ones(window, dtype=controls.dtype)
+    # Dividing by the same kernel convolved with ones renormalises the truncated windows at
+    # both ends exactly, for odd and even windows alike -- no special cases, no loop.
+    norm = jnp.convolve(jnp.ones(controls.shape[0], controls.dtype), kernel, mode="same")
+    smoothed = jax.vmap(
+        lambda channel: jnp.convolve(channel, kernel, mode="same"), in_axes=1, out_axes=1
+    )(controls)
+    return smoothed / norm[:, None]
+
+
 def _rollouts(
     params: ControllerParams,
     state: jax.Array,
@@ -155,43 +180,26 @@ def _flow_tracking_cost(
     return jnp.sum(alignment + effort, axis=-1)
 
 
-def mppi_step(
-    params: ControllerParams,
-    previous_controls: jax.Array,
-    state: jax.Array,
-    key: jax.Array,
-    temperature: jax.Array,
-    memory: jax.Array,
-) -> MPPIStepResult:
-    """Compute one adaptive-temperature MPPI control update.
+def reference_flow(
+    params: ControllerParams, evaluation_positions: jax.Array, memory: jax.Array
+) -> jax.Array:
+    """Return the fading-memory reference field on the shared surrogate path.
+
+    Lifted verbatim out of :func:`mppi_step` so the closed-loop audit can evaluate the exact
+    field a recorded step's flow-matching cost was built from, rather than re-deriving it and
+    drifting. Same operations in the same order, so the result is bit-identical to the inline
+    computation it replaces -- which matters, because this loop amplifies float-level
+    differences into metres and a changed numerical branch would invalidate every comparison
+    against the campaign.
 
     Args:
         params: Shared immutable controller parameters.
-        previous_controls: Warm-start controls with shape ``(T, 3)``.
-        state: Current state with shape ``(6,)``.
-        key: JAX PRNG key.
-        temperature: Current positive MPPI temperature.
-        memory: Executed-position ring buffer with shape ``(memory_length, 2)``;
-            oldest first. The reference flow is repelled from a recency- and
-            density-weighted (fading) memory of it to drive ergodic coverage.
+        evaluation_positions: Positions the rollout increments start from, shape ``(K, T, 2)``.
+        memory: Executed-position ring buffer with shape ``(P, 2)``; oldest first.
 
     Returns:
-        Named outputs containing the first control, shifted controls, advanced
-        key, optimal state trajectory ``(T, 6)``, shared surrogate ``(T, 2)``,
-        and normalized weights ``(K,)``.
+        The reference flow at the ``T`` surrogate source particles, shape ``(T, 2)``.
     """
-    epsilon, key = sample_epsilon(key, params)
-    costs, sampled_controls, sampled_positions = _rollouts(
-        params, state, previous_controls, epsilon, temperature
-    )
-    surrogate = jnp.median(sampled_positions, axis=0)
-    initial_positions = jnp.broadcast_to(
-        state[:2], (params.mppi.samples, 1, 2)
-    )
-    evaluation_positions = jnp.concatenate(
-        (initial_positions, sampled_positions[:, :-1]), axis=1
-    )
-    displacements = sampled_positions - evaluation_positions
     # Broadcast median-source field: ~0.995 rank-correlated with the faithful per-rollout
     # eq.-25 cost in the warm-started regime; source choice barely matters. Only a genuine
     # per-step ensemble split (rollouts branching) would need per-cluster representatives.
@@ -234,6 +242,47 @@ def mppi_step(
     target_flow = jnp.where(
         speed > 0, speed * target_flow / jnp.maximum(norm, 1e-3), target_flow
     )
+    return target_flow
+
+
+def mppi_step(
+    params: ControllerParams,
+    previous_controls: jax.Array,
+    state: jax.Array,
+    key: jax.Array,
+    temperature: jax.Array,
+    memory: jax.Array,
+) -> MPPIStepResult:
+    """Compute one adaptive-temperature MPPI control update.
+
+    Args:
+        params: Shared immutable controller parameters.
+        previous_controls: Warm-start controls with shape ``(T, 3)``.
+        state: Current state with shape ``(6,)``.
+        key: JAX PRNG key.
+        temperature: Current positive MPPI temperature.
+        memory: Executed-position ring buffer with shape ``(memory_length, 2)``;
+            oldest first. The reference flow is repelled from a recency- and
+            density-weighted (fading) memory of it to drive ergodic coverage.
+
+    Returns:
+        Named outputs containing the first control, shifted controls, advanced
+        key, optimal state trajectory ``(T, 6)``, shared surrogate ``(T, 2)``,
+        and normalized weights ``(K,)``.
+    """
+    epsilon, key = sample_epsilon(key, params)
+    costs, sampled_controls, sampled_positions = _rollouts(
+        params, state, previous_controls, epsilon, temperature
+    )
+    surrogate = jnp.median(sampled_positions, axis=0)
+    initial_positions = jnp.broadcast_to(
+        state[:2], (params.mppi.samples, 1, 2)
+    )
+    evaluation_positions = jnp.concatenate(
+        (initial_positions, sampled_positions[:, :-1]), axis=1
+    )
+    displacements = sampled_positions - evaluation_positions
+    target_flow = reference_flow(params, evaluation_positions, memory)
     costs += params.stein.flow_weight * _flow_tracking_cost(
         target_flow[None], displacements, params.model.delta_t
     )
@@ -243,6 +292,7 @@ def mppi_step(
     controls = previous_controls + jnp.einsum(
         "k,kti->ti", weights, sampled_controls - previous_controls
     )
+    controls = _smooth(controls, params.mppi.smooth_window)
 
     def optimal_step(current, control):
         next_state = step(current, control, params.model)

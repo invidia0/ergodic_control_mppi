@@ -94,7 +94,7 @@ profile the temperature pinned at `lam_max = 20` from step ~250 onward and achie
 not a weighted average.
 
 Regenerate: `python -m ergodic_control_mppi.experiments.uav_diagnostics ess --run-dir <run>`
-→ `results/uav/diagnostic_ess.csv`.
+→ `results/archive/2026-08-05/csv/diagnostic_ess.csv`.
 
 | cap | converged lambda | ESS settled | pinned |
 |---|---|---|---|
@@ -114,7 +114,7 @@ the spatial target better and its spectrum worse. The two metrics genuinely disa
 ### Rescaling the penalty weights is *not* the fix here
 
 The cost terms are badly out of scale — measured per rollout
-(`uav_diagnostics costs` → `results/uav/diagnostic_costs.csv`):
+(`uav_diagnostics costs` → `results/archive/2026-08-05/csv/diagnostic_costs.csv`):
 
 | term | cross-rollout spread | per-step magnitude |
 |---|---|---|
@@ -290,10 +290,10 @@ uv run python -m ergodic_control_mppi.experiments.uav_figure_run --run-dir resul
 
 | file | holds |
 |---|---|
-| `results/uav/ablation.csv` | per-(arm, seed) rows, fixed-temperature regime |
-| `results/uav/ablation_lowtemp.csv` | per-(arm, seed) rows, `lam_max: 20` argmin regime |
-| `results/uav/ablation_temp.csv` | the 18-seed `lam_max: 1e3` comparison |
-| `results/uav/diagnostic_ess.csv` | temperature convergence per cap / penalty scale |
-| `results/uav/diagnostic_costs.csv` | per-term cost spread per planning step |
-| `results/uav/summary.csv` | one row per flown run and its paired ideal twin |
+| `results/archive/2026-08-05/csv/ablation.csv` | per-(arm, seed) rows, fixed-temperature regime |
+| `results/archive/2026-08-05/csv/ablation_lowtemp.csv` | per-(arm, seed) rows, `lam_max: 20` argmin regime |
+| `results/archive/2026-08-05/csv/ablation_temp.csv` | the 18-seed `lam_max: 1e3` comparison |
+| `results/archive/2026-08-05/csv/diagnostic_ess.csv` | temperature convergence per cap / penalty scale |
+| `results/archive/2026-08-05/csv/diagnostic_costs.csv` | per-term cost spread per planning step |
+| `results/archive/2026-08-05/csv/summary.csv` | one row per flown run and its paired ideal twin |
 | `results/uav/<run>/figure_data.npz` | path + replayable planner snapshots |

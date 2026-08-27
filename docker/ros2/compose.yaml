@@ -1,14 +1,19 @@
+# DISPLAY and XAUTHORITY are interpolated with defaults rather than `:?` guards: compose
+# resolves *every* service before running one, so a required-variable guard on the two
+# graphical services aborts the headless `uav` service too, which is how the campaign runs
+# over ssh. scripts/replay_uav.sh guards both properly for the one entry point that needs a
+# display; there is nowhere else the check could fire usefully.
 services:
   scene:
     build:
       context: ../..
       dockerfile: docker/ros2/Dockerfile
     environment:
-      DISPLAY: ${DISPLAY:?DISPLAY must be set}
+      DISPLAY: ${DISPLAY:-}
       XAUTHORITY: /tmp/host.xauthority
     volumes:
       - type: bind
-        source: ${XAUTHORITY:?XAUTHORITY must point to the host XWayland authority file}
+        source: ${XAUTHORITY:-/dev/null}
         target: /tmp/host.xauthority
         read_only: true
       - type: bind
@@ -29,14 +34,14 @@ services:
     working_dir: /workspace
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
-      DISPLAY: ${DISPLAY:?DISPLAY must be set}
+      DISPLAY: ${DISPLAY:-}
       XAUTHORITY: /tmp/host.xauthority
       # Playback and RViz need no GPU compute, and importing the package pulls in JAX.
       JAX_PLATFORMS: cpu
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
     volumes:
       - type: bind
-        source: ${XAUTHORITY:?XAUTHORITY must point to the host XWayland authority file}
+        source: ${XAUTHORITY:-/dev/null}
         target: /tmp/host.xauthority
         read_only: true
       - type: bind

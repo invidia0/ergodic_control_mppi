@@ -94,6 +94,19 @@ runners must refuse to replace outputs unless `--overwrite` is supplied.
 Optuna is optional and imported only by BO code. Literature baselines reuse
 the package dynamics equations.
 
+## Working conventions
+
+- Report progress on in-progress task work as it happens, not only at the end,
+  so the user can see what is currently being worked on.
+- Audit and report which experiments/scripts are being run — where (local vs.
+  remote box), with what config, and to what output path — so the user always
+  knows what is currently running or was just run.
+- Keep `README.md` synchronized with the actual, current repository state.
+  Never leave references to past/removed changes (e.g. "this was removed
+  for..."); `README.md` must always represent the present factual state of
+  the repo. Use the `.agents/readme-auditor` subagent to check/update it
+  after structural changes.
+
 ## Supported commands
 
 Run from the repository root:

@@ -158,4 +158,4 @@ measures whether it persists and does not introduce a speculative replay model.
 
 The preregistered successor is `scripts/run_pillar_campaign.sh`. It selects maps from
 geometry before controller execution and writes the resulting audit to
-`results/uav/pillar/report.md`.
+`results/archive/2026-08-05/pillar_45/pillar_report.md`.

@@ -2,12 +2,18 @@
 
 Rendered from the recorded arrays rather than screenshotted from RViz, so it is
 reproducible headlessly and versioned with the run it depicts. The camera looks from a
-long side of the workspace at a high elevation -- close to a plan view but oblique enough
-that obstacle height and flight altitude read as three-dimensional.
+long side of the workspace obliquely down onto a corner of the workspace, high enough
+that the path stays visible between the pillars and oblique enough that obstacle height and
+flight altitude read as three-dimensional.
 
-Obstacle footprints come from the *raw* occupancy, never the inflated planning grid.
-Recorded arrays contain only the planar slice, so ``pillar_height`` is a visualization
-extrusion capped at the target-density plane, not a recovered physical height.
+Obstacle footprints come from the *raw* occupancy, never the inflated planning grid. The
+pillars stand *on* the target-density plane and rise above it, which is the geometry the
+vehicle actually flies: it holds a fixed altitude inside a field of 2-3 m obstacles, so it
+threads between them rather than passing over them.
+
+Their drawn height is the shortest pillar the manifest guarantees, not a recovered one --
+the archived occupancy is a single planar slice, so the individual heights are not in the
+data. Every pillar really is at least that tall; none is drawn taller than the map allows.
 """
 
 from pathlib import Path
@@ -16,10 +22,14 @@ import numpy as np
 
 from ergodic_control_mppi.plotting import style
 
-# Looking along -y from a long side, steeply down. 90 would be a plan view with no height
-# cue at all; 60 keeps the pillars readable as volumes.
-DEFAULT_ELEVATION = 60.0
-DEFAULT_AZIMUTH = -90.0
+# Obliquely down onto a corner. 90 elevation would be a plan view with no height cue at
+# all; 45 keeps the pillars readable as volumes without the near ones hiding the path.
+#
+# The azimuth is deliberately off the -90 axis: looking straight down -y maps both y and z
+# to pure vertical screen motion, so mplot3d stacks their ticks in one corner and drops the
+# y label entirely. -60 separates the two axes into their own screen directions.
+DEFAULT_ELEVATION = 45.0
+DEFAULT_AZIMUTH = -60.0
 
 
 def _cell_centres(occupancy: np.ndarray, origin, resolution: float) -> np.ndarray:
@@ -33,8 +43,8 @@ def _cell_centres(occupancy: np.ndarray, origin, resolution: float) -> np.ndarra
     )
 
 
-def _draw_pillars(axes, centres: np.ndarray, resolution: float, height: float) -> None:
-    """Draw each occupied cell as an extruded box of the given height."""
+def _draw_pillars(axes, centres: np.ndarray, resolution: float, base: float, top: float) -> None:
+    """Draw each occupied cell as a box standing from ``base`` up to ``top``."""
     half = 0.5 * resolution
     for x, y in centres:
         corners = np.array(
@@ -46,15 +56,34 @@ def _draw_pillars(axes, centres: np.ndarray, resolution: float, height: float) -
             axes.plot_surface(
                 np.array([[first[0], second[0]], [first[0], second[0]]]),
                 np.array([[first[1], second[1]], [first[1], second[1]]]),
-                np.array([[0.0, 0.0], [height, height]]),
+                np.array([[base, base], [top, top]]),
                 color=style.NEUTRAL, alpha=0.55, linewidth=0, shade=True,
             )
         axes.plot_surface(
             np.array([[corners[0, 0], corners[1, 0]], [corners[3, 0], corners[2, 0]]]),
             np.array([[corners[0, 1], corners[1, 1]], [corners[3, 1], corners[2, 1]]]),
-            np.full((2, 2), height),
+            np.full((2, 2), top),
             color=style.NEUTRAL, alpha=0.8, linewidth=0, shade=True,
         )
+
+
+def _pillar_height(run_directory: Path, fallback: float = 2.0) -> float:
+    """Shortest pillar the manifest guarantees, so the drawing cannot overstate the map.
+
+    ``map_parameters.pillar_height_m`` is the generator's ``[min, max]`` range. Every
+    pillar is at least the minimum, so drawing them all at that height is true of the
+    whole field; the archived occupancy is a planar slice, so the individual heights that
+    would let each be drawn exactly are not recoverable.
+    """
+    import json
+
+    manifest = run_directory / "manifest.json"
+    if not manifest.exists():
+        return fallback
+    heights = json.loads(manifest.read_text(encoding="utf-8")).get(
+        "map_parameters", {}
+    ).get("pillar_height_m")
+    return float(heights[0]) if heights else fallback
 
 
 def snapshot(
@@ -64,8 +93,8 @@ def snapshot(
     elevation: float = DEFAULT_ELEVATION,
     azimuth: float = DEFAULT_AZIMUTH,
     altitude: float = 0.75,
-    pillar_height: float = 0.04,
-    z_exaggeration: float = 1.0,
+    pillar_height: float | None = None,
+    z_exaggeration: float = 3.0,
     rollout_step: int | None = None,
     max_rollouts: int = 60,
     size: str = "double",
@@ -77,11 +106,16 @@ def snapshot(
             too when present, for the rollout overlay.
         output: Image path to write.
         elevation: Camera elevation in degrees; 90 is straight down.
-        azimuth: Camera azimuth in degrees; -90 looks along -y from a long side.
-        altitude: Flight altitude, for the path's z.
-        pillar_height: Schematic height used to extrude the exact planar footprints.
-        z_exaggeration: Vertical stretch of the rendered box only; 1.0 already
-            exaggerates z relative to the 40 m span so pillars stay legible.
+        azimuth: Camera azimuth in degrees; keep it off -90, which degenerates y and z
+            onto the same screen direction.
+        altitude: Flight altitude, for the path's z. Also the plane the pillars stand on,
+            so the vehicle reads as threading between them rather than flying over them.
+        pillar_height: Height above ``altitude`` to extrude the exact planar footprints.
+            Defaults to the shortest pillar the run's manifest guarantees.
+        z_exaggeration: Vertical exaggeration factor of the rendered box, literally: at
+            3.0 a metre of height draws three times as long as a metre of ground. Needed
+            because at true scale a 2 m pillar over a 40 m span vanishes. State it in the
+            caption.
         rollout_step: Which recorded snapshot to draw rollouts from; ``None`` picks the
             middle one. Ignored when no ``figure_data.npz`` exists.
         max_rollouts: How many sampled rollouts to draw.
@@ -107,8 +141,14 @@ def snapshot(
         figure = plt.figure(figsize=style.FIGSIZES[size])
         axes = figure.add_subplot(111, projection="3d")
 
+        # Pillars stand on the target-density plane the vehicle flies in, rising above it.
+        # Drawn from z=0 they would sit under the path and the vehicle would read as
+        # flying over the field instead of avoiding it.
+        top = altitude + (
+            _pillar_height(run_directory) if pillar_height is None else pillar_height
+        )
         _draw_pillars(axes, _cell_centres(occupancy, origin, resolution), resolution,
-                      pillar_height)
+                      altitude, top)
 
         # Flown path, coloured by time so the tour order is readable.
         points = np.column_stack([path, np.full(path.shape[0], altitude)])
@@ -126,32 +166,480 @@ def snapshot(
 
         _draw_modes(axes, run_directory, altitude)
 
-        x_limits = (origin[0], origin[0] + occupancy.shape[1] * resolution)
-        y_limits = (origin[1], origin[1] + occupancy.shape[0] * resolution)
-        axes.set_xlim(*x_limits)
-        axes.set_ylim(*y_limits)
-        axes.set_zlim(0.0, max(pillar_height, altitude) * 1.1)
-        # True metric proportions; without this the long axis is squashed to a cube and
-        # the workspace reads as square when it is 2:1.
-        # x:y is true metric proportion (2:1 here) so the workspace is not read as
-        # square. z is deliberately exaggerated -- at true scale a 2.5 m pillar over a 40 m
-        # span is 6% of the width and vanishes. State the factor in the caption.
-        span = x_limits[1] - x_limits[0]
-        axes.set_box_aspect(
-            (span, y_limits[1] - y_limits[0], span * z_exaggeration / 8.0)
-        )
-        axes.view_init(elev=elevation, azim=azimuth)
-        axes.set_xlabel("x [m]", labelpad=2)
-        axes.set_ylabel("y [m]", labelpad=2)
-        axes.set_zlabel("z [m]", labelpad=-8)
-        # paper_style turns on minor ticks, which crowd unreadably in a projected 3D axis.
-        axes.set_zticks([0.0, altitude])
-        for axis in (axes.xaxis, axes.yaxis, axes.zaxis):
-            axis.set_minor_locator(plt.NullLocator())
-            axis.pane.set_alpha(0.0)
-        axes.tick_params(axis="z", pad=-3)
-        axes.grid(False)
+        _configure_axes(axes, occupancy, origin, resolution, altitude, top,
+                        elevation, azimuth, z_exaggeration)
         return style.save(figure, output)
+
+
+def _configure_axes(axes, occupancy, origin, resolution, altitude, top,
+                    elevation, azimuth, z_exaggeration, bare: bool = False) -> None:
+    """Apply the shared camera, box aspect, limits and label workarounds."""
+    import matplotlib.pyplot as plt
+
+    x_limits = (origin[0], origin[0] + occupancy.shape[1] * resolution)
+    y_limits = (origin[1], origin[1] + occupancy.shape[0] * resolution)
+    axes.set_xlim(*x_limits)
+    axes.set_ylim(*y_limits)
+    # Start at the flight plane, not at 0: nothing is drawn below it, and the empty
+    # band cost a third of the axis height and put a third z tick right on top of the
+    # y ticks, which share that corner of the projection.
+    axes.set_zlim(altitude, top)
+    # x:y is true metric proportion (2:1 here) so the workspace is not read as square.
+    # z is deliberately exaggerated -- at true scale a 2 m pillar over a 40 m span is
+    # 5% of the width and vanishes.
+    #
+    # Because x is one box unit per metre, making the z extent `z_exaggeration` box
+    # units per metre of drawn height makes `z_exaggeration` the vertical exaggeration
+    # factor itself, which is the number the caption has to state.
+    span = x_limits[1] - x_limits[0]
+    axes.set_box_aspect(
+        (span, y_limits[1] - y_limits[0], (top - altitude) * z_exaggeration)
+    )
+    axes.view_init(elev=elevation, azim=azimuth)
+    # Fill the canvas: the default 3D axes box leaves half the figure empty at this
+    # box aspect, and it fixes where the two manual axis labels below have to go.
+    #
+    # Bare renders get the whole canvas. The 14% reserved on the right is for the two
+    # manual y/z labels, which `_strip_axes` removes -- and the crop afterwards is a pixel
+    # operation, so every fraction of the canvas the scene does not occupy is resolution
+    # thrown away. At the old (0.86, 0.96) box the cropped scene came out near 750 px from
+    # a 2070 px canvas, which is where the pixelated look came from.
+    # Inset rather than filling the canvas, for the same reason: mplot3d happily
+    # draws outside its own axes box, so the slack is what keeps the scene whole.
+    # `_crop_transparent` reclaims whatever is unused.
+    axes.set_position((0.06, 0.06, 0.88, 0.88) if bare else (0.0, 0.02, 0.86, 0.96))
+    axes.set_xlabel("x [m]", labelpad=14)
+    # mplot3d reports these two labels as visible and positioned, then draws
+    # neither, at any labelpad or axes position -- only the x label survives this
+    # projection. Place them on the figure instead, beside the tick columns they
+    # belong to. Positions are tied to the default camera; a caller overriding
+    # elevation or azimuth should expect to move them.
+    axes.set_ylabel("")
+    axes.set_zlabel("")
+    # Axes coordinates, not figure ones: paper_style saves with a tight bounding
+    # box, so figure-fraction text placed past the content just grows the canvas.
+    axes.text2D(1.02, -0.02, "y [m]", transform=axes.transAxes,
+                ha="center", va="center")
+    axes.text2D(1.00, 0.52, "z [m]", transform=axes.transAxes,
+                ha="center", va="center", rotation=90)
+    # paper_style turns on minor ticks, which crowd unreadably in a projected 3D axis.
+    # The flight/density plane and the guaranteed pillar top: the two heights a reader
+    # needs to see that the vehicle passes between the obstacles rather than over them.
+    axes.set_zticks([altitude, top])
+    for axis in (axes.xaxis, axes.yaxis, axes.zaxis):
+        axis.set_minor_locator(plt.NullLocator())
+        axis.pane.set_alpha(0.0)
+    axes.tick_params(axis="z", pad=-2)
+    axes.grid(False)
+
+
+def _pillar_cloud(centres: np.ndarray, resolution: float, base: float, top: float,
+                  density: int = 3):
+    """Fill each occupied cell with a column of points, as the simulator's cloud is.
+
+    The archived occupancy is a planar slice, so the columns are synthesised at the
+    guaranteed height rather than recovered -- the same caveat the extruded boxes carry.
+
+    ``density`` is how many samples span one cell pitch in each of the three directions.
+    At 1 the cloud is one column of beads per occupied cell, which is what made the
+    columns read as stacks of dots rather than surfaces; at 3 each cell contributes a
+    3x3 lattice of columns at a third of the pitch, so neighbouring markers overlap and
+    close up. Cost is cubic in ``density`` -- 25 pillars at 3 is ~200k points, which
+    mplot3d still depth-sorts in about a second, and 4 is the practical ceiling.
+    """
+    step = resolution / max(density, 1)
+    # Sub-cell offsets centred on the cell, so the lattice stays inside the footprint the
+    # occupancy actually claims and the pillars do not fatten as the density rises.
+    offsets = (np.arange(density) - 0.5 * (density - 1)) * step
+    grid_x, grid_y = np.meshgrid(offsets, offsets)
+    planar = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+    levels = np.arange(base, top + 0.5 * step, step)
+
+    spots = (centres[:, None, :] + planar[None, :, :]).reshape(-1, 2)
+    x = np.repeat(spots[:, 0], levels.size)
+    y = np.repeat(spots[:, 1], levels.size)
+    z = np.tile(levels, spots.shape[0])
+    return x, y, z
+
+
+def _draw_quadrotor(axes, centre, heading: float, span: float, colour: str,
+                    linewidth: float) -> None:
+    """A quadrotor glyph: four arms on the diagonals, four rotor discs, a body hub.
+
+    Drawn rather than meshed. The simulator's airframe ships as a 6.4 MB Ogre binary that
+    matplotlib cannot read, and at this scale the silhouette is all that survives anyway:
+    the real hummingbird is ~0.55 m tip to tip across a 40 m workspace, so any faithful
+    render is sub-pixel. ``span`` is therefore an exaggeration like ``z_exaggeration`` and
+    has to be stated in the caption.
+
+    Called last and with ``computed_zorder=False`` in force, so the glyph sits above every
+    pillar instead of being buried by whichever column happens to be nearer the camera.
+    """
+    x, y, z = centre
+    arm = 0.5 * span
+    # Diagonals, i.e. the "X" airframe, offset by the travel heading so the glyph points
+    # along the path rather than along the world axes.
+    angles = heading + np.pi / 4 + np.arange(4) * (np.pi / 2)
+    hubs = np.column_stack([x + arm * np.cos(angles), y + arm * np.sin(angles)])
+    for hub in hubs:
+        axes.plot([x, hub[0]], [y, hub[1]], [z, z],
+                  color=colour, linewidth=linewidth, solid_capstyle="round", zorder=5)
+
+    # Rotor discs as filled polygons in the flight plane. A scatter marker would keep a
+    # fixed pixel size and drift out of proportion with the arms as the figure is scaled.
+    circle = np.linspace(0.0, 2.0 * np.pi, 32)
+    radius = 0.30 * span
+    for hub in hubs:
+        axes.plot(hub[0] + radius * np.cos(circle), hub[1] + radius * np.sin(circle),
+                  np.full(circle.size, z), color=colour, linewidth=0.8 * linewidth,
+                  zorder=5)
+    axes.scatter(hubs[:, 0], hubs[:, 1], np.full(4, z), s=(2.2 * linewidth) ** 2,
+                 color=colour, depthshade=False, linewidths=0, zorder=6)
+    axes.scatter([x], [y], [z], s=(4.5 * linewidth) ** 2, color=colour,
+                 depthshade=False, linewidths=0, zorder=6)
+
+
+def trajectory_snapshot(
+    positions: np.ndarray,
+    map_source: Path,
+    output: Path,
+    *,
+    title: str | None = None,
+    elevation: float = DEFAULT_ELEVATION,
+    azimuth: float = DEFAULT_AZIMUTH,
+    altitude: float = 0.75,
+    pillar_height: float | None = None,
+    z_exaggeration: float = 3.0,
+    density_levels: int = 12,
+    point_size: float = 1.0,
+    pillar_cmap: str = "turbo_r",
+    density_cmap: str = "Blues",
+    pillar_alpha: float = 1.0,
+    pillar_style: str = "points",
+    trail_size: float = 1.6,
+    vehicle_span: float = 1.5,
+    trail_colour: str = "#4a4f59",
+    vehicle_colour: str = "#111111",
+    cloud_density: int = 3,
+    dpi: int = 600,
+    flight_fraction: float = 0.5,
+    bare: bool = False,
+    size: str = "double",
+    gmm=None,
+):
+    """Render an offline trajectory over the pillar cloud and the target density.
+
+    Unlike ``snapshot`` this takes a bare path array, so it draws runs the sweep produced
+    but never archived. Pillars are drawn as a height-coloured point cloud rather than
+    extruded boxes, matching how the field appears in the simulator; the target density is
+    a filled contour on the plane the vehicle flies in; the trail is one solid colour, so
+    it shows where the vehicle went rather than encoding time it cannot also show.
+
+    Args:
+        positions: Executed planar path, shape ``(N, 2)``.
+        map_source: Run directory holding the ``arrays.npz`` whose map this path was run on.
+        output: Image path to write.
+        title: Optional heading, e.g. the arm name.
+        elevation: Camera elevation in degrees.
+        azimuth: Camera azimuth in degrees. -90 puts the long side of the workspace
+            parallel to the bottom edge; it degenerates y and z onto one screen direction,
+            which only matters when ``bare`` is False and the ticks have to be readable.
+        altitude: Target-density plane, and the base the pillars stand on.
+        pillar_height: Height above ``altitude``; defaults to the manifest's guarantee.
+        z_exaggeration: Vertical exaggeration factor; state it in the caption.
+        density_levels: Filled contour levels for the target density.
+        point_size: Marker area for the pillar cloud points.
+        trail_size: Marker area for the trail points; large enough that they close into
+            a continuous line at the sampled spacing.
+        vehicle_span: Tip-to-tip width of the drawn quadrotor, in metres. An exaggeration
+            like ``z_exaggeration``: the real airframe is ~0.55 m across a 40 m workspace
+            and would be sub-pixel. State it in the caption.
+        trail_colour: Trail ink. Pure black buried the path in the pillar cloud; a slate
+            grey separates from the ``turbo_r`` columns without going pale.
+        vehicle_colour: Quadrotor glyph ink. Black reads against both the pale density
+            plane and the pillar cloud, which no single hue in the ``turbo_r`` ramp does.
+        cloud_density: Samples per cell pitch in each direction for the pillar cloud. 1 is
+            one bead column per occupied cell; 3 closes the columns into surfaces.
+        dpi: Raster resolution. High by default because a bare render is cropped to the
+            scene afterwards, so the saved pixels are only the fraction the scene occupies.
+        flight_fraction: Where the trail is drawn between the density plane and the
+            pillar tops. Presentational: the deployment is planar, so the executed path
+            has no height of its own, and drawing it mid-column is what makes the vehicle
+            read as flying *between* the pillars rather than skimming the floor. State it
+            in the caption; it is not a flown altitude.
+        bare: Strip every tick, label and axis line, leaving only the scene.
+        size: Key into ``style.FIGSIZES``.
+        gmm: Target mixture to contour. Pass it when the map directory carries no
+            sibling profile YAML, which is the case for the campaign's maps.
+
+    Returns:
+        The path written.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+
+    arrays = np.load(map_source / "arrays.npz", allow_pickle=False)
+    occupancy = np.asarray(arrays["occupancy"]).astype(bool)
+    origin = tuple(float(v) for v in np.asarray(arrays["grid_origin"]))
+    resolution = float(arrays["grid_resolution"])
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
+    top = altitude + (
+        _pillar_height(map_source) if pillar_height is None else pillar_height
+    )
+
+    with plt.rc_context(style.paper_style(size)):
+        # mplot3d fits the projected box to the *shorter* side of the axes, so on the
+        # paper's 6.9x2.6 canvas the scene was pinned by the 2.6 in height and left three
+        # quarters of the width empty. A bare render is cropped to the scene and carries no
+        # type, so its canvas is free to be shaped for pixels rather than for the page --
+        # the figure it lands in is sized by LaTeX regardless. Labelled renders keep the
+        # paper size, because there the type has to come out at its stated point size.
+        # Wider than the page: the bare render is cropped to its content afterwards,
+        # so the canvas only has to be large enough that no part of the projection
+        # falls off it. At an oblique azimuth the rotated floor corners reach well
+        # past the axes box and were being clipped by the figure edge before the
+        # alpha crop ever ran, which is what cut the near edge of the field.
+        canvas = (8.6, 6.4) if bare else style.FIGSIZES[size]
+        figure = plt.figure(figsize=canvas)
+        # computed_zorder=False: by default mplot3d overrides call order with each artist's
+        # centroid depth, which buries the vehicle dot inside the cloud whatever order it
+        # is added in. Off, the three layers stack as written. Points *within* a collection
+        # are still depth-sorted, which is what the merged scatter below relies on.
+        axes = figure.add_subplot(111, projection="3d", computed_zorder=False)
+
+        # Target density first, on the floor, so the cloud and trail draw over it.
+        density, extent = _target_density(map_source, occupancy, origin, resolution, gmm)
+        if density is not None:
+            axes.contourf(
+                *extent, density, levels=density_levels, zdir="z", offset=altitude,
+                cmap=density_cmap,
+            )
+
+        # Height-coloured point cloud, as the simulator renders the pillar field. A rainbow
+        # ramp is a poor quantitative colormap but this axis is a depth cue, not a
+        # measurement, and matching the simulator is what makes the two views comparable.
+        colour_map = _resolve_cmap(pillar_cmap)
+        centres = _cell_centres(occupancy, origin, resolution)
+        if pillar_style == "cylinders":
+            # Surfaces, not points. mplot3d painter-sorts whole artists, so the trail is
+            # drawn separately and *segmented*: one artist per short run, each sorted on its
+            # own centroid, which restores most of the interleaving the merged scatter gives
+            # for free. It is an approximation -- a segment straddling a pillar still lands
+            # wholly in front or behind -- so this style is offered as an alternative look,
+            # not as a replacement for the point cloud.
+            _draw_cylinders(axes, centres, resolution, altitude, top, colour_map,
+                            pillar_alpha)
+            _draw_segmented_trail(axes, positions, altitude, top, flight_fraction,
+                                  trail_colour, trail_size)
+            _draw_quadrotor(axes, positions[-1], _heading(positions), vehicle_span,
+                            vehicle_colour, 1.1)
+            _configure_axes(axes, map_x, map_y, altitude, top, z_exaggeration, title,
+                            elevation, azimuth, bare=bare)
+            written = save(figure, output, dpi=dpi)
+            plt.close(figure)
+            return _crop_transparent(written) if bare else written
+
+        x, y, z = _pillar_cloud(
+            centres, resolution, altitude, top, density=cloud_density,
+        )
+
+        # Trail and cloud go in as one scatter. mplot3d cannot occlude one artist by
+        # another per-fragment -- whichever is drawn second wins everywhere they overlap,
+        # so a separate trail either floats over the whole field or vanishes behind all of
+        # it. Within a single collection the points *are* depth-sorted, so merging them is
+        # what makes the path pass between the columns instead of in front of or behind
+        # them. The cost is that the trail is a dense run of dots rather than a stroked
+        # line; at the sampled spacing it closes up into one.
+        flight = altitude + flight_fraction * (top - altitude)
+        colours = np.vstack(
+            [
+                colour_map((z - altitude) / max(top - altitude, 1e-9))
+                * np.array([1.0, 1.0, 1.0, pillar_alpha]),
+                np.tile(to_rgba(trail_colour), (positions.shape[0], 1)),
+            ]
+        )
+        axes.scatter(
+            np.concatenate([x, positions[:, 0]]),
+            np.concatenate([y, positions[:, 1]]),
+            np.concatenate([z, np.full(positions.shape[0], flight)]),
+            c=colours,
+            s=np.concatenate(
+                [np.full(x.size, point_size), np.full(positions.shape[0], trail_size)]
+            ),
+            linewidths=0, depthshade=False,
+        )
+
+        # Last, so no column can hide it. Heading from the final leg of the path, so the
+        # airframe points along travel; a stationary end state falls back to +x.
+        step = positions[-1] - positions[max(positions.shape[0] - 20, 0)]
+        heading = float(np.arctan2(step[1], step[0])) if np.hypot(*step) > 1e-6 else 0.0
+        _draw_quadrotor(axes, (positions[-1, 0], positions[-1, 1], flight), heading,
+                        vehicle_span, vehicle_colour, linewidth=1.1)
+
+        _configure_axes(axes, occupancy, origin, resolution, altitude, top,
+                        elevation, azimuth, z_exaggeration, bare=bare)
+        if bare:
+            _strip_axes(axes)
+        if title:
+            axes.set_title(title, pad=0.0)
+        written = style.save(figure, output, dpi=dpi)
+        return _crop_transparent(written) if bare else written
+
+
+def _resolve_cmap(name: str):
+    """Look a colormap up in matplotlib, falling back to the Scientific Colour Maps.
+
+    Crameri's maps (batlow, acton, oslo, devon, ...) are perceptually uniform and
+    colour-vision safe, which the default rainbow ramp is not. They ship in `cmcrameri`
+    under a ``cmc.`` prefix; accept the bare name too so ``--pillar-cmap batlow`` works.
+    """
+    import matplotlib.pyplot as plt
+
+    try:
+        return plt.get_cmap(name)
+    except (ValueError, KeyError):
+        pass
+    from cmcrameri import cm as crameri
+
+    return getattr(crameri, name.removeprefix("cmc."))
+
+
+def _heading(positions: np.ndarray) -> float:
+    """Travel direction from the tail of the path."""
+    tail = positions[-min(20, len(positions)):]
+    delta = tail[-1] - tail[0]
+    return float(np.arctan2(delta[1], delta[0]))
+
+
+def _draw_cylinders(axes, centres, resolution, base, top, colour_map, alpha):
+    """One smooth cylinder per connected pillar, instead of a column of point markers.
+
+    The occupancy grid is square cells, so the columns it produces are square; fitting a
+    circle to each connected component recovers the geometry the map generator actually
+    sampled. Height-coloured in bands so the ramp still reads as a depth cue.
+    """
+    from scipy import ndimage
+
+    if centres.size == 0:
+        return
+    pitch = resolution
+    keys = np.round(centres / pitch).astype(int)
+    grid = np.zeros(keys.max(axis=0) - keys.min(axis=0) + 3, dtype=bool)
+    offset = keys.min(axis=0) - 1
+    grid[tuple((keys - offset).T)] = True
+    labels, count = ndimage.label(grid)
+    theta = np.linspace(0.0, 2.0 * np.pi, 28)
+    levels = np.linspace(base, top, 14)
+    for index in range(1, count + 1):
+        cells = np.argwhere(labels == index) + offset
+        middle = cells.mean(axis=0) * pitch
+        radius = max(np.max(np.linalg.norm(cells * pitch - middle, axis=1)), pitch) \
+            + 0.5 * pitch
+        circle_x = middle[0] + radius * np.cos(theta)
+        circle_y = middle[1] + radius * np.sin(theta)
+        mesh_x = np.tile(circle_x, (levels.size, 1))
+        mesh_y = np.tile(circle_y, (levels.size, 1))
+        mesh_z = np.tile(levels[:, None], (1, theta.size))
+        shade = colour_map((levels - base) / max(top - base, 1e-9))
+        axes.plot_surface(mesh_x, mesh_y, mesh_z, facecolors=np.tile(
+            shade[:, None, :], (1, theta.size, 1)), shade=False, linewidth=0,
+            antialiased=True, alpha=alpha, zorder=3)
+
+
+def _draw_segmented_trail(axes, positions, base, top, flight_fraction, colour, size):
+    """The flown path as many short lines, so each sorts against the pillars separately."""
+    height = base + flight_fraction * (top - base)
+    chunk = max(len(positions) // 220, 2)
+    for start in range(0, len(positions) - 1, chunk):
+        piece = positions[start:start + chunk + 1]
+        axes.plot(piece[:, 0], piece[:, 1], np.full(len(piece), height),
+                  color=colour, linewidth=size * 0.62, solid_capstyle="round", zorder=4)
+
+
+def _crop_transparent(path: Path) -> Path:
+    """Trim the fully transparent border off a saved figure.
+
+    A bare 3D axis fills the canvas with an invisible projection box, so matplotlib's tight
+    bounding box has nothing to crop against and leaves the scene floating in a wide
+    margin. With the panels transparent, the alpha channel gives the true extent.
+
+    Raster only, and silently so: this is a pixel operation, and a vector output has no
+    alpha channel to measure. PDF and SVG are returned untouched rather than handed to PIL,
+    which would raise. A point-cloud scene of this size should be a high-DPI PNG anyway --
+    as vector it carries a quarter of a million individual point paths.
+    """
+    if path.suffix.lower() not in {".png", ".tif", ".tiff", ".webp"}:
+        return path
+    from PIL import Image
+
+    with Image.open(path) as image:
+        rgba = image.convert("RGBA")
+        box = rgba.getchannel("A").getbbox()
+        if box:
+            rgba.crop(box).save(path)
+    return path
+
+
+def _strip_axes(axes) -> None:
+    """Leave only the scene: no ticks, labels, axis lines or panes."""
+    for axis in (axes.xaxis, axes.yaxis, axes.zaxis):
+        axis.set_ticks([])
+        axis.line.set_color((1.0, 1.0, 1.0, 0.0))
+        axis.pane.set_visible(False)
+    axes.set_xlabel("")
+    axes.set_ylabel("")
+    axes.set_zlabel("")
+    # _configure_axes places these two by hand, as mplot3d refuses to draw them itself.
+    for text in list(axes.texts):
+        text.remove()
+    axes.set_axis_off()
+    # Reclaim the margin _configure_axes reserved for the labels that just went away, and
+    # drop the panel fill so the figure drops cleanly onto a page of any colour.
+    axes.set_position((0.0, 0.0, 1.0, 1.0))
+    axes.patch.set_alpha(0.0)
+    axes.get_figure().patch.set_alpha(0.0)
+
+
+def _target_density(map_source: Path, occupancy, origin, resolution, gmm=None):
+    """Evaluate the mixture on the workspace grid; ``(None, None)`` if unavailable.
+
+    ``gmm`` short-circuits the lookup. The disk path resolves the manifest's ``profile``
+    to a sibling YAML, which only exists for runs archived next to their config -- the
+    campaign's map directories hold arrays and a manifest and nothing else, so a caller
+    that already has the config must hand it over or the density silently does not draw.
+    """
+    if gmm is None:
+        import json
+
+        manifest = map_source / "manifest.json"
+        if not manifest.exists():
+            return None, None
+        profile = json.loads(manifest.read_text(encoding="utf-8")).get("profile")
+        if not profile:
+            return None, None
+        from ergodic_control_mppi.config import load_config
+
+        candidate = map_source.parent / f"{profile}.yaml"
+        if not candidate.exists():
+            return None, None
+        gmm = load_config(candidate).controller.gmm
+    means = np.asarray(gmm.means)
+    inverses = np.asarray(gmm.covariance_inverse)
+    weights = np.exp(np.asarray(gmm.log_weights))
+    xs = np.linspace(origin[0], origin[0] + occupancy.shape[1] * resolution, 200)
+    ys = np.linspace(origin[1], origin[1] + occupancy.shape[0] * resolution, 120)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+    density = np.zeros(points.shape[0])
+    for weight, mean, inverse in zip(weights, means, inverses):
+        offset = points - mean
+        density += weight * np.exp(
+            -0.5 * np.einsum("ni,ij,nj->n", offset, inverse, offset)
+        ) * np.sqrt(np.linalg.det(inverse))
+    return density.reshape(grid_x.shape), (grid_x, grid_y)
 
 
 def _overlay_rollouts(axes, figure_data: Path, altitude: float, rollout_step, count: int):
@@ -221,8 +709,9 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--elevation", type=float, default=DEFAULT_ELEVATION)
     parser.add_argument("--azimuth", type=float, default=DEFAULT_AZIMUTH)
-    parser.add_argument("--pillar-height", type=float, default=0.04)
-    parser.add_argument("--z-exaggeration", type=float, default=1.0)
+    parser.add_argument("--pillar-height", type=float, default=None,
+                        help="Height above the flight plane; default is the map's minimum")
+    parser.add_argument("--z-exaggeration", type=float, default=3.0)
     parser.add_argument("--rollout-step", type=int, default=None)
     arguments = parser.parse_args()
     output = arguments.output or arguments.run_dir / "snapshot.png"

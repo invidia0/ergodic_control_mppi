@@ -25,6 +25,7 @@ setup(
         "console_scripts": [
             "density_visualizer = ergodic_control_mppi_ros.density_visualizer:main",
             "ergodic_controller = ergodic_control_mppi_ros.ergodic_controller:main",
+            "ideal_vehicle = ergodic_control_mppi_ros.ideal_vehicle:main",
             "map_adapter = ergodic_control_mppi_ros.map_adapter:main",
             "recorder = ergodic_control_mppi_ros.recorder:main",
             "safety_shield = ergodic_control_mppi_ros.safety_shield:main",

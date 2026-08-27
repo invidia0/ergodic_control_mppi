@@ -66,6 +66,8 @@ class MPPIParams:
     samples: int = field(metadata={"static": True})
     horizon: int = field(metadata={"static": True})
     memory_length: int = field(metadata={"static": True})
+    # Static: it selects the convolution shape, and at 1 the filter is skipped entirely.
+    smooth_window: int = field(metadata={"static": True})
     temperature: float
     alpha: float
     exploration: float

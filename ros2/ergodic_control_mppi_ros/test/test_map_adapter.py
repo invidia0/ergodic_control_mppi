@@ -6,7 +6,7 @@ import numpy as np
 
 from ergodic_control_mppi_ros.map_adapter import (
     build_safety_grid,
-    clip_visual_points,
+    standing_visual_points,
     to_message,
 )
 
@@ -52,11 +52,17 @@ class BuildSafetyGridTest(unittest.TestCase):
 
 
 class MessageTest(unittest.TestCase):
-    def test_visual_cloud_is_capped_without_mutating_raw_points(self):
-        points = np.array([[1.0, 2.0, -0.1], [3.0, 4.0, 2.5]], dtype=np.float32)
-        clipped = clip_visual_points(points, 0.04)
-        np.testing.assert_allclose(clipped[:, 2], [-0.1, 0.04])
-        np.testing.assert_allclose(points[:, 2], [-0.1, 2.5])
+    def test_visual_cloud_stands_on_the_plane_without_mutating_raw_points(self):
+        """Only the part above the flight plane is drawn, and the raw cloud is untouched.
+
+        The floor point must be dropped, not squashed onto the plane: flattening it is what
+        made the pillars render as disks under the vehicle instead of columns beside it.
+        """
+        points = np.array([[1.0, 2.0, -0.1], [3.0, 4.0, 2.5], [5.0, 6.0, 0.75]],
+                          dtype=np.float32)
+        standing = standing_visual_points(points, 0.75)
+        np.testing.assert_allclose(standing[:, 2], [2.5, 0.75])
+        np.testing.assert_allclose(points[:, 2], [-0.1, 2.5, 0.75])
 
     def test_occupancy_grid_encoding_and_geometry(self):
         grid = np.zeros((4, 6), dtype=bool)

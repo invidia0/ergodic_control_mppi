@@ -8,6 +8,7 @@ are measured by identical code.
 
 import hashlib
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -126,6 +127,7 @@ class Recorder(Node):
         self.temperatures: list[float] = []
         self.temperature_at_cap: list[bool] = []
         self.guard_states: list[str] = []
+        self.controller_state_bits: list[np.ndarray] = []
         self.guard_period = 0.01
         self.compile_seconds = float("nan")
         self.device = "unknown"
@@ -199,6 +201,10 @@ class Recorder(Node):
                     self.temperature_at_cap.append(
                         values["temperature_at_cap"].lower() == "true"
                     )
+                if "state_trace_u32" in values:
+                    trace = np.fromstring(values["state_trace_u32"], dtype=np.uint32, sep=",")
+                    if trace.size == 13:
+                        self.controller_state_bits.append(trace)
                 self.device = status.hardware_id or self.device
             elif status.name == "safety_shield" and "guard_state" in values:
                 # Only from the first control step onward. The guard necessarily holds
@@ -308,6 +314,9 @@ class Recorder(Node):
             ess_fraction=np.asarray(self.ess_fractions),
             temperature=np.asarray(self.temperatures),
             temperature_at_cap=np.asarray(self.temperature_at_cap),
+            controller_state_bits=np.asarray(
+                self.controller_state_bits, dtype=np.uint32
+            ).reshape(-1, 13),
             guard_state=np.asarray(self.guard_states),
         )
         radius = inflation_radius(
@@ -361,6 +370,7 @@ class Recorder(Node):
             "start_xy": list(self.start_xy),
             "device": self.device,
             "jax_version": jax.__version__,
+            "xla_flags": os.environ.get("XLA_FLAGS", ""),
             "git_sha": row["git_sha"],
             "config_hash": row["config_hash"],
         }
@@ -422,8 +432,6 @@ def _seconds(stamp) -> float:
 
 
 def _ros_distro() -> str:
-    import os
-
     return os.environ.get("ROS_DISTRO", "unknown")
 
 

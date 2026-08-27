@@ -21,7 +21,11 @@ from launch.conditions import IfCondition, LaunchConfigurationEquals, UnlessCond
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -76,6 +80,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("rviz", default_value="false"),
         DeclareLaunchArgument("bag", default_value="false"),
         DeclareLaunchArgument("qualify_only", default_value="false"),
+        # "so3" is the deployment. "ideal" swaps in a perfect tracker to measure what
+        # the airframe costs; it is a diagnostic, never a source of a timing claim.
+        DeclareLaunchArgument("vehicle", default_value="so3",
+                              choices=["so3", "ideal"]),
         # Map. Frozen from the 511-520 arming sweep, re-derived after the float32 resolution
         # fix. Only 514 and 518 arm; the other eight bury a mode inside an inflated obstacle
         # (520 also blocks the start cell). 518 is preferred over 514 because it carries 153
@@ -112,7 +120,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("reaction_time", default_value="0.10"),
         DeclareLaunchArgument("deadline_ms", default_value="16.0"),
         DeclareLaunchArgument("preflight_steps", default_value="0"),
-        DeclareLaunchArgument("visual_height", default_value="0.04"),
+        DeclareLaunchArgument("predicted_feedback", default_value="false"),
     ]
 
     safety_parameters = {
@@ -210,6 +218,9 @@ def generate_launch_description() -> LaunchDescription:
                 scoped=True,
                 condition=LaunchConfigurationEquals("map_source", "random_forest"),
             ),
+            # The airframe. `vehicle:=ideal` swaps the attitude loop and quadrotor for a
+            # perfect tracker, which isolates what the vehicle costs relative to the offline
+            # model; see ideal_vehicle.py. Everything else in the deployment is unchanged.
             GroupAction(
                 [
                     IncludeLaunchDescription(
@@ -223,7 +234,29 @@ def generate_launch_description() -> LaunchDescription:
                     )
                 ],
                 scoped=True,
-                condition=UnlessCondition(LaunchConfiguration("qualify_only")),
+                condition=IfCondition(
+                    PythonExpression([
+                        "'", LaunchConfiguration("qualify_only"), "' == 'false' and '",
+                        LaunchConfiguration("vehicle"), "' == 'so3'",
+                    ])
+                ),
+            ),
+            Node(
+                package="ergodic_control_mppi_ros",
+                executable="ideal_vehicle",
+                name="ideal_vehicle",
+                output="screen",
+                parameters=[{
+                    "init_x": LaunchConfiguration("start_x"),
+                    "init_y": LaunchConfiguration("start_y"),
+                    "init_z": altitude,
+                }],
+                condition=IfCondition(
+                    PythonExpression([
+                        "'", LaunchConfiguration("qualify_only"), "' == 'false' and '",
+                        LaunchConfiguration("vehicle"), "' == 'ideal'",
+                    ])
+                ),
             ),
             Node(
                 package="ergodic_control_mppi_ros",
@@ -239,7 +272,6 @@ def generate_launch_description() -> LaunchDescription:
                         "start_x": _float("start_x"),
                         "start_y": _float("start_y"),
                         **safety_parameters,
-                        "visual_height": _float("visual_height"),
                     }
                 ],
             ),
@@ -256,6 +288,9 @@ def generate_launch_description() -> LaunchDescription:
                         "deadline_ms": _float("deadline_ms"),
                         "seed": _int("seed"),
                         "preflight_steps": _int("preflight_steps"),
+                        "predicted_feedback": ParameterValue(
+                            LaunchConfiguration("predicted_feedback"), value_type=bool
+                        ),
                     }
                 ],
                 condition=UnlessCondition(LaunchConfiguration("qualify_only")),

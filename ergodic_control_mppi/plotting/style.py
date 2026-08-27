@@ -39,6 +39,19 @@ PRIMARY = "#4E79A7"
 ACCENT = "#E15759"
 NEUTRAL = "#98A4BA"
 
+TABLEAU = ["#4E79A7", "#F28E2B", "#59A14F", "#E15759",
+           "#B07AA1", "#76B7B2", "#EDC948", "#9C755F"]
+
+# The blue panel of `paper_style`, but with ticks outside and only on the axes that carry a
+# scale. The default puts minor ticks inside on all four sides, which on a filled panel reads
+# as hatching against the fill.
+OUTSIDE_TICKS = {
+    "xtick.direction": "out", "ytick.direction": "out",
+    "xtick.top": False, "ytick.right": False,
+    "xtick.minor.visible": False, "ytick.minor.visible": True,
+    "axes.titlesize": 7.5,
+}
+
 SURFACE = "#DCE2EC"  # axes.facecolor; every ramp below is validated against it
 
 
@@ -142,10 +155,7 @@ def paper_style(size: str = "column") -> dict[str, Any]:
         "legend.edgecolor": "#98A4BA",
         "legend.borderpad": 0.3,
         "legend.handlelength": 1.6,
-        "axes.prop_cycle": mpl.cycler(
-            color=["#4E79A7", "#F28E2B", "#59A14F", "#E15759",
-                   "#B07AA1", "#76B7B2", "#EDC948", "#9C755F"]
-        ),
+        "axes.prop_cycle": mpl.cycler(color=TABLEAU),
         "figure.figsize": FIGSIZES[size],
         "axes.titlesize": fonts["title"],
         "axes.titleweight": "bold",

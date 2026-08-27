@@ -214,6 +214,9 @@ def load_config(path: str | Path) -> AppConfig:
     alpha = _number(_required(mppi_raw, "alpha", "mppi"), "mppi.alpha", 0.0)
     if alpha > 1:
         raise ValueError("Config key 'mppi.alpha' must be <= 1")
+    # 1 disables the control-sequence moving average, which is the shipped behaviour; the
+    # filter exists to be ablated, not to be on by default.
+    smooth_window = _integer(mppi_raw.get("smooth_window", 1), "mppi.smooth_window", 1)
     exploration = _number(_required(mppi_raw, "exploration", "mppi"), "mppi.exploration", 0.0)
     if exploration > 1:
         raise ValueError("Config key 'mppi.exploration' must be <= 1")
@@ -370,6 +373,7 @@ def load_config(path: str | Path) -> AppConfig:
         samples=samples,
         horizon=horizon,
         memory_length=memory_length,
+        smooth_window=smooth_window,
         temperature=temperature,
         alpha=alpha,
         exploration=exploration,

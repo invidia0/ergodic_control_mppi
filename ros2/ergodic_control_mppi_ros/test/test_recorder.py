@@ -87,7 +87,7 @@ class FileHashTest(unittest.TestCase):
 
 
 class DiagnosticArchiveTest(unittest.TestCase):
-    def test_ess_temperature_and_cap_are_collected(self):
+    def test_controller_diagnostics_are_collected(self):
         with tempfile.TemporaryDirectory() as directory:
             node = _recorder(Path(directory), "diagnostics", overwrite=False)
             try:
@@ -98,12 +98,14 @@ class DiagnosticArchiveTest(unittest.TestCase):
                         KeyValue(key="ess_fraction", value="0.25"),
                         KeyValue(key="temperature", value="123.0"),
                         KeyValue(key="temperature_at_cap", value="True"),
+                        KeyValue(key="state_trace_u32", value=",".join(str(i) for i in range(13))),
                     ],
                 )
                 node.on_diagnostics(DiagnosticArray(status=[status]))
                 self.assertEqual(node.ess_fractions, [0.25])
                 self.assertEqual(node.temperatures, [123.0])
                 self.assertEqual(node.temperature_at_cap, [True])
+                self.assertEqual(node.controller_state_bits[0].tolist(), list(range(13)))
             finally:
                 node.destroy_node()
                 rclpy.shutdown()
