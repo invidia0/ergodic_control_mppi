@@ -1284,11 +1284,13 @@ def load_baselines(*paths: Path) -> dict:
 # below sit a half-step darker and pass every check on that surface -- lightness band,
 # chroma floor, adjacent CVD (worst dE 13.7 deutan) and normal-vision separation (16.7).
 #
-# The dict order is the plotting order, and the checks are on adjacent pairs, so the order
-# is load-bearing: lavender must not neighbour the periwinkle (dE 1.1 for deuteranopes),
-# which is why it sits third rather than second.
+# Four steps for five keys, which is deliberate but worth knowing about: ours draws no
+# visible mark in any of the three panels -- the two violin panels plot the baselines only,
+# and in the safety panel its bar is 0% -- so SVES can take the periwinkle and leave the
+# four *visible* marks identical to STEP_COLOURS. Should ours ever post a nonzero collision
+# rate, that bar and SVES's would come out the same colour; give ours its own step then.
 VIOLIN_COLOURS = {
-    "ours": "#7FADFF", "hedac": "#5FC97A", "sves": "#C08CFF",
+    "ours": "#7FADFF", "hedac": "#5FC97A", "sves": "#7FADFF",
     "fmec": "#F0A04B", "smc": "#EC7BA8",
 }
 
