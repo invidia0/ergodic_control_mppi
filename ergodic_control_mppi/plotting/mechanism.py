@@ -26,11 +26,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import jax.numpy as jnp
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.colors import PowerNorm
+from matplotlib.ticker import MultipleLocator
 
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.mppi.stein import (
@@ -46,6 +46,7 @@ from ergodic_control_mppi.plotting.style import (
     TRAIL_CMAP,
     ACCENT,
     NEUTRAL,
+    OUTSIDE_TICKS,
     PRIMARY,
     paper_style,
     save,
@@ -55,9 +56,23 @@ from ergodic_control_mppi.plotting.style import (
 MECHANISM_OCCUPANCY_CMAP = sequential("Greys", 0.05, 0.67)
 TARGET_CMAP = sequential("Blues", 0.45, 0.95)
 TARGET_COLOR = "#356FA8"
+
+# Edge-profile fills. Each one is the colour its own field already has on the map,
+# so a strip needs no legend: occupancy is a light step off the grey ramp it is
+# drawn with, the target is the violin-family periwinkle
+# (scripts/report_figures.py:1265) that sits with the blue target contours -- bright
+# and lifted toward white, because a large filled area wants a lighter tint than a
+# line does. Red is left free to mean one thing only: the excess.
+OCCUPANCY_FILL = MECHANISM_OCCUPANCY_CMAP(0.42)
+TARGET_FILL = "#A0C4FF"
+OCCUPANCY_LABEL = "#4B5563"  # darker companion of OCCUPANCY_FILL, for text on white
 ROBOT_COLOR = "tab:red"
 FLOW_COLOR = "#A12F3B"
 RECENCY_COLOR = "#26747A"
+
+# Tick spacing [m] for a zoomed workspace crop, shared by x and y so the two axes
+# of a square crop carry the same number of labels.
+ZOOM_TICK_STEP = 2.0
 
 # Enough steps for the buffer to hold a representative mid-run trail rather than
 # the initial transient: the shipped tau_M = 10 s gives P = 1500 at dt = 0.02.
@@ -215,19 +230,29 @@ def _rho_excess(ctx, points, bandwidth: float, rotation=None) -> np.ndarray:
                        rotation=rotation)
 
 
-def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4):
-    """The executed trail, fading soft blue-grey to near-black, plus the robot."""
+def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4, flat: str | None = None):
+    """The executed trail, fading soft blue-grey to near-black, plus the robot.
+
+    ``flat`` draws the path in one solid colour instead of the recency ramp, for
+    panels that show the path as geometry only -- there the ramp's light end
+    reads as a faded line rather than as an encoding of anything.
+    """
     memory = np.asarray(ctx["memory"])
-    recency = np.asarray(ctx["recency"])
-    axis.plot(memory[:, 0], memory[:, 1], color="#20252B", alpha=0.65,
-              linewidth=linewidth + 0.7, solid_capstyle="round", zorder=zorder - 1)
-    collection = LineCollection(
-        np.stack((memory[:-1], memory[1:]), axis=1),
-        cmap=TRAIL_CMAP, linewidth=linewidth, capstyle="round", zorder=zorder,
-    )
-    collection.set_array(recency[1:])
-    collection.set_clim(0.0, 1.0)
-    axis.add_collection(collection)
+    collection = None
+    if flat is not None:
+        axis.plot(memory[:, 0], memory[:, 1], color=flat, linewidth=linewidth,
+                  solid_capstyle="round", zorder=zorder)
+    else:
+        recency = np.asarray(ctx["recency"])
+        axis.plot(memory[:, 0], memory[:, 1], color="#20252B", alpha=0.65,
+                  linewidth=linewidth + 0.7, solid_capstyle="round", zorder=zorder - 1)
+        collection = LineCollection(
+            np.stack((memory[:-1], memory[1:]), axis=1),
+            cmap=TRAIL_CMAP, linewidth=linewidth, capstyle="round", zorder=zorder,
+        )
+        collection.set_array(recency[1:])
+        collection.set_clim(0.0, 1.0)
+        axis.add_collection(collection)
     axis.plot(*ctx["position"], marker="o", markersize=5.5, color=ROBOT_COLOR,
               markeredgecolor="#20252B", markeredgewidth=0.45, zorder=zorder + 1)
     return collection
@@ -254,6 +279,12 @@ def _map_axes(axis, ctx, *, ylabel: bool = False, limits=None) -> None:
     if limits is None:
         axis.set_xticks([-10, -5, 0, 5, 10])
         axis.set_yticks([-10, -5, 0, 5, 10])
+    else:
+        # Independent auto-locators can pick different step sizes for two
+        # equal-span axes depending on where the numeric bounds happen to fall,
+        # so a zoom box gets one explicit step shared by x and y instead.
+        axis.xaxis.set_major_locator(MultipleLocator(ZOOM_TICK_STEP))
+        axis.yaxis.set_major_locator(MultipleLocator(ZOOM_TICK_STEP))
     axis.set_xlabel(r"$x$ [m]", labelpad=1)
     if ylabel:
         axis.set_ylabel(r"$y$ [m]", labelpad=1)
@@ -362,22 +393,109 @@ def _focus_point(ctx, bandwidth: float) -> tuple[int, np.ndarray]:
     return int(np.argmax(np.where(inside, excess, -np.inf))), excess
 
 
-def figure_excess_focus(ctx, output: Path) -> Path:
-    """Fig. 2 -- the relative excess, read off one memory point.
+def _edge_profile(axis, coordinate, fields, vmax, excess_max, *, vertical: bool,
+                  depth: float = 0.22, labels: tuple[str, ...] = ()) -> None:
+    """One chromeless o-vs-p* cut, drawn just outside an edge of a map panel.
 
-    (a) locates the point in the run, (b) resolves its neighbourhood, and (c) is
-    the arithmetic of eq. (relative_excess): the only place the positive part and
-    the density floor are visible rather than asserted.
+    The comparison eq. (relative_excess) makes is local, so it does not need
+    axes of its own: two filled curves on the border say it in a fifth of the
+    height a second panel costs. ``o`` is filled first and ``p*`` over it, so
+    the sliver of occupancy colour left uncovered *is* the positive part -- the
+    excess is shown rather than shaded and asserted.
+
+    Over the two fills goes eq. (relative_excess) itself, the ratio the fills
+    only imply, in bold red. It is dimensionless, so it cannot share the density
+    axis; it is drawn against ``excess_max`` instead. Both strips take ``vmax``
+    and ``excess_max`` from the caller rather than from their own cut, so the
+    three curves are comparable between the two edges as well as within one.
+    """
+    occupancy, target, excess = fields
+    # Scaled to sit just under the fills' ceiling, on its own common scale --
+    # a strip carries no axis, so the only thing a height means here is a
+    # comparison with the same curve on the other edge.
+    excess_curve = 0.88 * vmax * excess / excess_max
+    # A hair of clearance off the panel: the target fill is thin over most of a
+    # cut, and flush against the spine it reads as a coloured rule on the map
+    # rather than as the low end of a density.
+    gap = 0.02
+    strip = axis.inset_axes((1.0 + gap, 0.0, depth, 1.0) if vertical
+                            else (0.0, 1.0 + gap, 1.0, depth))
+    fill = strip.fill_betweenx if vertical else strip.fill_between
+    fill(coordinate, 0.0, occupancy, color=OCCUPANCY_FILL, linewidth=0, alpha=0.9)
+    fill(coordinate, 0.0, target, color=TARGET_FILL, linewidth=0, alpha=0.9)
+    line = (excess_curve, coordinate) if vertical else (coordinate, excess_curve)
+    strip.plot(*line, color=ACCENT, linewidth=1.4, solid_capstyle="round", zorder=4)
+    span, density = (strip.set_ylim, strip.set_xlim) if vertical else (strip.set_xlim, strip.set_ylim)
+    span(coordinate[0], coordinate[-1])
+    density(0.0, 1.05 * vmax)
+
+    # No frame, no ticks, no background: the strip is a shape on the page, and
+    # the panel it sits on already carries the position axis it shares.
+    strip.patch.set_visible(False)
+    strip.grid(False)
+    strip.set_xticks([])
+    strip.set_yticks([])
+    for spine in strip.spines.values():
+        spine.set_visible(False)
+
+    # Every curve is on both strips, but each label is written once: the density
+    # pair on the top edge, the excess on the right. Three labels on one strip
+    # crowd each other -- all three curves peak within a metre or two of the cut.
+    # (where to put it, where along the cut, colour, text, offset, ha, va).
+    # Each label goes in open white above its own curve. o cannot use its crest --
+    # that is exactly where the excess curve crosses over it -- so it is anchored
+    # down the shoulder, at the widest gap between the two curves, where the space
+    # above the fill is clear all the way to the ceiling.
+    gap_at = np.argmax(occupancy - excess_curve)
+    specs = {
+        "o": (occupancy, gap_at, OCCUPANCY_LABEL,
+              r"$o^{h_c}_t$", (0, 3), "center", "bottom"),
+        "p": (target, np.argmax(target), TARGET_COLOR,
+              r"$p^\star_{h_c}$", (3, 3), "left", "bottom"),
+        "e": (excess_curve, np.argmax(excess_curve), ACCENT,
+              r"$e^{h_c}_t$", (3, 3), "left", "bottom"),
+    }
+    for name in labels:
+        values, at, colour, text, offset, align, vertical_align = specs[name]
+        peak = int(at)
+        position = (values[peak], coordinate[peak]) if vertical else (coordinate[peak], values[peak])
+        strip.annotate(text, xy=position, xytext=offset, textcoords="offset points",
+                       fontsize=8.0, color=colour, ha=align, va=vertical_align,
+                       clip_on=False, zorder=6)
+
+
+def figure_excess_focus(ctx, output: Path) -> Path:
+    """Fig. 3 -- the relative excess, read off one memory point.
+
+    One panel: the neighbourhood around the most over-served memory point --
+    occupancy ramp, target contours, kernel radius, executed trail in flat black
+    over the ramp -- with a small locator thumbnail (the full-workspace occupancy
+    field and trail, boxed at the crop) showing where in Omega it sits.
+
+    The arithmetic of eq. (relative_excess) is on the borders rather than in a
+    second panel: ``_edge_profile`` puts o and p* along the two marked cuts
+    through the point on the top and right edges, filled and overlapping, and
+    the excess is the part of the occupancy fill that the target fill does not
+    cover. The crop is centred exactly on the point, so both profiles peak at
+    the middle of their edge.
     """
     bandwidth = float(ctx["stein"].coarse_bandwidth)
     index, excess = _focus_point(ctx, bandwidth)
     memory = np.asarray(ctx["memory"])
     focus = memory[index]
-    half = 3.5
-    # Keep the box inside Omega: outside it the fields are defined but meaningless.
+    # 2.5 tick steps of half-span: wide enough that both cuts run out to where
+    # o and p* have decayed, so each profile shows a shape rather than a slab.
+    half = 2.5 * ZOOM_TICK_STEP
+    # Centred on the point, with no snap to the tick grid: the edge profiles are
+    # cuts through it, and a snap of up to half a step would leave their peaks
+    # visibly off-centre. The clip keeps the box inside Omega -- outside it the
+    # fields are defined but meaningless -- and should never bite, since the
+    # focus point lies inside a mode, well clear of every wall. Off-centre
+    # profiles are the symptom that it did.
     box = tuple(
-        (min(max(c, lo + half), hi - half) - half, min(max(c, lo + half), hi - half) + half)
-        for c, (lo, hi) in zip(focus, (ctx["limits_x"], ctx["limits_y"]))
+        (centre - half, centre + half)
+        for centre in (float(np.clip(c, lo + half, hi - half))
+                       for c, (lo, hi) in zip(focus, (ctx["limits_x"], ctx["limits_y"])))
     )
 
     grid_x, grid_y, points = _grid(ctx, n=200)
@@ -388,99 +506,110 @@ def figure_excess_focus(ctx, output: Path) -> Path:
     target_density = np.asarray(pdf(jnp.asarray(points, jnp.float32), matched_target))
     target_levels = np.linspace(0.0, target_density.max(), 10)[1:]
 
+    # The two cuts through the focus point, and the single density scale they share.
+    xs = np.linspace(*box[0], 400)
+    ys = np.linspace(*box[1], 400)
+    row = _field_at(ctx, np.stack((xs, np.full_like(xs, focus[1])), axis=-1), bandwidth)
+    column = _field_at(ctx, np.stack((np.full_like(ys, focus[0]), ys), axis=-1), bandwidth)
+    profile_max = max(row[0].max(), row[1].max(), column[0].max(), column[1].max())
+    excess_max = max(row[2].max(), column[2].max())
+
     # The three numbers the caption quotes, straight from the controller's formula.
     occupancy_i, target_i, excess_i = (float(v[0]) for v in _field_at(ctx, focus[None], bandwidth))
-    floor = float(ctx["density_floor"])
+    # Minor y ticks off: the crop already carries a labelled tick every
+    # ZOOM_TICK_STEP metres, and the unlabelled ones between them only add ink.
+    with plt.rc_context(rc={**paper_style("column"), **OUTSIDE_TICKS,
+                            "ytick.minor.visible": False}):
+        figure = plt.figure(figsize=(3.4, 3.4), constrained_layout=True)
 
-    with plt.rc_context(rc=paper_style("double")):
-        figure = plt.figure(figsize=(6.9, 2.5), constrained_layout=True)
-        grid = figure.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.25])
-
-        # (a) where in the run this point is.
-        axis = figure.add_subplot(grid[0, 0])
-        _field_map(axis, grid_x, grid_y, occupancy, vmax=occupancy.max())
-        _target_contours(axis, ctx, levels=target_levels, gmm=matched_target)
-        _trail(axis, ctx, linewidth=1.4)
-        _modes(axis, ctx)
-        _map_axes(axis, ctx, ylabel=True)
-        axis.set_title(r"(a) $o^{h_c}_t$ over $\Omega$")
-
-        # (b) a true magnification of (a) -- same quantity, same ramp, same limits,
-        # so the eye carries the colour across. What is added is the target it is
-        # compared against (contours) and the kernel scale that sets both.
-        zoom = figure.add_subplot(grid[0, 1])
+        # A true magnification of the neighbourhood -- same quantity, same ramp,
+        # at full column width. What is added is the target it is compared
+        # against (contours) and the kernel scale that sets both. The trail goes
+        # on flat black here: over the occupancy ramp its own light end washes out.
+        zoom = figure.add_subplot()
         _field_map(zoom, zoom_x, zoom_y, zoom_occupancy, vmax=occupancy.max())
         _target_contours(zoom, ctx, levels=target_levels, limits=box,
                          gmm=matched_target)
-        _trail(zoom, ctx, linewidth=1.6)
-        zoom.axhline(focus[1], color=ACCENT, linewidth=0.65, alpha=0.8, zorder=3)
+        _trail(zoom, ctx, linewidth=1.3, flat="#000000")
+        # The two cuts the edge profiles are taken along. Dashed, so they read as
+        # construction lines over the field rather than as features of it.
+        for rule, value in ((zoom.axhline, focus[1]), (zoom.axvline, focus[0])):
+            rule(value, color=ACCENT, linewidth=0.7, alpha=0.85, zorder=3,
+                 linestyle=(0, (4, 2.2)))
         radius = float(np.sqrt(0.5 * bandwidth))
         radius_angle = np.deg2rad(35.0)
         radius_end = focus + radius * np.array(
             [np.cos(radius_angle), np.sin(radius_angle)]
         )
         zoom.add_patch(plt.Circle(focus, radius, fill=False, edgecolor="#1F2937",
-                                  linewidth=1.2, zorder=5))
+                                  linewidth=1.0, zorder=5))
         zoom.plot([focus[0], radius_end[0]], [focus[1], radius_end[1]],
-                  color="#1F2937", linewidth=1.0, linestyle=(0, (3, 2)), zorder=5)
-        zoom.plot(*focus, marker="o", markersize=3.6, color="#1F2937",
+                  color="#1F2937", linewidth=0.9, linestyle=(0, (3, 2)), zorder=5)
+        zoom.plot(*focus, marker="o", markersize=3.2, color="#1F2937",
                   markeredgewidth=0, zorder=6)
-        zoom.annotate(r"$\mathbf{m}_{t,i^\star}$", xy=focus, xytext=(-4, 4),
-                      textcoords="offset points", fontsize=6.5, color="#1F2937",
+        zoom.annotate(r"$\mathbf{m}_{t,i^\star}$", xy=focus, xytext=(-6, 5),
+                      textcoords="offset points", fontsize=7.5, color="#1F2937",
                       ha="right", va="bottom", zorder=7)
         radius_midpoint = 0.5 * (focus + radius_end)
-        zoom.annotate(r"$\sqrt{h_c/2}$", xy=radius_midpoint, xytext=(0, 4),
-                      textcoords="offset points", fontsize=6.5, color="#1F2937",
+        # Offset along the normal of the radius segment, not straight up: a vertical
+        # offset leaves a slanted label lying across the dashed line it names.
+        label_offset = 13.0 * np.array([-np.sin(radius_angle), np.cos(radius_angle)])
+        zoom.annotate(r"$\sqrt{h_c/2}$", xy=radius_midpoint, xytext=tuple(label_offset),
+                      textcoords="offset points", fontsize=7.5, color="#1F2937",
                       ha="center", va="bottom", zorder=7)
         _modes(zoom, ctx)
-        _map_axes(zoom, ctx, limits=box)
-        zoom.set_title(r"(b) field: $o^{h_c}_t$,  contours: $p^\star_{h_c}$")
-        axis.indicate_inset(
-            (box[0][0], box[1][0], 2 * half, 2 * half), inset_ax=zoom,
-            edgecolor="#1F2937", linewidth=0.6, alpha=0.9,
-        )
+        _map_axes(zoom, ctx, ylabel=True, limits=box)
 
-        # (c) the arithmetic, on a cut through the point.
-        cut = figure.add_subplot(grid[0, 2])
-        xs = np.linspace(*box[0], 400)
-        cut_points = np.stack((xs, np.full_like(xs, focus[1])), axis=-1)
-        occupancy_cut, target_cut, _ = _field_at(ctx, cut_points, bandwidth)
-        cut.fill_between(xs, target_cut, occupancy_cut, where=occupancy_cut > target_cut,
-                         color=ACCENT, alpha=0.20, linewidth=0, zorder=2)
-        cut.plot(xs, occupancy_cut, color="#1F2937", linewidth=1.1, zorder=4)
-        cut.plot(xs, target_cut, color=TARGET_COLOR, linewidth=1.1, zorder=4)
-        cut.axvline(focus[0], color=NEUTRAL, linewidth=0.6, zorder=1)
-        peak = int(np.argmax(occupancy_cut))
-        cut.annotate(r"$o^{h_c}_t$", xy=(xs[peak], occupancy_cut[peak]), xytext=(4, 3),
-                     textcoords="offset points", fontsize=6.8, color="#1F2937")
-        low = int(np.argmax(target_cut))
-        cut.annotate(r"$p^\star_{h_c}$", xy=(xs[low], target_cut[low]), xytext=(-20, 6),
-                     textcoords="offset points", fontsize=6.8, color=TARGET_COLOR,
-                     va="bottom")
-        cut.annotate(
-            rf"$e^{{h_c}}_{{t,i^\star}}="
-            rf"\dfrac{{[{occupancy_i:.4f}-{target_i:.4f}]_+}}"
-            rf"{{{target_i:.4f}+{floor:.4f}}}={excess_i:.2f}$",
-            xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top",
-            fontsize=6.6, color="#1F2937",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#FFFFFF", alpha=0.9,
-                      edgecolor="#98A4BA", linewidth=0.4),
+        # Locator thumbnail: the full workspace at reduced detail, standing in
+        # for the separate context panel the earlier layout gave its own column.
+        # The zoom box is square in data under equal aspect, so an axes-fraction
+        # box is also a display-proportion box: giving it the domain's own
+        # dx:dy ratio lets aspect="auto" fill it exactly -- undistorted, and
+        # without the letterboxed white margins that "equal" leaves behind.
+        # Bottom-left, because the annotated radius and the profiles now occupy
+        # the upper half and the right edge.
+        dom_dx = ctx["limits_x"][1] - ctx["limits_x"][0]
+        dom_dy = ctx["limits_y"][1] - ctx["limits_y"][0]
+        loc_w = 0.34
+        loc_h = loc_w * dom_dy / dom_dx
+        margin = 0.025
+        pad = zoom.inset_axes(
+            (margin, margin, loc_w + margin, loc_h + margin),
+            zorder=8,
         )
-        cut.set_xlim(*box[0])
-        cut_top = max(occupancy_cut.max(), target_cut.max()) * 1.55
-        cut.set_ylim(0, cut_top)
-        cut.set_xlabel(rf"$x$ [m] at $y={focus[1]:.1f}$", labelpad=1)
-        cut.set_ylabel("density [m$^{-2}$]", labelpad=2)
-        cut.set_title(r"(c) shaded: $[o^{h_c}_t-p^\star_{h_c}]_+$")
+        pad.set_facecolor("#FFFFFF")
+        pad.patch.set_alpha(0.92)
+        pad.set_xticks([])
+        pad.set_yticks([])
+        for spine in pad.spines.values():
+            spine.set_visible(False)
+        locator = zoom.inset_axes(
+            (1.5 * margin, 1.5 * margin, loc_w, loc_h),
+            zorder=9,
+        )
+        _field_map(locator, grid_x, grid_y, occupancy, vmax=occupancy.max())
+        # The executed path, flat black: at thumbnail size the recency gradient
+        # of `_trail` is not readable, and the shape is the only thing being asked for.
+        locator.plot(memory[:, 0], memory[:, 1], color="#111418", linewidth=0.45,
+                     solid_capstyle="round", zorder=4)
+        locator.set_aspect("auto")
+        locator.set_xlim(*ctx["limits_x"])
+        locator.set_ylim(*ctx["limits_y"])
+        locator.set_xticks([])
+        locator.set_yticks([])
+        for spine in locator.spines.values():
+            spine.set_edgecolor("#1F2937")
+            spine.set_linewidth(0.5)
+        locator.add_patch(plt.Rectangle(
+            (box[0][0], box[1][0]), box[0][1] - box[0][0], box[1][1] - box[1][0],
+            fill=False, edgecolor=ACCENT, linewidth=0.9, zorder=5,
+        ))
 
-        # Expand the spatial slice into the full density cross-section.
-        for target_y in (0.0, cut_top):
-            figure.add_artist(mpatches.ConnectionPatch(
-                xyA=(box[0][1], focus[1]), coordsA="data", axesA=zoom,
-                xyB=(box[0][0], target_y), coordsB="data", axesB=cut,
-                color=ACCENT, linewidth=0.55, alpha=0.55,
-                clip_on=False, zorder=0,
-            ))
+        # The arithmetic, on the two borders: labelled once, on the top edge.
+        _edge_profile(zoom, xs, row, profile_max, excess_max, vertical=False,
+                      labels=("o", "p"))
+        _edge_profile(zoom, ys, column, profile_max, excess_max, vertical=True,
+                      labels=("e",))
 
         path = save(figure, output)
         plt.close(figure)
