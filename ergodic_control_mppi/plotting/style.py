@@ -89,6 +89,25 @@ EXCESS_CMAP = sequential("Reds")        # magnitude: over-coverage / error
 # Neutral occupancy shading at the same peak luminance as Blues@0.60.
 OCCUPANCY_CMAP = sequential("Greys", 0.0, 0.53)
 
+# Pillar height ramp for the deployment render: a strong blue at the base, through cyan and
+# turquoise, to a bright spring green at the cap. Saturated at both ends rather than fading
+# out -- the page behind the render is white, and a pale cap dissolves the top of every
+# pillar into the background. The trail crosses this ramp in a pale blue-grey, so path and
+# pillars separate by lightness wherever they overlap.
+PILLAR_CMAP = LinearSegmentedColormap.from_list(
+    "pillar", ["#0078FF", "#0095F0", "#00B2DC", "#00CFBE", "#00E89D"]
+)
+
+# Target density on the floor of the deployment render. `Greys` reads correctly but bottoms
+# out at pure black, which at these contour levels turns each mode centre into a hard blob
+# that outweighs everything standing on it. This runs white to a soft warm black instead, so
+# the modes stay clearly the darkest thing on the plane without becoming holes in it. The
+# steps carry #424140's warmth the whole way up rather than cooling to a blue-grey, which on
+# a plane this pale reads as a colour cast rather than as a neutral.
+DENSITY_CMAP = LinearSegmentedColormap.from_list(
+    "carbon", ["#FFFFFF", "#F1F0EF", "#DAD8D6", "#B6B3B1", "#8A8785", "#615F5D", "#424140"]
+)
+
 # Executed trail: soft old positions -> near-black newest positions.
 TRAIL_CMAP = LinearSegmentedColormap.from_list(
     "trail", ["#D5DAE0", "#73808C", "#101820"]

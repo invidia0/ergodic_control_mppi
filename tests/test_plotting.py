@@ -178,3 +178,38 @@ class PlottingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_cylinder_scene_sorts_back_to_front():
+    """The cylinder pillars and the trail share one painter's order.
+
+    `computed_zorder=False` means mplot3d does no depth sorting of its own, so this
+    ordering is the only thing keeping a far pillar's outline from drawing through a near
+    one, and the trail weaving between them rather than floating over the field.
+    """
+    import numpy as np
+    from unittest.mock import MagicMock
+
+    from ergodic_control_mppi.plotting import deployment
+
+    # Two pillars on the camera axis at azimuth -90 (camera at -y, so smaller y is nearer)
+    # and a trail between them, all wide apart so the ranks are unambiguous.
+    centres = np.array([[0.0, -8.0], [0.0, 8.0]])
+    positions = np.zeros((40, 2))
+    drawn: list[tuple[str, float]] = []
+    axes = MagicMock()
+    axes.plot_surface.side_effect = lambda *a, **k: drawn.append(("pillar", k["zorder"]))
+    axes.plot.side_effect = lambda *a, **k: drawn.append(("line", k["zorder"]))
+
+    components = deployment._cylinder_components(centres, 1.0)
+    deployment._draw_cylinder_scene(
+        axes, components, base=0.0, top=2.0,
+        colour_map=lambda v: np.zeros((np.size(v), 4)), alpha=1.0, azimuth=-90.0,
+        positions=positions, flight_fraction=0.5, trail_colour="#000000", trail_size=1.0,
+    )
+
+    orders = [z for _, z in drawn]
+    assert orders == sorted(orders), "artists must be emitted back to front"
+    # The far pillar (y = +8, away from a camera at -y) is drawn before the near one.
+    pillars = [z for kind, z in drawn if kind == "pillar"]
+    assert pillars[0] < pillars[-1]

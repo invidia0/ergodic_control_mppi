@@ -31,6 +31,11 @@ from ergodic_control_mppi.plotting import style
 DEFAULT_ELEVATION = 45.0
 DEFAULT_AZIMUTH = -60.0
 
+# The workspace outline on the density plane: a pale grey, present but never competing
+# with the modes it frames.
+FLOOR_EDGE = "#9AA1AC"
+
+
 
 def _cell_centres(occupancy: np.ndarray, origin, resolution: float) -> np.ndarray:
     """World ``(x, y)`` of every occupied cell centre, shape ``(N, 2)``."""
@@ -263,7 +268,7 @@ def _pillar_cloud(centres: np.ndarray, resolution: float, base: float, top: floa
 
 
 def _draw_quadrotor(axes, centre, heading: float, span: float, colour: str,
-                    linewidth: float) -> None:
+                    linewidth: float, zorder: float = 5.0) -> None:
     """A quadrotor glyph: four arms on the diagonals, four rotor discs, a body hub.
 
     Drawn rather than meshed. The simulator's airframe ships as a 6.4 MB Ogre binary that
@@ -283,20 +288,21 @@ def _draw_quadrotor(axes, centre, heading: float, span: float, colour: str,
     hubs = np.column_stack([x + arm * np.cos(angles), y + arm * np.sin(angles)])
     for hub in hubs:
         axes.plot([x, hub[0]], [y, hub[1]], [z, z],
-                  color=colour, linewidth=linewidth, solid_capstyle="round", zorder=5)
+                  color=colour, linewidth=linewidth, solid_capstyle="round",
+                  zorder=zorder)
 
-    # Rotor discs as filled polygons in the flight plane. A scatter marker would keep a
-    # fixed pixel size and drift out of proportion with the arms as the figure is scaled.
+    # Rotor discs as outlines in the flight plane. A scatter marker would keep a fixed
+    # pixel size and drift out of proportion with the arms as the figure is scaled.
     circle = np.linspace(0.0, 2.0 * np.pi, 32)
     radius = 0.30 * span
     for hub in hubs:
         axes.plot(hub[0] + radius * np.cos(circle), hub[1] + radius * np.sin(circle),
                   np.full(circle.size, z), color=colour, linewidth=0.8 * linewidth,
-                  zorder=5)
+                  zorder=zorder)
     axes.scatter(hubs[:, 0], hubs[:, 1], np.full(4, z), s=(2.2 * linewidth) ** 2,
-                 color=colour, depthshade=False, linewidths=0, zorder=6)
+                 color=colour, depthshade=False, linewidths=0, zorder=zorder + 1)
     axes.scatter([x], [y], [z], s=(4.5 * linewidth) ** 2, color=colour,
-                 depthshade=False, linewidths=0, zorder=6)
+                 depthshade=False, linewidths=0, zorder=zorder + 1)
 
 
 def trajectory_snapshot(
@@ -410,19 +416,44 @@ def trajectory_snapshot(
         # are still depth-sorted, which is what the merged scatter below relies on.
         axes = figure.add_subplot(111, projection="3d", computed_zorder=False)
 
+        # Footprints first: the floor border below needs their extent, and the cylinder
+        # renderer needs the components themselves, so the labelling runs once.
+        centres = _cell_centres(occupancy, origin, resolution)
+        components = (_cylinder_components(centres, resolution)
+                      if pillar_style == "cylinders" and centres.size else [])
+
         # Target density first, on the floor, so the cloud and trail draw over it.
         density, extent = _target_density(map_source, occupancy, origin, resolution, gmm)
         if density is not None:
             axes.contourf(
                 *extent, density, levels=density_levels, zdir="z", offset=altitude,
-                cmap=density_cmap,
+                cmap=_resolve_cmap(density_cmap),
             )
+        # The workspace boundary, drawn on the same plane. The density fades to the page
+        # long before the map ends, so without it the floor has no edge and the pillars at
+        # the rim look like they are standing on nothing.
+        #
+        # Widened to contain the pillars as *drawn*. Every pillar is inside the workspace
+        # in the data, but a cylinder's radius is inflated by half a cell for looks, so a
+        # pillar built on the boundary cells overhangs the true extent by up to that much
+        # and would otherwise stand across its own floor's edge.
+        edge_x = [origin[0], origin[0] + occupancy.shape[1] * resolution]
+        edge_y = [origin[1], origin[1] + occupancy.shape[0] * resolution]
+        for (middle, radius) in components:
+            edge_x[0] = min(edge_x[0], middle[0] - radius)
+            edge_x[1] = max(edge_x[1], middle[0] + radius)
+            edge_y[0] = min(edge_y[0], middle[1] - radius)
+            edge_y[1] = max(edge_y[1], middle[1] + radius)
+        axes.plot(
+            [edge_x[0], edge_x[1], edge_x[1], edge_x[0], edge_x[0]],
+            [edge_y[0], edge_y[0], edge_y[1], edge_y[1], edge_y[0]],
+            np.full(5, altitude), color=FLOOR_EDGE, linewidth=0.7, alpha=0.55, zorder=1,
+        )
 
         # Height-coloured point cloud, as the simulator renders the pillar field. A rainbow
         # ramp is a poor quantitative colormap but this axis is a depth cue, not a
         # measurement, and matching the simulator is what makes the two views comparable.
         colour_map = _resolve_cmap(pillar_cmap)
-        centres = _cell_centres(occupancy, origin, resolution)
         if pillar_style == "cylinders":
             # Surfaces, not points. mplot3d painter-sorts whole artists, so the trail is
             # drawn separately and *segmented*: one artist per short run, each sorted on its
@@ -430,15 +461,23 @@ def trajectory_snapshot(
             # for free. It is an approximation -- a segment straddling a pillar still lands
             # wholly in front or behind -- so this style is offered as an alternative look,
             # not as a replacement for the point cloud.
-            _draw_cylinders(axes, centres, resolution, altitude, top, colour_map,
-                            pillar_alpha)
-            _draw_segmented_trail(axes, positions, altitude, top, flight_fraction,
-                                  trail_colour, trail_size)
-            _draw_quadrotor(axes, positions[-1], _heading(positions), vehicle_span,
-                            vehicle_colour, 1.1)
-            _configure_axes(axes, map_x, map_y, altitude, top, z_exaggeration, title,
-                            elevation, azimuth, bare=bare)
-            written = save(figure, output, dpi=dpi)
+            flight = altitude + flight_fraction * (top - altitude)
+            above = _draw_cylinder_scene(
+                axes, components, altitude, top, colour_map, pillar_alpha,
+                azimuth, positions, flight_fraction, trail_colour, trail_size,
+            )
+            # Explicitly above the whole depth stack: the vehicle marks where the run ended
+            # and is the one thing that must never be occluded, least of all by its own trail.
+            _draw_quadrotor(axes, (positions[-1, 0], positions[-1, 1], flight),
+                            _heading(positions), vehicle_span, vehicle_colour,
+                            linewidth=1.1, zorder=above)
+            _configure_axes(axes, occupancy, origin, resolution, altitude, top,
+                            elevation, azimuth, z_exaggeration, bare=bare)
+            if bare:
+                _strip_axes(axes)
+            if title:
+                axes.set_title(title, pad=0.0)
+            written = style.save(figure, output, dpi=dpi)
             plt.close(figure)
             return _crop_transparent(written) if bare else written
 
@@ -492,12 +531,18 @@ def trajectory_snapshot(
 def _resolve_cmap(name: str):
     """Look a colormap up in matplotlib, falling back to the Scientific Colour Maps.
 
+    ``pillar`` and ``carbon`` are this paper's own ramps, defined in ``style``.
     Crameri's maps (batlow, acton, oslo, devon, ...) are perceptually uniform and
     colour-vision safe, which the default rainbow ramp is not. They ship in `cmcrameri`
     under a ``cmc.`` prefix; accept the bare name too so ``--pillar-cmap batlow`` works.
     """
     import matplotlib.pyplot as plt
 
+    # This module's own ramps first: matplotlib would not know them, and registering into
+    # its global namespace to look them up would be a side effect on import.
+    local = {"pillar": style.PILLAR_CMAP, "carbon": style.DENSITY_CMAP}
+    if name in local:
+        return local[name]
     try:
         return plt.get_cmap(name)
     except (ValueError, KeyError):
@@ -514,53 +559,123 @@ def _heading(positions: np.ndarray) -> float:
     return float(np.arctan2(delta[1], delta[0]))
 
 
-def _draw_cylinders(axes, centres, resolution, base, top, colour_map, alpha):
-    """One smooth cylinder per connected pillar, instead of a column of point markers.
+def _cylinder_components(centres, resolution):
+    """Connected pillar footprints as ``(centre_xy, radius)``, one per pillar.
 
     The occupancy grid is square cells, so the columns it produces are square; fitting a
-    circle to each connected component recovers the geometry the map generator actually
-    sampled. Height-coloured in bands so the ramp still reads as a depth cue.
+    circle to each connected component recovers the geometry the map generator sampled.
     """
     from scipy import ndimage
 
-    if centres.size == 0:
-        return
     pitch = resolution
     keys = np.round(centres / pitch).astype(int)
     grid = np.zeros(keys.max(axis=0) - keys.min(axis=0) + 3, dtype=bool)
     offset = keys.min(axis=0) - 1
     grid[tuple((keys - offset).T)] = True
     labels, count = ndimage.label(grid)
-    theta = np.linspace(0.0, 2.0 * np.pi, 28)
-    levels = np.linspace(base, top, 14)
+    out = []
     for index in range(1, count + 1):
         cells = np.argwhere(labels == index) + offset
         middle = cells.mean(axis=0) * pitch
         radius = max(np.max(np.linalg.norm(cells * pitch - middle, axis=1)), pitch) \
             + 0.5 * pitch
+        out.append((middle, radius))
+    return out
+
+
+def _draw_cylinder_scene(axes, components, base, top, colour_map, alpha,
+                         azimuth, positions, flight_fraction, trail_colour, trail_size,
+                         edge: str = "#8A93A6", trail_width: float = 0.82):
+    """Capped cylinders and the trail, drawn back to front in one depth order.
+
+    Why surfaces rather than the point cloud: the cloud's cap is a lattice of markers
+    spanning a fraction of a cell, so at an azimuth near -90 it projects to a sliver a
+    couple of pixels tall and every column ends in a flat edge. Zooming does not help --
+    the sliver scales with the picture. A real top face and a drawn silhouette read at any
+    camera, which is what gives these their solid, game-like geometry.
+
+    Why one combined sort: the panel runs with ``computed_zorder=False``, so mplot3d does
+    not depth-sort artists at all and every line would otherwise draw over every surface --
+    a pillar at the back putting its outline straight through one at the front. Depth along
+    the view direction is the painter's order, and the trail is cut into short pieces and
+    sorted into the *same* sequence, so it passes behind near pillars and in front of far
+    ones instead of floating over the whole field or hiding behind it.
+    """
+    view = np.deg2rad(azimuth)
+    towards_camera = np.array([np.cos(view), np.sin(view)])
+    # Fine enough that neither the silhouette nor the vertical ramp shows its facets:
+    # at 48 segments the rim was visibly polygonal and 14 colour bands striped the tube.
+    theta = np.linspace(0.0, 2.0 * np.pi, 120)
+    levels = np.linspace(base, top, 96)
+    # The two generators bounding a vertical cylinder on screen, for this camera.
+    silhouette = (view + 0.5 * np.pi, view - 0.5 * np.pi)
+    height = base + flight_fraction * (top - base)
+
+    def draw_pillar(middle, radius, order):
         circle_x = middle[0] + radius * np.cos(theta)
         circle_y = middle[1] + radius * np.sin(theta)
-        mesh_x = np.tile(circle_x, (levels.size, 1))
-        mesh_y = np.tile(circle_y, (levels.size, 1))
-        mesh_z = np.tile(levels[:, None], (1, theta.size))
         shade = colour_map((levels - base) / max(top - base, 1e-9))
-        axes.plot_surface(mesh_x, mesh_y, mesh_z, facecolors=np.tile(
-            shade[:, None, :], (1, theta.size, 1)), shade=False, linewidth=0,
-            antialiased=True, alpha=alpha, zorder=3)
+        axes.plot_surface(
+            np.tile(circle_x, (levels.size, 1)), np.tile(circle_y, (levels.size, 1)),
+            np.tile(levels[:, None], (1, theta.size)),
+            facecolors=np.tile(shade[:, None, :], (1, theta.size, 1)),
+            shade=False, linewidth=0, edgecolor="none", antialiased=False,
+            alpha=alpha, zorder=order,
+        )
+        span = np.linspace(0.0, 1.0, 2)
+        cap_x = middle[0] + np.outer(span, radius * np.cos(theta))
+        cap_y = middle[1] + np.outer(span, radius * np.sin(theta))
+        # linewidth 0 is not enough on its own: plot_surface still strokes each quad in
+        # its face colour, which at this mesh density reads as a wireframe over the tube.
+        axes.plot_surface(cap_x, cap_y, np.full_like(cap_x, top),
+                          color=colour_map(1.0), shade=False, linewidth=0,
+                          edgecolor="none", antialiased=False, alpha=alpha,
+                          zorder=order + 0.1)
+        # Both rims and the silhouette, in a soft grey: enough to say "this is a solid
+        # volume" and not enough to draw the eye off the trail. Lighter than this and the
+        # base arc stops reading as the pillar's foot and starts reading as a pale line
+        # drawn across it. The base rim matters as much as the top one -- without it a
+        # pillar reads as fading into the density plane rather than standing on it.
+        axes.plot(circle_x, circle_y, np.full_like(circle_x, top),
+                  color=edge, linewidth=0.5, alpha=0.55, zorder=order + 0.2)
+        # Only the near arc of the base: the far half is hidden by the tube itself, and
+        # drawing the whole ellipse puts it straight through the pillar.
+        near = np.cos(theta - view) > 0.0
+        axes.plot(circle_x[near], circle_y[near], np.full(near.sum(), base),
+                  color=edge, linewidth=0.5, alpha=0.55, zorder=order + 0.2)
+        for angle in silhouette:
+            edge_x = middle[0] + radius * np.cos(angle)
+            edge_y = middle[1] + radius * np.sin(angle)
+            axes.plot([edge_x, edge_x], [edge_y, edge_y], [base, top],
+                      color=edge, linewidth=0.5, alpha=0.55, zorder=order + 0.2)
 
-
-def _draw_segmented_trail(axes, positions, base, top, flight_fraction, colour, size):
-    """The flown path as many short lines, so each sorts against the pillars separately."""
-    height = base + flight_fraction * (top - base)
-    chunk = max(len(positions) // 220, 2)
-    for start in range(0, len(positions) - 1, chunk):
-        piece = positions[start:start + chunk + 1]
+    def draw_trail(piece, order):
         axes.plot(piece[:, 0], piece[:, 1], np.full(len(piece), height),
-                  color=colour, linewidth=size * 0.62, solid_capstyle="round", zorder=4)
+                  color=trail_colour, linewidth=trail_size * trail_width,
+                  solid_capstyle="round", zorder=order)
+
+    drawables = []
+    for middle, radius in components:
+        # Nearest point of the footprint, not its centre: a wide pillar the trail passes
+        # beside should sort on the side facing the camera.
+        depth = float(middle @ towards_camera) + radius
+        drawables.append((depth, draw_pillar, (middle, radius)))
+    chunk = max(len(positions) // 220, 2)
+    for begin in range(0, len(positions) - 1, chunk):
+        piece = positions[begin:begin + chunk + 1]
+        drawables.append((float(piece.mean(axis=0) @ towards_camera), draw_trail, (piece,)))
+
+    order = 3
+    for order, (_, draw, args) in enumerate(
+        sorted(drawables, key=lambda item: item[0]), start=3
+    ):
+        draw(*args, order)
+    # The caller stacks the vehicle on top of this, and the stack is as deep as the scene.
+    return order + 1
 
 
-def _crop_transparent(path: Path) -> Path:
-    """Trim the fully transparent border off a saved figure.
+def _crop_transparent(path: Path, pad_fraction: float = 0.035) -> Path:
+    """Trim the fully transparent border off a saved figure, leaving a small one.
 
     A bare 3D axis fills the canvas with an invisible projection box, so matplotlib's tight
     bounding box has nothing to crop against and leaves the scene floating in a wide
@@ -579,7 +694,18 @@ def _crop_transparent(path: Path) -> Path:
         rgba = image.convert("RGBA")
         box = rgba.getchannel("A").getbbox()
         if box:
-            rgba.crop(box).save(path)
+            crop = rgba.crop(box)
+            # Cropping to the alpha bbox alone puts the outermost pillar caps hard against
+            # the border, which reads as the scene being cut off rather than framed. The
+            # border is pasted on rather than taken from the canvas: whether any slack is
+            # left there depends on the camera, and at azimuth -90 there is none at the top.
+            pad = round(pad_fraction * max(crop.size))
+            if pad:
+                bordered = Image.new("RGBA", (crop.width + 2 * pad, crop.height + 2 * pad),
+                                     (0, 0, 0, 0))
+                bordered.paste(crop, (pad, pad))
+                crop = bordered
+            crop.save(path)
     return path
 
 
