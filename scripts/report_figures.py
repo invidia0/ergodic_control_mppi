@@ -1273,15 +1273,23 @@ def load_baselines(*paths: Path) -> dict:
 
 
 # Lighter accents on the blue panel: one hue per baseline, held across all three panels so a
-# method keeps its colour. Ours is the indigo, deliberately the only cool-neutral among four
-# saturated hues, so the subject of the comparison reads as the subject.
-# The ggplot hue palette lifted 40% toward white. At full saturation those hues are heavy
-# against the pale blue panel -- the green in particular dominated its neighbours -- and a
-# large filled area wants a lighter tint than a thin line would. Ours keeps the periwinkle,
-# the one cool-neutral among four saturated hues.
+# method keeps its colour. Ours stays the periwinkle, deliberately the only cool-neutral
+# among four saturated hues, so the subject of the comparison reads as the subject. A large
+# filled area wants a lighter tint than a thin line would, so every hue is lifted toward
+# white -- the same register as STEP_COLOURS, which these now share their steps with.
+#
+# The earlier set was lifted too far. Validated against the panel (#DCE2EC) rather than
+# against white, it failed on its own terms: ours/HEDAC were dE 10.3 apart in *normal*
+# vision, SVES/HEDAC dE 2.0 for deuteranopes, and two of the five read as gray. The steps
+# below sit a half-step darker and pass every check on that surface -- lightness band,
+# chroma floor, adjacent CVD (worst dE 13.7 deutan) and normal-vision separation (16.7).
+#
+# The dict order is the plotting order, and the checks are on adjacent pairs, so the order
+# is load-bearing: lavender must not neighbour the periwinkle (dE 1.1 for deuteranopes),
+# which is why it sits third rather than second.
 VIOLIN_COLOURS = {
-    "ours": "#A0C4FF", "hedac": "#66D9DC", "sves": "#F9A2EE",
-    "fmec": "#66D688", "smc": "#FBADA7",
+    "ours": "#7FADFF", "hedac": "#5FC97A", "sves": "#C08CFF",
+    "fmec": "#F0A04B", "smc": "#EC7BA8",
 }
 
 
