@@ -449,7 +449,9 @@ def main() -> None:
                         help="Controller config; varied only by the target-generalization check")
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--first-seed", type=int, default=43)
-    parser.add_argument("--seeds", type=int, default=12)
+    parser.add_argument("--seeds", type=int, default=6,
+                        help="Seeds per map. 6 x 6 maps = 36 paired cells per arm, which is "
+                             "the registered design and the width the branch gate is run at.")
     parser.add_argument("--device", default="gpu", choices=["auto", "cpu", "gpu"])
     parser.add_argument("--hardware", default=socket.gethostname())
     parser.add_argument("--arms", default="", help="Comma-separated subset of FINAL_ARMS")
