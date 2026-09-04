@@ -38,6 +38,7 @@ def _map(map_seed: int, obs_num: int) -> dict:
         "obs_num": obs_num,
         "run_dir": f"results/uav/density_{obs_num}/maps/map_{map_seed}",
         "occupied_cells": 800,
+        "occupancy_digest": f"digest{obs_num}_{map_seed}",
         "reachable_fraction": 0.84,
         "grid_shape": [134, 267],
         "initial_state": [-15.57, 0.42, 0.0, 0.0, 0.0, 0.0],
@@ -269,16 +270,24 @@ class MapGuardTest(unittest.TestCase):
     def test_identical_fields_under_two_labels_are_refused(self):
         """The failure that actually happened: two labels, one field.
 
-        `occupied_cells` is the witness the label cannot forge -- distinct pillar draws do
-        not collide on it, so a collision means the same array reached the manifest twice.
+        The digest is the witness the label cannot forge -- it hashes the occupancy array
+        itself, so a collision means the same field reached the manifest twice.
         """
-        entries = [_map(513, 15), _map(525, 25)]  # _map gives both 800 occupied cells
-        with self.assertRaises(SystemExit):
-            final_ablation._assert_distinct(entries)
-
-    def test_genuinely_distinct_maps_pass(self):
         first, second = _map(513, 15), _map(525, 25)
-        second["occupied_cells"] = 492
+        second["occupancy_digest"] = first["occupancy_digest"]
+        with self.assertRaises(SystemExit):
+            final_ablation._assert_distinct([first, second])
+
+    def test_equal_cell_counts_are_not_a_duplicate(self):
+        """Regression: an integer count over a quantized grid collides by coincidence.
+
+        Maps 513 and 530 of density_15 both have 457 occupied cells and differ in 908 of
+        them. Guarding on the count rejected that manifest outright, which would have
+        blocked the campaign on a false positive.
+        """
+        first, second = _map(513, 15), _map(530, 15)
+        self.assertEqual(first["occupied_cells"], second["occupied_cells"])
+        self.assertNotEqual(first["occupancy_digest"], second["occupancy_digest"])
         final_ablation._assert_distinct([first, second])
 
     def test_real_rebuilt_516_matches_its_flight(self):

@@ -21,6 +21,7 @@ companions is bit-identical -- verify with ``--verify-branch`` before spending t
 
 import argparse
 import csv
+import hashlib
 import json
 import socket
 import time
@@ -150,6 +151,11 @@ def _check_map(run_dir: Path, map_seed: int, obs_num: int) -> dict:
         "obs_num": obs_num,
         "run_dir": str(run_dir),
         "occupied_cells": int(np.asarray(arrays["occupancy"]).sum()),
+        # The witness `_assert_distinct` compares. Recorded in the manifest rather than
+        # recomputed, so a later reader can check the claim without the arrays.
+        "occupancy_digest": hashlib.sha256(
+            np.ascontiguousarray(np.asarray(arrays["occupancy"], dtype=np.uint8)).tobytes()
+        ).hexdigest()[:16],
         "reachable_fraction": float(np.asarray(arrays["reachable_mask"]).mean()),
         "grid_shape": list(np.asarray(arrays["grid"]).shape),
         "initial_state": [float(v) for v in np.asarray(arrays["initial_state"])],
@@ -165,21 +171,30 @@ def _assert_distinct(entries: list[dict]) -> None:
     carried a ``DUPLICATE_MAPS`` patch.
 
     Two assertions, because either alone misses a case. ``(obs_num, map_seed)`` catches the
-    manifest listing one entry twice; ``occupied_cells`` catches two *differently labelled*
-    entries that are the same field, which is the failure that actually happened. Occupied
-    cells collide only for genuinely identical pillar draws, so a false positive here is a
-    map pair that would have been useless as two independent maps anyway.
+    manifest listing one entry twice; ``occupancy_digest`` catches two *differently labelled*
+    entries that are the same field, which is the failure that actually happened.
+
+    The digest is a hash of the occupancy array itself, not a summary of it. An earlier
+    version compared ``occupied_cells``, which is an integer count over a quantized grid and
+    therefore collides between genuinely different pillar draws: maps 513 and 530 of
+    ``density_15`` both have 457 occupied cells and differ in 908 of them. A summary can only
+    give false positives here; the array is the thing the claim is about, so it is what is
+    compared.
     """
     labels = [(e["obs_num"], e["map_seed"]) for e in entries]
     if len(set(labels)) != len(labels):
         raise SystemExit(f"map manifest repeats an (obs_num, map_seed): {labels}")
-    cells = [e["occupied_cells"] for e in entries]
-    if len(set(cells)) != len(cells):
-        pairs = [(e["obs_num"], e["map_seed"], e["occupied_cells"]) for e in entries]
-        raise SystemExit(
-            f"two maps have identical occupied_cells, so they are the same field under two "
-            f"labels: {pairs}"
-        )
+    digests = [e["occupancy_digest"] for e in entries]
+    if len(set(digests)) != len(digests):
+        seen: dict[str, tuple] = {}
+        for entry in entries:
+            key = entry["occupancy_digest"]
+            if key in seen:
+                raise SystemExit(
+                    f"maps {seen[key]} and {(entry['obs_num'], entry['map_seed'])} have "
+                    f"identical occupancy arrays: they are the same field under two labels"
+                )
+            seen[key] = (entry["obs_num"], entry["map_seed"])
 
 
 def load_maps(path: Path) -> list[dict]:
