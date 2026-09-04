@@ -214,17 +214,23 @@ def figure_plan_gain(captures, path: str | Path, columns: int = 2):
     captures = list(captures)
     rows = int(np.ceil(len(captures) / columns))
     with plt.rc_context(style.paper_style("double")):
-        width, height = style.FIGSIZES["double"]
+        width, _ = style.FIGSIZES["double"]
+        # Height from the *map* aspect, not from the style's default. `_draw_panel` sets an
+        # equal aspect, so a cell taller than the map letterboxes it: the drawing shrinks to
+        # fit the short side and the spare width opens as a gap between the columns. At a
+        # 40x20 workspace that gap was as wide as the panels themselves.
+        limits = np.asarray(captures[0]["limits"], dtype=float)
+        cell = (limits[3] - limits[2]) / (limits[1] - limits[0])
         figure, grid = plt.subplots(rows, columns, squeeze=False,
-                                    figsize=(width, height / 2.0 * rows))
+                                    figsize=(width, rows * (width / columns * cell + 0.32)))
         for axes, capture in zip(grid.ravel(), captures):
             limits = np.asarray(capture["limits"], dtype=float)
             grid_x, grid_y, phi = _potential_grid(capture)
             # Percentile clip, not min/max: log p* diverges downward far from every mode,
             # so a raw range spends the whole colour scale on empty corners.
             low, high = np.percentile(phi, (2.0, 100.0))
-            axes.contourf(grid_x, grid_y, np.clip(phi, low, high), levels=24,
-                          cmap=style.DENSITY_CMAP, alpha=0.55, zorder=0)
+            shading = axes.contourf(grid_x, grid_y, np.clip(phi, low, high), levels=24,
+                                    cmap=style.DENSITY_CMAP, alpha=0.55, zorder=0)
             _draw_panel(axes, capture["positions"], capture["means"],
                         capture["covariances"], title=capture.get("title"),
                         limits=(limits[0], limits[1], limits[2], limits[3]))
@@ -235,9 +241,12 @@ def figure_plan_gain(captures, path: str | Path, columns: int = 2):
         for axes in grid.ravel()[len(captures):]:
             axes.set_visible(False)
         handles, labels = grid.ravel()[0].get_legend_handles_labels()
-        figure.legend(handles[:1], labels[:1], loc="lower center", frameon=False,
-                      ncol=1, bbox_to_anchor=(0.5, -0.01))
-        figure.tight_layout()
+        from matplotlib.patches import Patch
+        handles = [Patch(facecolor=shading.cmap(0.35), edgecolor="none")] + handles[:1]
+        labels = [r"potential $\Phi$ (dark = low)"] + labels[:1]
+        figure.tight_layout(h_pad=0.6)
+        figure.legend(handles, labels, loc="lower center", frameon=False, ncol=2,
+                      bbox_to_anchor=(0.5, -0.02))
         return style.save(figure, path)
 
 
@@ -284,7 +293,7 @@ def service_series(capture):
     return time, sigma, bent
 
 
-def figure_service_gate(captures, path: str | Path):
+def figure_service_gate(captures, path: str | Path, deployed_release_ratio: float = 2.24):
     """Sec. III-E -- the release, and why it happens when it happens.
 
     Top row: one trajectory panel per ``sigma*`` level, so the basin trap at ``off`` and
@@ -315,7 +324,8 @@ def figure_service_gate(captures, path: str | Path):
 
         # The strip reads the *deployed* arm: it explains the mechanism, and showing it for
         # a level where the gate is off would only show a flat line.
-        chosen = max(captures, key=lambda c: float(c["release_ratio"]))
+        chosen = next(c for c in captures
+                      if np.isclose(float(c["release_ratio"]), deployed_release_ratio))
         time, sigma, bent = service_series(chosen)
         release = float(chosen["release_ratio"])
         colours = style.TABLEAU[: sigma.shape[1]]
@@ -325,9 +335,17 @@ def figure_service_gate(captures, path: str | Path):
             axis.plot(time, sigma[:, mode], color=colours[mode], linewidth=0.8,
                       label=rf"mode {mode + 1}")
         if release > 0:
+            # The point of *full* release, not a threshold. The penalty is continuous --
+            # `kappa_j (sigma_j - 1)` with `kappa_j = Delta_j / (sigma* - 1)` -- so it equals
+            # the log-odds margin exactly at sigma* and a fraction of it below. In closed
+            # loop the vehicle leaves long before sigma* arrives, so the line is never
+            # crossed; labelling it bare invited the reader to read that as a dead gate.
             axis.axhline(release, color=style.ACCENT, linewidth=0.9,
                          linestyle=(0, (4, 2)),
-                         label=rf"$\sigma^*={release:g}$")
+                         label=rf"$\sigma^*={release:g}$ (full release)")
+            axis.annotate(rf"peak $\sigma_j={np.nanmax(sigma):.2f}$: the loop leaves first",
+                          xy=(0.015, 0.06), xycoords="axes fraction", fontsize=5.5,
+                          color=style.NEUTRAL)
         axis.set_ylabel(r"$\sigma_j$")
         axis.set_xticklabels([])
         axis.legend(loc="upper right", frameon=False, ncol=sigma.shape[1] + 1,

@@ -884,6 +884,13 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
     from ergodic_control_mppi.config import load_config
     from ergodic_control_mppi.experiments.uav_pillar_tuning import _grid_config, score_run
 
+    import jax
+
+    # Recorded from the backend actually in use, not asserted. This was hardcoded to "cpu"
+    # while the tier ran on cuda:0, so every row claimed a device it had not been flown on
+    # -- and the backend moves these chaotic loops in the last float32 bits, which is the
+    # whole reason the column exists.
+    device = str(jax.devices()[0])
     rows: list[dict] = []
     done: set[tuple[str, str, int]] = set()
     fingerprints = {m: cfg.fingerprint_for(m) for m in METHODS}
@@ -941,7 +948,7 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
                     # and a zero would read as a measured value rather than an absence.
                     ess_fractions=np.full(cfg.steps, np.nan),
                     temperatures=np.full(cfg.steps, np.nan),
-                    wall=wall, device="cpu",
+                    wall=wall, device=device,
                 )
                 row.update({
                     "method": method, "tier": tier, "map": name, "obs_num": obs_num,
@@ -989,7 +996,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tier", choices=("open", "clutter"), default="open")
     parser.add_argument("--methods", default=",".join(METHODS))
-    parser.add_argument("--seeds", default="43,44,45,46,47,48,49,50,51,52,53,54")
+    parser.add_argument("--seeds", default="43,44,45,46,47,48,49,50,51,52,53,54",
+                        help="comma-separated seed values (not a seed count)")
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--config", default="configs/uav_profile.yaml")
     parser.add_argument("--maps", type=Path,
@@ -1002,6 +1010,15 @@ def main() -> None:
     cfg = BaselineConfig(steps=arguments.steps)
     methods = [m.strip() for m in arguments.methods.split(",")]
     seeds = [int(s) for s in arguments.seeds.split(",")]
+    # `--seeds 6` reads as "six seeds" and parses as "the single seed 6". That silently ran
+    # a whole clutter tier at one seed, outside the campaign's 43.. family, and the result
+    # looked plausible enough to nearly ship. A lone small integer is always the mistake.
+    if len(seeds) == 1 and seeds[0] < 43:
+        raise SystemExit(
+            f"--seeds takes a comma-separated list, not a count: got {arguments.seeds!r}, "
+            f"which means the single seed {seeds[0]}. The campaign family starts at 43, "
+            f"e.g. --seeds {','.join(str(43 + i) for i in range(seeds[0]))}"
+        )
 
     from ergodic_control_mppi.config import load_config
 

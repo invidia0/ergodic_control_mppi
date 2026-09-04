@@ -15,7 +15,7 @@ values quoted in campaign_findings.md and marks them as quoted when the raw CSVs
 import argparse
 import csv
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -79,9 +79,19 @@ ARM_LABELS = {
     "refspeed_2.5": "$v{=}2.5$",
     "refspeed_3.0": "$v{=}3.0$",
     "memory_off": "Memory off",
-    "baseline@108": "Baseline",
-    "baseline@27": "Baseline (w27)",
 }
+
+
+def arm_label(arm: str) -> str:
+    """Display name for an arm, including the per-width baselines.
+
+    The baselines are keyed by the lane count they were measured at, which is a property of
+    the campaign's chunking rather than of the design -- hardcoding the widths here meant a
+    re-chunked campaign silently drew raw keys like ``baseline@36`` on an axis.
+    """
+    if arm.startswith(BASELINE + "@"):
+        return "Baseline"
+    return ARM_LABELS.get(arm, arm)
 
 # Two lines each, so the widest line rather than the whole phrase has to fit the block --
 # an axis block is only 0.14in per arm at 6.9in, and three of these axes hold a single arm.
@@ -106,7 +116,7 @@ AXIS_LABELS = {
     "transit_speedup": "Transit\nspeedup $\\beta$",
     "service_floor": "Service\nfloor $\\varepsilon_s$",
     "memory_balance": "Memory\nbalance $a$",
-    "track_weight": "Stein\nflow $\\gamma$",
+    "track_weight": "Reference\ntracking $\\gamma$",
 }
 
 # The five outcomes the sensitivity panel decomposes over, with the transform that makes a
@@ -213,6 +223,12 @@ def outcome_values(rows: list[dict[str, str]], name: str, transform: str) -> np.
 TYPICAL = "typical"
 
 
+def _main_width(table) -> str:
+    """Return the lane width used by the most arms in a campaign table."""
+    widths = [next(iter(rows.values()))["lanes"] for rows in table.values()]
+    return Counter(widths).most_common(1)[0][0]
+
+
 def add_typical_reference(table, name: str = TYPICAL):
     """Add a synthetic reference arm: the per-cell median over every real arm.
 
@@ -226,11 +242,12 @@ def add_typical_reference(table, name: str = TYPICAL):
     (`final_report.py`) stays paired against the baseline, where the contrast is the knob
     change and the comparison is a real one.
     """
-    # Width-108 arms only: the quarantined width-27 set includes a second copy of the
+    # Main-width arms only: the quarantined set includes a second copy of the
     # baseline, and a median that counted the shipped profile twice would be pulled toward
     # the very column this reference exists to place fairly.
+    main_width = _main_width(table)
     members = [a for a in table
-               if a != name and next(iter(table[a].values()))["lanes"] == "108"]
+               if a != name and next(iter(table[a].values()))["lanes"] == main_width]
     cells = set.intersection(*(set(table[a]) for a in members))
     reference = {}
     for cell in cells:
@@ -309,6 +326,8 @@ def sensitivity(table, arm: str,
 
     matrix = np.vstack(columns)
     gradient = np.array(means)
+    if not np.any(matrix):
+        return per_outcome, 0.0
     covariance = np.cov(matrix)
     # Ridge on the scale of the diagonal: with 108 cells and 5 outcomes the covariance is
     # well determined, but two near-collinear outcomes can still make it ill-conditioned,
@@ -357,6 +376,7 @@ def per_map_effects(table, arm: str, metric: str = "occupancy_mse",
 
 def holm(pvalues: list[float]) -> list[bool]:
     """Holm-Bonferroni step-down. Returns a reject mask in the input order."""
+    pvalues = np.nan_to_num(pvalues, nan=1.0).tolist()
     order = np.argsort(pvalues)
     n = len(pvalues)
     reject = [False] * n
@@ -506,7 +526,7 @@ def fig_dot_matrix(table, output: Path, metric: str = "occupancy_mse") -> Path:
 
         ticks = [t for t in range(-seeds, seeds + 1, 4)]
         axes.set_xticks(range(len(columns)))
-        axes.set_xticklabels([ARM_LABELS.get(a, a) for _, a in columns],
+        axes.set_xticklabels([arm_label(a) for _, a in columns],
                              rotation=90, fontsize=6.5, color=NEUTRAL)
         axes.set_yticks(ticks)
         axes.set_yticklabels([str(abs(t)) for t in ticks], fontsize=7, color=NEUTRAL)
@@ -588,13 +608,12 @@ def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
     # Under the default reference each arm pairs against the baseline at its own lane count,
-    # so no baseline is drawable and both are dropped. Under a neutral reference the shipped
-    # profile is a column like any other, and it is the width-108 one -- the branch 41 of the
-    # 45 arms ran on.
-    shipped = f"{BASELINE}@108"
+    # so no baseline is drawable. Under a neutral reference the shipped profile is a column
+    # like any other, on the width used by most arms.
+    shipped = f"{BASELINE}@{_main_width(table)}"
+    baselines = {a for a in table if a.startswith(BASELINE + "@")}
     hidden = {reference, TYPICAL} | (
-        {a for a in table if a.startswith(BASELINE + "@")}
-        if reference is None else {f"{BASELINE}@27"}
+        baselines if reference is None else baselines - {shipped}
     )
     arms = [a for a in table if a not in hidden]
     effects, tours, axis_of, value_of = {}, {}, {}, {}
@@ -604,7 +623,7 @@ def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
                                                       reference=reference)
         effects[arm] = (np.log2(base_values / arm_values), cells)
         rows = list(table[arm].values())
-        axis_of[arm] = rows[0].get("axis") or arm
+        axis_of[arm] = "Shipped profile" if arm == shipped else rows[0].get("axis") or arm
         try:
             value_of[arm] = float(rows[0].get("value") or 0.0)
         except ValueError:
@@ -923,7 +942,8 @@ def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
             top.set_ylim(-limit - 6.0,
                          top.transData.inverted().transform((0.0, tallest))[1] + 1.0)
         bottom.set_xticks(range(len(columns)))
-        bottom.set_xticklabels([ARM_LABELS.get(a, a) for _, a in columns], rotation=90,
+        bottom.set_xticklabels(["Baseline" if a == shipped else arm_label(a)
+                                for _, a in columns], rotation=90,
                                fontsize=tiny, color="black")
         # With a neutral reference the shipped profile is just another column, and the one
         # thing the reader is looking for is which column it is.
@@ -1031,7 +1051,7 @@ def fig_paired_arms(table, output: Path, metric: str = "occupancy_mse") -> Path:
         axis.axhline(0.0, color="#23272F", linewidth=0.8)
         axis.set_xticks(positions)
         axis.set_xticklabels(
-            [f"{ARM_LABELS[a]}\n" + (r"$p<0.001$" if p < 0.001 else f"$p={p:.3f}$")
+            [f"{arm_label(a)}\n" + (r"$p<0.001$" if p < 0.001 else f"$p={p:.3f}$")
              + ("$^*$" if s else "")
              for a, p, s in zip(ARMS, pvalues, significant)]
         )
@@ -1104,7 +1124,7 @@ def fig_effect_forest(table, output: Path, arms: list[str] | None = None,
                            va="center", fontsize=6.0, color="#5A6472")
             panel.axvline(0.0, color="#23272F", linewidth=0.8)
             panel.set_yticks(ys)
-            panel.set_yticklabels([ARM_LABELS.get(r[0][1], r[0][1]) for r in rows])
+            panel.set_yticklabels([arm_label(r[0][1]) for r in rows])
             panel.set_title(label)
             panel.set_xlabel(r"$\log_2$ ratio vs shipped (95% bootstrap CI)")
             panel.margins(y=0.16)
