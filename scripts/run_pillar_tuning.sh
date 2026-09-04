@@ -132,10 +132,23 @@ build_maps() {
     for map_seed in "$@"; do
         run_id="map_$map_seed"
         if [[ ! -f "$ROOT/maps/$run_id/arrays.npz" ]]; then
-            ROS_DOMAIN_ID=$((220 + index % 12)) $COMPOSE run --rm uav \
+            # Bounded like the probe above. A launch whose controller node dies leaves the
+            # others spinning and never exits, so one dead node wedges the build stage
+            # indefinitely -- which is what a transient GPU failure did. A map either
+            # records well inside this or it is not going to.
+            set +e
+            ROS_DOMAIN_ID=$((220 + index % 12)) \
+                timeout "${PILLAR_BUILD_TIMEOUT:-180}" $COMPOSE run --rm \
+                --name "pillar-build-$map_seed" uav \
                 ros2 launch ergodic_control_mppi_ros uav.launch.py \
                 "${launch_args[@]}" "map_seed:=$map_seed" "steps:=1" "device:=gpu" \
                 "preflight_steps:=0" "output_root:=/workspace/$ROOT/maps" "run_id:=$run_id"
+            status=$?
+            docker stop --timeout 1 "pillar-build-$map_seed" >/dev/null 2>&1 || true
+            set -e
+            if [[ ! -f "$ROOT/maps/$run_id/arrays.npz" ]]; then
+                echo "  build of $run_id wrote no arrays (rc=$status); continuing" >&2
+            fi
         fi
         index=$((index + 1))
     done
