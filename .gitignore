@@ -230,3 +230,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 results/
+scratch/
+attic/

@@ -86,28 +86,83 @@ class RampContrastTest(unittest.TestCase):
         )
 
     def test_marks_clear_the_field_ramp(self):
-        """Marks remain legible without decorative white halos."""
+        """Marks remain legible without decorative white halos.
+
+        Checked against the ramp the panels actually fill with. This used to use
+        ``style.OCCUPANCY_CMAP``, whose dark end is #8e8e8e, while every filled
+        panel draws ``MECHANISM_OCCUPANCY_CMAP``, which runs to #676767 -- so a
+        mark could pass here and still vanish into the field on the page.
+        """
         from ergodic_control_mppi.plotting.mechanism import (
-            FLOW_COLOR,
+            CONSTRUCTION,
+            INK,
+            MECHANISM_OCCUPANCY_CMAP,
             ROBOT_COLOR,
-            TARGET_COLOR,
+            ROBOT_EDGE,
+            TARGET_LINE,
         )
 
-        darkest = OCCUPANCY_CMAP(1.0)
+        darkest = MECHANISM_OCCUPANCY_CMAP(1.0)
         for name, color, background, minimum in (
-            ("old trail", TRAIL_CMAP(0.0), OCCUPANCY_CMAP(0.0), 1.3),
-            ("new trail", TRAIL_CMAP(1.0), darkest, 5.0),
-            ("robot", ROBOT_COLOR, darkest, 1.5),
-            ("target", TARGET_COLOR, darkest, 1.5),
-            ("mode", "#33415C", darkest, 3.0),
-            ("flow", FLOW_COLOR, darkest, 2.0),
+            ("old trail", TRAIL_CMAP(0.0), MECHANISM_OCCUPANCY_CMAP(0.0), 1.3),
+            ("new trail", TRAIL_CMAP(1.0), darkest, 2.5),
+            ("flat trail", INK, darkest, 2.5),
+            ("robot ring", ROBOT_EDGE, darkest, 2.5),
+            ("robot fill", ROBOT_COLOR, ROBOT_EDGE, 10.0),
+            ("target contour", TARGET_LINE, darkest, 1.5),
+            ("construction", CONSTRUCTION, darkest, 2.0),
+            ("mode", "#33415C", darkest, 1.7),
         ):
             with self.subTest(mark=name):
-                ratio = _contrast(matplotlib.colors.to_rgb(color), background)
+                ratio = _contrast(matplotlib.colors.to_rgb(color),
+                                  matplotlib.colors.to_rgb(background))
                 self.assertGreaterEqual(
                     ratio, minimum,
                     f"{name} reads only {ratio:.2f}:1 against its field background",
                 )
+
+    def test_marks_clear_the_bare_panel(self):
+        """The vector-field panel has no fill under it, so its marks sit on SURFACE."""
+        from ergodic_control_mppi.plotting.mechanism import FLOW_COLOR, RECENCY_COLOR
+
+        surface = matplotlib.colors.to_rgb(SURFACE)
+        for name, color in (("flow", FLOW_COLOR), ("recency", RECENCY_COLOR)):
+            with self.subTest(mark=name):
+                ratio = _contrast(matplotlib.colors.to_rgb(color), surface)
+                self.assertGreaterEqual(
+                    ratio, 3.0,
+                    f"{name} reads only {ratio:.2f}:1 against the panel {SURFACE}",
+                )
+
+    def test_target_contours_clear_every_step_of_the_field(self):
+        """A line drawn over a filled ramp has to clear the whole ramp, not its ends.
+
+        The failure this catches is silent and was live: a mid-tone blue matches the
+        ramp's luminance somewhere in the middle and the contour disappears exactly
+        where the occupancy ridge is, which is the part of the figure being argued
+        about. The rejects below are the two obvious candidates -- the colour this
+        replaced (#356FA8, 1.08:1) and the paper blue taken straight (#0078FF,
+        1.03:1) -- so the guard fails what it was written for.
+        """
+        from ergodic_control_mppi.plotting.mechanism import (
+            MECHANISM_OCCUPANCY_CMAP,
+            TARGET_LINE,
+        )
+
+        def worst(color):
+            return min(
+                _contrast(matplotlib.colors.to_rgb(color), MECHANISM_OCCUPANCY_CMAP(v))
+                for v in np.linspace(0.0, 1.0, 33)
+            )
+
+        ratio = worst(TARGET_LINE)
+        self.assertGreaterEqual(
+            ratio, 1.5,
+            f"target contours read {ratio:.2f}:1 at the worst step of the field ramp",
+        )
+        for reject in ("#356FA8", "#0078FF"):
+            with self.subTest(reject=reject):
+                self.assertLess(worst(reject), 1.5)
 
     def test_trail_ramp_darkens_with_recency(self):
         samples = np.asarray([TRAIL_CMAP(value)[:3] for value in np.linspace(0, 1, 9)])

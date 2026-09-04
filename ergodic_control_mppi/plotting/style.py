@@ -52,26 +52,27 @@ OUTSIDE_TICKS = {
     "axes.titlesize": 7.5,
 }
 
-SURFACE = "#DCE2EC"  # axes.facecolor; every ramp below is validated against it
+SURFACE = "#E2E3E6"  # axes.facecolor; every ramp below is validated against it
 
 
 def sequential(hue: str = "Blues", low: float = 0.55, high: float = 0.95) -> LinearSegmentedColormap:
     """Single-hue ramp clipped so its light end still reads against SURFACE.
 
-    The chart surface is light *and* blue, so a ramp running to near-white loses
-    its low end into the background -- measured WCAG contrast of the lightest
-    step against SURFACE:
+    The chart surface is light, so a ramp running to near-white loses its low end
+    into the background -- measured WCAG contrast of the lightest step against
+    SURFACE:
 
-        Blues full   #f7fbff   1.25:1   invisible
-        Blues @0.35  #a6cee4   1.28:1   invisible
-        Blues @0.55  #5ba3d0   2.12:1   ok      <- default here
-        Reds  @0.55  #f6583e   2.53:1   ok
-        cividis      #f3db42   1.07:1   invisible (and multi-hue)
+        Blues full   #f7fbff   1.27:1   invisible
+        Blues @0.35  #a6cee4   1.30:1   invisible
+        Blues @0.55  #5ba3d0   2.15:1   ok      <- default here
+        Reds  @0.55  #f6583e   2.56:1   ok
+        cividis      #f3db42   1.08:1   invisible (and multi-hue)
 
     2:1 is the floor for the lightest step of an ordinal ramp. Darkening the
-    surface does not help -- it lowers contrast with a light-ended ramp further
-    (#CBD5E3 gives 1.13:1) -- so the ramp is clipped instead of the surface
-    changed. Verified with the dataviz palette validator, not by eye.
+    surface does not help -- it lowers contrast with a light-ended ramp further --
+    so the ramp is clipped instead of the surface changed. Verified with the
+    dataviz palette validator, not by eye. (These figures moved a fraction when
+    the panel went from blue-grey to neutral grey; the ordering did not.)
     """
     base = plt.get_cmap(hue)
     return LinearSegmentedColormap.from_list(
@@ -113,16 +114,28 @@ TRAIL_CMAP = LinearSegmentedColormap.from_list(
     "trail", ["#D5DAE0", "#73808C", "#101820"]
 )
 
-# Figure widths in inches. IEEE two-column: 3.35in single, 6.9in double.
+# Figure widths in inches, measured off the class rather than guessed: IEEEtran conference
+# reports \columnwidth = 252pt = 3.5in and \textwidth = 516pt = 7.167in. Rendering at
+# exactly those widths makes `\includegraphics[width=\linewidth]` a no-op, which is what
+# keeps the numbers below honest -- a figure drawn narrower is scaled up on the page and
+# every point size in it grows by the same factor.
 FIGSIZES = {
-    "column": (3.35, 2.4),
-    "double": (6.9, 2.6),
+    "column": (3.5, 2.4),
+    "double": (7.167, 2.6),
     "poster": (9.2, 5.4),
 }
 
+# Point sizes as they land on the page, given the widths above. The body text is 10pt and
+# captions are 8pt, so 8pt labels sit exactly at caption size and read as part of the page
+# rather than as something pasted onto it; ticks drop to 7pt (the class's scriptsize) and
+# titles rise to 9pt (its small).
+#
+# "column" and "double" carry the *same* sizes on purpose. They used to differ, which only
+# made sense while both were being rescaled by different factors; at 1:1 a double-width
+# figure with larger type just looks like a different paper.
 _FONT_SIZES = {
-    "column": {"title": 8.5, "label": 8.0, "tick": 7.0, "legend": 7.0},
-    "double": {"title": 9.0, "label": 8.5, "tick": 7.5, "legend": 7.5},
+    "column": {"title": 9.0, "label": 8.0, "tick": 7.0, "legend": 7.5},
+    "double": {"title": 9.0, "label": 8.0, "tick": 7.0, "legend": 7.5},
     "poster": {"title": 16.0, "label": 16.0, "tick": 16.0, "legend": 16.0},
 }
 
@@ -146,13 +159,16 @@ def paper_style(size: str = "column") -> dict[str, Any]:
         "font.serif": ["STIXGeneral", "DejaVu Serif", "Times New Roman"],
         "mathtext.fontset": "stix",
         "text.usetex": False,
-        # Palette: the blue-ish panel and grey-ish grid, unchanged.
+        # Palette: a neutral grey panel with a near-white grid. Grey rather than the
+        # blue-grey this used to be, so the panel takes no side among the hues sitting
+        # on it -- with a blue "ours" and a blue-ended diverging scale in the same
+        # paper, a blue panel put a thumb on the scale.
         "figure.facecolor": "#FFFFFF",
-        "axes.facecolor": "#DCE2EC",
-        "axes.edgecolor": "#98A4BA",
+        "axes.facecolor": SURFACE,
+        "axes.edgecolor": "#A9ABB0",
         "axes.grid": True,
         "axes.axisbelow": True,
-        "grid.color": "#E8ECF4",
+        "grid.color": "#EDEEF0",
         "grid.alpha": 0.9,
         "grid.linewidth": 0.75 if size != "poster" else 0.9,
         # SciencePlots "ieee" structure: ticks in, on all four sides, minors on.
@@ -171,7 +187,7 @@ def paper_style(size: str = "column") -> dict[str, Any]:
         "lines.markersize": 3.0,
         "legend.frameon": True,
         "legend.framealpha": 0.85,
-        "legend.edgecolor": "#98A4BA",
+        "legend.edgecolor": "#A9ABB0",
         "legend.borderpad": 0.3,
         "legend.handlelength": 1.6,
         "axes.prop_cycle": mpl.cycler(color=TABLEAU),

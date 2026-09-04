@@ -479,7 +479,7 @@ def trajectory_snapshot(
                 axes.set_title(title, pad=0.0)
             written = style.save(figure, output, dpi=dpi)
             plt.close(figure)
-            return _crop_transparent(written) if bare else written
+            return _crop_transparent(written, pad_fraction_x=0.005) if bare else written
 
         x, y, z = _pillar_cloud(
             centres, resolution, altitude, top, density=cloud_density,
@@ -674,7 +674,8 @@ def _draw_cylinder_scene(axes, components, base, top, colour_map, alpha,
     return order + 1
 
 
-def _crop_transparent(path: Path, pad_fraction: float = 0.035) -> Path:
+def _crop_transparent(path: Path, pad_fraction: float = 0.02,
+                      pad_fraction_x: float | None = None) -> Path:
     """Trim the fully transparent border off a saved figure, leaving a small one.
 
     A bare 3D axis fills the canvas with an invisible projection box, so matplotlib's tight
@@ -699,11 +700,22 @@ def _crop_transparent(path: Path, pad_fraction: float = 0.035) -> Path:
             # the border, which reads as the scene being cut off rather than framed. The
             # border is pasted on rather than taken from the canvas: whether any slack is
             # left there depends on the camera, and at azimuth -90 there is none at the top.
-            pad = round(pad_fraction * max(crop.size))
-            if pad:
-                bordered = Image.new("RGBA", (crop.width + 2 * pad, crop.height + 2 * pad),
-                                     (0, 0, 0, 0))
-                bordered.paste(crop, (pad, pad))
+            #
+            # Per axis, not one pad off the long edge: this scene is about 2:1, so a single
+            # pad sized on the width came to roughly a seventh of the height on each of the
+            # top and bottom, which is a band of empty page the figure pays for twice.
+            #
+            # The sides get less again. The figure is placed at \linewidth, so horizontal
+            # slack is not free space -- it is scaled away, and everything else grows with
+            # it. A narrow side margin means a larger scene for the same column width.
+            pad_x = round((pad_fraction if pad_fraction_x is None else pad_fraction_x)
+                          * crop.width)
+            pad_y = round(pad_fraction * crop.height)
+            if pad_x or pad_y:
+                bordered = Image.new(
+                    "RGBA", (crop.width + 2 * pad_x, crop.height + 2 * pad_y), (0, 0, 0, 0)
+                )
+                bordered.paste(crop, (pad_x, pad_y))
                 crop = bordered
             crop.save(path)
     return path

@@ -1,0 +1,168 @@
+# Deployment profile for the fixed-altitude single-UAV runs.
+#
+# Derived from configs/mppi_params.yaml, which stays the paper configuration and is not
+# touched by any deployment work. Only the settings the deployment *forces* differ; the
+# tuning-derived values (the winning ablation arm, and the T/K/memory_time that clear the
+# real-time deadline) are merged in after the campaign and the screen, per the plan.
+#
+# Every difference from mppi_params.yaml is marked "UAV:" with its reason.
+#
+# Campaign results merged from configs/experiments/campaign_findings.md: K, memory_time,
+# memory_scales and the bandwidths below carry the settled, scale-corrected findings.
+#
+# Deliberately NOT merged:
+#   - mppi.T = 150. That win is a v = 4.0 phenomenon; at the v = 2 row of the speed x
+#     horizon grid the curve is nearly flat and T = 150 carries the fatter tail. This
+#     profile flies a 2x wider target with a slower vehicle, which argues for a longer
+#     horizon, so T stays 350 and the screen sweeps {100, 150, 250, 350, 500}.
+#   - stein.theta = 0 and memory_gain = 60. Both sit in the campaign's `generalization`
+#     stage, which had not reported when this was written. Do not build on either yet.
+#   - weight_stein = 6000. It scored best, but 3000 is inside the acceptable band and
+#     chasing the better number is not worth a re-screen.
+
+# Run-level settings
+seed: 43
+steps: 20000
+
+# MPPI controller settings
+mppi:
+  T: 350  # planning horizon; screened over {100, 150, 250, 350, 500} -- see below
+  # UAV: 250 rather than 1000. Campaign finding 6: above T >= 100, K = 125 and K = 4000
+  # differ by under 5% over 21 runs per level. This is the cheapest way to buy real-time
+  # margin at 50 Hz, and it costs nothing measurable in coverage.
+  K: 500
+  # Left at 1.0: the adaptive loop ramps to its working value in ~340 steps (7 s at 50 Hz),
+  # a transient short enough not to matter over a 20 000-step run. Raising this to skip the
+  # ramp would be a different configuration from the one measured below.
+  lambda: 1.0
+  alpha: 0.95       # control-cost weight; (1-alpha) is temperature-independent, so at long T it must be high to keep ESS healthy
+  exploration: 0.1  # fraction of rollouts that ignore warm-start controls
+  ess_target: 0.3   # target effective sample size fraction for adaptive lambda
+  lam_min: 0.05
+  # UAV: 1000 rather than 20. At 20 the cap, not the ESS controller, set the temperature:
+  # lambda pinned at 20 from step ~250 onward and the achieved ESS was 0.6% against the
+  # 0.3 target, i.e. the MPPI weights were one-hot and the update was argmin over rollouts
+  # rather than a weighted average. Given authority the loop converges to lambda = 151.8 on
+  # its own and holds ESS at 34%. It self-limits -- caps of 1e3, 1e4 and 1e5 all converge to
+  # the same 151.8 -- so this is not a sensitive number; anything above ~200 works.
+  #
+  # Measured, 18 seeds x 20 000 steps: all three modes reached on 18/18 seeds against 14/18,
+  # and occupancy MSE 3.87e-07 against 4.22e-07. Note Fourier ergodicity is ~14% worse
+  # (0.0506 vs 0.0443): the vehicle spends less time parked in a mode (in_mode 0.39 vs 0.50)
+  # and more in transit, which matches the spatial target better and its spectrum worse.
+  #
+  # Rescaling the penalty weights does NOT substitute for this. With the cap left at 20,
+  # scaling oom/obstacle/boundary by 0.1 or 0.01 still pins lambda and still gives ESS < 1%.
+  lam_max: 1000.0
+  noise:
+    sigma:
+      - [0.9, 0.0, 0.0]  # linear x
+      - [0.0, 0.9, 0.0]  # linear y
+      - [0.0, 0.0, 0.45] # angular
+
+# Map and obstacle costs
+map:
+  x_limits: [-20.0, 20.0]
+  y_limits: [-10.0, 10.0]
+  resolution: 0.15
+  oom_cost: 1e3
+  boundary_margin: 1.5
+  boundary_weight: 100.0
+
+  obstacles:
+    # UAV: no circles. Obstacles come from the runtime occupancy grid the map adapter
+    # publishes, which is the real map the vehicle flies in. Leaving circles here as well
+    # would charge two unrelated obstacle fields at once.
+    num_obstacles: 0
+    min_radius: 0.5
+    max_radius: 1.5
+    x_limits: [-16.0, 16.0]
+    y_limits: [-8.0, 8.0]
+    weight: 1e3
+    safe_distance: 0.3
+
+# Target density p(x): Gaussian mixture in R^2
+density:
+  weights:
+    - 0.33333334
+    - 0.33333334
+    - 0.33333334
+  means:
+    - [0.0, 6.0]
+    - [-12.0, -4.0]
+    - [12.0, -4.0]
+  covariances:
+    - [[12.0, 0.0], [0.0, 2.0]]
+    - [[8.0, 2.0], [2.0, 3.0]]
+    - [[8.0, -2.0], [-2.0, 3.0]]
+
+# Stein flow settings
+stein:
+  # Was 30.0. Set to 15 on 2026-08-05: this is what every recorded flight actually flew
+  # (via the sweep_theta_15 override), so the profile now *is* the flown configuration
+  # rather than a reference point nothing was measured at.
+  #
+  # The value is settled, the earlier theta = 0 recommendation is retracted. One controlled
+  # run -- same grid, 12 seeds, alpha = 0.95, one runner, one batch width -- across three
+  # maps, tours at theta 0 / 15 / 45:
+  #     518: 21 / 30 / 17   -> 15 wins (p = 0.078), and 0 missed all-modes in 2 of 12
+  #     516: 36 / 18 / 19   -> 0 wins  (p = 0.0010)
+  #     539: 19 / 22 / 13   -> 15 wins (p = 0.727)
+  # Two of three favour 15 and it reaches more modes on two of three, so 15 ships. The
+  # pillar campaign's "curl monotonically harmful, ship theta = 0" (rho = -0.687,
+  # p = 1.35e-09) was measured on map 516 alone, which is anomalous on this axis and on
+  # alpha both. Large curl *is* harmful everywhere: theta = 45 loses on all three.
+  #
+  # Archived: results/archive/2026-08-05/csv/gate_batch.csv, stage `theta`.
+  theta: 15.0
+  weight_stein: 3000.0
+  ell_self: 1.0
+  # UAV: 1.8 rather than 4.0. The safety shield refuses any command above max_speed
+  # (2.0 m/s), so a higher reference speed would be braked continuously rather than flown.
+  # Set strictly below the cap, not equal to it: at exactly 2.0 the smoke run grazed the
+  # limit and tripped the guard on sampling noise alone.
+  reference_speed: 1.8
+
+  # UAV: 5.5 rather than 10.0. tau sets the trail length the vehicle forgets over, tau*v.
+  # The campaign's winning tau = 2.5 s at v = 4.0 is a 10 m trail; at this profile's
+  # 1.8 m/s the same 10 m needs tau = 5.5. Scaled, not copied. Also drops the derived
+  # memory_length from 1500 to 825.
+  memory_time: 5.5
+
+  memory_balance: 0.85  # inert: smallest span of all 11 screened axes (8.9%)
+  memory_gain: 15.0     # >0 is what carries the method; memory_off loses 80/80 seeds
+
+  # UAV: one scale rather than three. The 10-seed structure grid puts Q=1 at the geometric
+  # midpoint within 3.3% of Q=3 at every balance setting, so the bank buys nothing here.
+  #
+  # The bank is geomspace(fine, coarse, Q) averaged as total/Q (stein.py), so at Q=1 the
+  # *fine* endpoint is the one scale in play and coarse_bandwidth is inert. Adding scales
+  # does not add resolution, it splits weight: Q=3 over [0.08, 0.73, 6.6] puts two thirds
+  # of the memory on track-spacing detail and visits all three modes on 1 seed in 6, as bad
+  # as no coarse scale at all. A single well-placed scale beat every bank tested.
+  #
+  # h is the load-bearing number for mode visitation. The repulsion kernel peaks at
+  # sqrt(h/2), and that peak has to sit at 0.55-0.80 of a mode radius (2.35-2.65 m here):
+  # narrower and the memory only senses track spacing, so nothing ever tells the vehicle a
+  # basin is finished; broader and it evicts the vehicle before a dwell qualifies as a
+  # visit. Measured over 18 seeds, all-three-modes reached in 8000 steps:
+  #   h=0.94 -> 2/18   h=5.0 -> 9/18   h=6.0 -> 5/18   h=6.6 -> 8/18   h=8.5 -> 0/6
+  # h = 5.0 also gives the best occupancy MSE (7.16e-07 against 7.99e-07 at 0.94) and is
+  # the only setting that has completed a full mode cycle, so there is no trade to make.
+  #
+  # NOTE this is *not* the campaign's sqrt(h_f * h_c) = 0.94 midpoint rule. That rule was
+  # fitted on modes at +-6; at +-12 it collapses the scale to 0.28 of a mode radius, well
+  # under the working band. See configs/experiments/campaign_findings.md.
+  memory_scales: 1
+  fine_bandwidth: 5.0
+  # Inert at Q=1. Kept as the correct upper endpoint should the bank ever be re-enabled:
+  # 0.6 x the derived h_c of 11.0 (median tr(Sigma) for this density).
+  coarse_bandwidth: 6.6
+
+model:
+  delta_t: 0.02
+  # UAV: 8.0 rather than 15.0. 15 m/s^2 is over 1.5 g of lateral acceleration, which the
+  # SO3 attitude loop cannot follow at this altitude; the screen searches around this.
+  double_integrator:
+    max_accel_lin_abs: 8.0
+    max_accel_ang_abs: 15.0

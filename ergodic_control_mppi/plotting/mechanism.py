@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import LineCollection
-from matplotlib.colors import PowerNorm
+from matplotlib.colors import LinearSegmentedColormap, PowerNorm, to_rgb
 from matplotlib.ticker import MultipleLocator
 
 from ergodic_control_mppi.config import load_config
@@ -54,19 +54,76 @@ from ergodic_control_mppi.plotting.style import (
 )
 
 MECHANISM_OCCUPANCY_CMAP = sequential("Greys", 0.05, 0.67)
-TARGET_CMAP = sequential("Blues", 0.45, 0.95)
-TARGET_COLOR = "#356FA8"
 
-# Edge-profile fills. Each one is the colour its own field already has on the map,
-# so a strip needs no legend: occupancy is a light step off the grey ramp it is
-# drawn with, the target is the violin-family periwinkle
-# (scripts/report_figures.py:1265) that sits with the blue target contours -- bright
-# and lifted toward white, because a large filled area wants a lighter tint than a
-# line does. Red is left free to mean one thing only: the excess.
+# One hue for the target, everywhere it appears: the paper blue #0078FF that the
+# deployment pillars (style.PILLAR_CMAP) and the ablation figures are keyed to.
+# Two steps of it, because a line and a filled area need different weights of the
+# same colour, and one darker text step:
+#
+#   TARGET_LINE  contours on the map, and the target's edge in a strip. Drawn
+#     over the occupancy ramp, so it has to clear that ramp's whole range and not
+#     just its ends -- the ramp runs #f9f9f9 -> #676767, and any mid-tone (the old
+#     #356FA8 read 1.08:1, plain #0078FF reads 1.03:1) disappears somewhere along
+#     it. #004899 is the paper hue taken below the ramp's dark end: 1.55:1 at the
+#     worst point, 8.8:1 on white. No halo -- see the marks test.
+#   TARGET_FILL  the strip areas, which sit on white, not on the ramp. Lifted
+#     rather than darkened, because a large filled area wants a lighter tint than
+#     a line does, and bright enough (2.32:1 on white, against #A0C4FF's 1.77:1)
+#     that the grey standing clear of it is legible at 8pt.
+#
+# Occupancy keeps the grey it already has on the map, so a strip needs no legend.
+# Red is left free to mean one thing only: the excess.
+TARGET_LINE = "#004899"
+TARGET_FILL = "#66AEFF"
+TARGET_COLOR = TARGET_LINE  # target labels and curves outside the map
+
+# The target on a map, filled rather than drawn as rings. Both densities being
+# compared are then the same kind of object -- two fields, one grey and one blue --
+# instead of one field and a ladder of lines around it, which read as a boundary
+# of something rather than as an amount of something.
+#
+# The ramp carries its own alpha: transparent where the target is negligible, so
+# the occupancy underneath is never tinted by a field that is not there, and only
+# partly opaque at the modes, so the grey still shows through where the two
+# overlap -- which is the whole comparison the figure is about.
+# The level boundaries of that fill, drawn as hairlines on top: light, so they
+# sit inside the blue as structure rather than on it as a second mark, and they
+# fade out on their own where the fill does -- a line this pale over the bare grey
+# is not there, which is the right answer in a region with no target in it.
+TARGET_EDGE = "#DCEBFF"
+
+TARGET_CMAP = LinearSegmentedColormap.from_list(
+    "target_fill",
+    [(*to_rgb(TARGET_FILL), 0.0), (*to_rgb(TARGET_FILL), 0.26),
+     (*to_rgb(TARGET_LINE), 0.38)],
+)
 OCCUPANCY_FILL = MECHANISM_OCCUPANCY_CMAP(0.42)
-TARGET_FILL = "#A0C4FF"
 OCCUPANCY_LABEL = "#4B5563"  # darker companion of OCCUPANCY_FILL, for text on white
-ROBOT_COLOR = "tab:red"
+
+# Level rules on the occupancy fill, the counterpart of TARGET_EDGE on the target.
+# Dark where the target's are light, because each field's rules belong to its own
+# colour and the two fills overlap: pale rules on both would be one ladder over
+# two densities. Like TARGET_EDGE they fade where their own fill runs out -- here
+# into the ridge core, which the fill has already said is the maximum.
+OCCUPANCY_EDGE = "#5B6572"
+
+# Construction ink: the kernel circle and its spoke, the profile cuts, the focus
+# point, the locator's crop box. One colour for "this is drawing, not data", and
+# dark enough (3.16:1) to clear the field ramp wherever it lands.
+CONSTRUCTION = "#1F2937"
+
+# The trail's own dark end, TRAIL_CMAP(1.0). Used wherever a path is drawn flat --
+# pure black is a value the trail ramp itself is tested for not reaching.
+INK = "#101820"
+
+# The vehicle: a white dot with an ink ring, not the old `tab:red`. Red now belongs
+# to the excess, and no mid-tone hue survives the occupancy ramp -- it clears the
+# ramp's ends and vanishes into its middle. White is the one value that reads at
+# every step of it (5.65:1 at the dark end), and a white marker on a dark ring is
+# already the house marker for a point on top of a dense mark (the violin medians
+# in scripts/report_figures.py).
+ROBOT_COLOR = "#FFFFFF"
+ROBOT_EDGE = INK
 FLOW_COLOR = "#A12F3B"
 RECENCY_COLOR = "#26747A"
 
@@ -253,21 +310,35 @@ def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4, flat: str | None 
         collection.set_array(recency[1:])
         collection.set_clim(0.0, 1.0)
         axis.add_collection(collection)
-    axis.plot(*ctx["position"], marker="o", markersize=5.5, color=ROBOT_COLOR,
-              markeredgecolor="#20252B", markeredgewidth=0.45, zorder=zorder + 1)
+    axis.plot(*ctx["position"], marker="o", markersize=6.5, color=ROBOT_COLOR,
+              markeredgecolor=ROBOT_EDGE, markeredgewidth=1.0, zorder=zorder + 1)
     return collection
 
 
-def _target_contours(axis, ctx, levels=12, cmap=TARGET_CMAP,
-                     limits=None, gmm=None, linewidth: float = 0.7,
-                     alpha: float = 1.0) -> None:
-    """Draw visible target-density context beneath the trajectory marks."""
+def _target_contours(axis, ctx, levels=10, cmap=TARGET_CMAP, limits=None, gmm=None,
+                     rule: float = 0.3, rule_color: str = TARGET_EDGE) -> None:
+    """Draw the target density as a filled blue field, under the trajectory marks.
+
+    Filled rather than a ring ladder: the figure sets two densities against each
+    other, so both should be fields. The levels are still drawn, as hairlines on
+    the boundaries of the bands they belong to -- a fill alone says how much, and
+    the rules say how much per step, which is what makes the falloff readable
+    rather than merely visible.
+    """
     grid_x, grid_y, points = _grid(ctx, n=160, limits=limits)
     density = np.asarray(
         pdf(jnp.asarray(points, jnp.float32), gmm if gmm is not None else ctx["gmm"])
     )
-    axis.contour(grid_x, grid_y, density.reshape(grid_x.shape), levels=levels,
-                 cmap=cmap, linewidths=linewidth, alpha=alpha, zorder=1)
+    field = density.reshape(grid_x.shape)
+    # No `set_edgecolor("face")` here, unlike the opaque field in `_field_map`.
+    # On a translucent fill the stroke composites a second time over its own band
+    # and over its neighbour, and every boundary comes back as a heavy ring -- the
+    # exact artefact the stroke removes when the fill is opaque. The rules below
+    # are that boundary drawn deliberately, at a width and a colour chosen for it.
+    filled = axis.contourf(grid_x, grid_y, field, levels=levels, cmap=cmap, zorder=1)
+    if rule:
+        axis.contour(grid_x, grid_y, field, levels=filled.levels[1:],
+                     colors=rule_color, linewidths=rule, alpha=0.75, zorder=1)
 
 
 def _map_axes(axis, ctx, *, ylabel: bool = False, limits=None) -> None:
@@ -334,31 +405,56 @@ def _inline_colorbar(figure, axis, mappable, label: str, *, backing: bool = Fals
 
 
 def _field_map(axis, grid_x, grid_y, values, *, cmap=MECHANISM_OCCUPANCY_CMAP,
-               norm=None, vmax=None):
-    """Filled field contours under everything else."""
+               norm=None, vmax=None, levels: int = 24, rules: int = 0,
+               rule_color: str = OCCUPANCY_EDGE):
+    """Filled field contours under everything else.
+
+    ``rules`` draws that many level lines over the fill, as ``_target_contours``
+    does for the target. They are spaced evenly *through the norm* rather than
+    evenly in value: the fill's own bands are, so value-spaced rules would visibly
+    disagree with the shading they are drawn on.
+    """
     if norm is None:
         norm = PowerNorm(0.5, vmin=0.0, vmax=vmax if vmax is not None else values.max())
     # A grid over a filled field is noise, and axisbelow puts it above the field.
     axis.grid(False)
-    return axis.contourf(
-        grid_x, grid_y, values.reshape(grid_x.shape), levels=24,
+    # ``levels`` is a resolution knob, not a style one. 24 is right for a
+    # workspace-wide map, where the field changes fast enough that the bands are
+    # not separately visible; a zoomed crop of a smooth region needs far more, or
+    # the terraces read as a topographic staircase belonging to the drawing rather
+    # than to the density. Raising it also lightens the low end, since the lowest
+    # band then spans a much smaller range -- fine on a crop, but it would wash out
+    # the halo the workspace map exists to show.
+    filled = axis.contourf(
+        grid_x, grid_y, values.reshape(grid_x.shape), levels=levels,
         cmap=cmap, norm=norm, zorder=0,
     )
+    if rules:
+        axis.contour(
+            grid_x, grid_y, values.reshape(grid_x.shape),
+            levels=norm.inverse(np.linspace(0.0, 1.0, rules + 1)[1:-1]),
+            colors=rule_color, linewidths=0.3, alpha=0.55, zorder=0,
+        )
+    # Each level is a separate polygon, so at 64 of them the antialiased seams
+    # between neighbours show as white hairlines across the field. Stroking every
+    # band in its own fill colour closes them.
+    filled.set_edgecolor("face")
+    return filled
 
 
 def figure_occupancy(ctx, output: Path) -> Path:
     """Fig. 1 -- the occupancy proxy the memory maintains, and the trail behind it.
 
-    One map, because there is one object: eq. (occupancy_density) at the coarse
+    One map, because there is one object: eq. (occupancy_density) at the deployed
     scale, with the buffer that generated it drawn on top fading from soft
     blue-grey (oldest) to near-black (newest), ending at the blue robot marker.
     PowerNorm(1/2) rather than a linear norm -- occupancy is a sum of P narrow
     kernels, so linearly the halo around the track is invisible and only a thin
     ridge survives.
     """
-    coarse = float(ctx["stein"].coarse_bandwidth)
+    bandwidth = float(ctx["stein"].fine_bandwidth)
     grid_x, grid_y, points = _grid(ctx, n=220)
-    occupancy, _, _ = _field_at(ctx, points, coarse)
+    occupancy, _, _ = _field_at(ctx, points, bandwidth)
 
     with plt.rc_context(rc=paper_style("column")):
         figure, axis = plt.subplots(figsize=(3.35, 3.15), constrained_layout=True)
@@ -367,7 +463,7 @@ def figure_occupancy(ctx, output: Path) -> Path:
         _trail(axis, ctx)
         _modes(axis, ctx)
         _map_axes(axis, ctx, ylabel=True)
-        axis.set_title(rf"occupancy $o^{{h_c}}_t$,  $h_c={coarse:.2f}$")
+        axis.set_title(rf"occupancy $o^{{h}}_t$,  $h={bandwidth:.2f}$")
         _inline_colorbar(figure, axis, mesh, r"$o^{h_c}_t(\mathbf{z})$  [m$^{-2}$]")
         path = save(figure, output)
         plt.close(figure)
@@ -394,7 +490,7 @@ def _focus_point(ctx, bandwidth: float) -> tuple[int, np.ndarray]:
 
 
 def _edge_profile(axis, coordinate, fields, vmax, excess_max, *, vertical: bool,
-                  depth: float = 0.22, labels: tuple[str, ...] = ()) -> None:
+                  depth: float = 0.24, labels: tuple[str, ...] = ()) -> None:
     """One chromeless o-vs-p* cut, drawn just outside an edge of a map panel.
 
     The comparison eq. (relative_excess) makes is local, so it does not need
@@ -423,6 +519,15 @@ def _edge_profile(axis, coordinate, fields, vmax, excess_max, *, vertical: bool,
     fill = strip.fill_betweenx if vertical else strip.fill_between
     fill(coordinate, 0.0, occupancy, color=OCCUPANCY_FILL, linewidth=0, alpha=0.9)
     fill(coordinate, 0.0, target, color=TARGET_FILL, linewidth=0, alpha=0.9)
+    # Each fill also gets its own crest as a line. The claim the strip makes is
+    # "where the grey stands clear of the blue", i.e. the gap between two curves --
+    # as two washes alone that gap is bounded by the edge of a tint, and at 8pt the
+    # thin tail of p* reads as nothing at all rather than as a small number.
+    for values, colour, width in ((occupancy, OCCUPANCY_LABEL, 0.55),
+                                  (target, TARGET_LINE, 0.8)):
+        crest = (values, coordinate) if vertical else (coordinate, values)
+        strip.plot(*crest, color=colour, linewidth=width, solid_capstyle="round",
+                   zorder=3)
     line = (excess_curve, coordinate) if vertical else (coordinate, excess_curve)
     strip.plot(*line, color=ACCENT, linewidth=1.4, solid_capstyle="round", zorder=4)
     span, density = (strip.set_ylim, strip.set_xlim) if vertical else (strip.set_xlim, strip.set_ylim)
@@ -449,11 +554,11 @@ def _edge_profile(axis, coordinate, fields, vmax, excess_max, *, vertical: bool,
     gap_at = np.argmax(occupancy - excess_curve)
     specs = {
         "o": (occupancy, gap_at, OCCUPANCY_LABEL,
-              r"$o^{h_c}_t$", (0, 3), "center", "bottom"),
+              r"$o^{h_c}$", (0, 3), "center", "bottom"),
         "p": (target, np.argmax(target), TARGET_COLOR,
               r"$p^\star_{h_c}$", (3, 3), "left", "bottom"),
         "e": (excess_curve, np.argmax(excess_curve), ACCENT,
-              r"$e^{h_c}_t$", (3, 3), "left", "bottom"),
+              r"$e^{h_c}$", (3, 3), "left", "bottom"),
     }
     for name in labels:
         values, at, colour, text, offset, align, vertical_align = specs[name]
@@ -468,9 +573,14 @@ def figure_excess_focus(ctx, output: Path) -> Path:
     """Fig. 3 -- the relative excess, read off one memory point.
 
     One panel: the neighbourhood around the most over-served memory point --
-    occupancy ramp, target contours, kernel radius, executed trail in flat black
-    over the ramp -- with a small locator thumbnail (the full-workspace occupancy
-    field and trail, boxed at the crop) showing where in Omega it sits.
+    occupancy ramp, target contours, kernel radius, executed trail in flat ink
+    over the ramp -- with a small locator thumbnail (the target's modes and the
+    trail, boxed at the crop) showing where in Omega it sits.
+
+    Three inks, one meaning each: blue is the target wherever it appears, grey is
+    the occupancy, red is the excess and nothing else. Everything that is drawing
+    rather than data -- the cuts, the kernel circle and its spoke, the focus point,
+    the crop box -- is in one construction ink.
 
     The arithmetic of eq. (relative_excess) is on the borders rather than in a
     second panel: ``_edge_profile`` puts o and p* along the two marked cuts
@@ -479,7 +589,10 @@ def figure_excess_focus(ctx, output: Path) -> Path:
     cover. The crop is centred exactly on the point, so both profiles peak at
     the middle of their edge.
     """
-    bandwidth = float(ctx["stein"].coarse_bandwidth)
+    # The bandwidth actually in play. `memory_scales = 1` makes `geomspace` return the
+    # fine endpoint alone, so `coarse_bandwidth` is never evaluated by the controller and
+    # drawing the mechanism at it illustrated a scale the vehicle never sees.
+    bandwidth = float(ctx["stein"].fine_bandwidth)
     index, excess = _focus_point(ctx, bandwidth)
     memory = np.asarray(ctx["memory"])
     focus = memory[index]
@@ -498,13 +611,18 @@ def figure_excess_focus(ctx, output: Path) -> Path:
                        for c, (lo, hi) in zip(focus, (ctx["limits_x"], ctx["limits_y"])))
     )
 
-    grid_x, grid_y, points = _grid(ctx, n=200)
+    # Full workspace, for the crop's shared vmax and the target's level ladder only
+    # -- the locator no longer draws the field, so its mesh is not needed.
+    _, _, points = _grid(ctx, n=200)
     occupancy, _, _ = _field_at(ctx, points, bandwidth)
     zoom_x, zoom_y, zoom_points = _grid(ctx, n=160, limits=box)
     zoom_occupancy, _, _ = _field_at(ctx, zoom_points, bandwidth)
     matched_target = smoothed(ctx["gmm"], bandwidth)
     target_density = np.asarray(pdf(jnp.asarray(points, jnp.float32), matched_target))
-    target_levels = np.linspace(0.0, target_density.max(), 10)[1:]
+    # Levels of the target fill, and of the hairlines on its band boundaries. Cut
+    # on the workspace-wide maximum, not the crop's, so a band means the same
+    # amount of target here as it does in the locator.
+    target_levels = np.linspace(0.0, target_density.max(), 11)[1:]
 
     # The two cuts through the focus point, and the single density scale they share.
     xs = np.linspace(*box[0], 400)
@@ -520,42 +638,44 @@ def figure_excess_focus(ctx, output: Path) -> Path:
     # ZOOM_TICK_STEP metres, and the unlabelled ones between them only add ink.
     with plt.rc_context(rc={**paper_style("column"), **OUTSIDE_TICKS,
                             "ytick.minor.visible": False}):
-        figure = plt.figure(figsize=(3.4, 3.4), constrained_layout=True)
+        figure = plt.figure(figsize=(3.5, 3.5), constrained_layout=True)
 
         # A true magnification of the neighbourhood -- same quantity, same ramp,
         # at full column width. What is added is the target it is compared
         # against (contours) and the kernel scale that sets both. The trail goes
         # on flat black here: over the occupancy ramp its own light end washes out.
         zoom = figure.add_subplot()
-        _field_map(zoom, zoom_x, zoom_y, zoom_occupancy, vmax=occupancy.max())
+        _field_map(zoom, zoom_x, zoom_y, zoom_occupancy, vmax=occupancy.max(),
+                   levels=64, rules=10)
         _target_contours(zoom, ctx, levels=target_levels, limits=box,
                          gmm=matched_target)
-        _trail(zoom, ctx, linewidth=1.3, flat="#000000")
-        # The two cuts the edge profiles are taken along. Dashed, so they read as
-        # construction lines over the field rather than as features of it.
+        _trail(zoom, ctx, linewidth=1.3, flat=INK)
+        # The two cuts the edge profiles are taken along. Dashed and in the
+        # construction ink, so they read as drawing over the field rather than as
+        # features of it -- and so that red is left saying one thing, the excess.
         for rule, value in ((zoom.axhline, focus[1]), (zoom.axvline, focus[0])):
-            rule(value, color=ACCENT, linewidth=0.7, alpha=0.85, zorder=3,
+            rule(value, color=CONSTRUCTION, linewidth=0.7, alpha=0.8, zorder=3,
                  linestyle=(0, (4, 2.2)))
         radius = float(np.sqrt(0.5 * bandwidth))
         radius_angle = np.deg2rad(35.0)
         radius_end = focus + radius * np.array(
             [np.cos(radius_angle), np.sin(radius_angle)]
         )
-        zoom.add_patch(plt.Circle(focus, radius, fill=False, edgecolor="#1F2937",
+        zoom.add_patch(plt.Circle(focus, radius, fill=False, edgecolor=CONSTRUCTION,
                                   linewidth=1.0, zorder=5))
         zoom.plot([focus[0], radius_end[0]], [focus[1], radius_end[1]],
-                  color="#1F2937", linewidth=0.9, linestyle=(0, (3, 2)), zorder=5)
-        zoom.plot(*focus, marker="o", markersize=3.2, color="#1F2937",
+                  color=CONSTRUCTION, linewidth=0.9, linestyle=(0, (3, 2)), zorder=5)
+        zoom.plot(*focus, marker="o", markersize=3.2, color=CONSTRUCTION,
                   markeredgewidth=0, zorder=6)
-        zoom.annotate(r"$\mathbf{m}_{t,i^\star}$", xy=focus, xytext=(-6, 5),
-                      textcoords="offset points", fontsize=7.5, color="#1F2937",
+        zoom.annotate(r"$\mathbf{m}_{i^\star}$", xy=focus, xytext=(-6, 5),
+                      textcoords="offset points", fontsize=7.5, color=CONSTRUCTION,
                       ha="right", va="bottom", zorder=7)
         radius_midpoint = 0.5 * (focus + radius_end)
         # Offset along the normal of the radius segment, not straight up: a vertical
         # offset leaves a slanted label lying across the dashed line it names.
         label_offset = 13.0 * np.array([-np.sin(radius_angle), np.cos(radius_angle)])
         zoom.annotate(r"$\sqrt{h_c/2}$", xy=radius_midpoint, xytext=tuple(label_offset),
-                      textcoords="offset points", fontsize=7.5, color="#1F2937",
+                      textcoords="offset points", fontsize=7.5, color=CONSTRUCTION,
                       ha="center", va="bottom", zorder=7)
         _modes(zoom, ctx)
         _map_axes(zoom, ctx, ylabel=True, limits=box)
@@ -587,10 +707,16 @@ def figure_excess_focus(ctx, output: Path) -> Path:
             (1.5 * margin, 1.5 * margin, loc_w, loc_h),
             zorder=9,
         )
-        _field_map(locator, grid_x, grid_y, occupancy, vmax=occupancy.max())
-        # The executed path, flat black: at thumbnail size the recency gradient
-        # of `_trail` is not readable, and the shape is the only thing being asked for.
-        locator.plot(memory[:, 0], memory[:, 1], color="#111418", linewidth=0.45,
+        # No occupancy field in here. A 24-level filled ramp at a third of a column
+        # is a grey smear, and the question the thumbnail answers -- whereabouts in
+        # Omega is this crop -- is answered by the modes, the path and the box. The
+        # panel's own surface is the background instead.
+        locator.grid(False)
+        _target_contours(locator, ctx, levels=8, rule=0.25,
+                         rule_color=TARGET_LINE)
+        # The executed path, flat: at thumbnail size the recency gradient of
+        # `_trail` is not readable, and the shape is the only thing being asked for.
+        locator.plot(memory[:, 0], memory[:, 1], color=INK, linewidth=0.45,
                      solid_capstyle="round", zorder=4)
         locator.set_aspect("auto")
         locator.set_xlim(*ctx["limits_x"])
@@ -598,12 +724,23 @@ def figure_excess_focus(ctx, output: Path) -> Path:
         locator.set_xticks([])
         locator.set_yticks([])
         for spine in locator.spines.values():
-            spine.set_edgecolor("#1F2937")
+            spine.set_edgecolor("#A9ABB0")
             spine.set_linewidth(0.5)
+        # The crop box is the darkest mark in the thumbnail, so its own frame is
+        # dropped to the panel edge colour rather than competing with it.
         locator.add_patch(plt.Rectangle(
             (box[0][0], box[1][0]), box[0][1] - box[0][0], box[1][1] - box[1][0],
-            fill=False, edgecolor=ACCENT, linewidth=0.9, zorder=5,
+            fill=False, edgecolor=CONSTRUCTION, linewidth=0.8, zorder=5,
         ))
+
+        # A title, as every other mechanism panel carries one, naming the quantity
+        # and the scale it is read at -- parallel with Fig. 1's occupancy panel. It
+        # goes on the figure rather than the axes: `set_title` would land inside the
+        # top edge profile, which is an inset and sits above the axes box.
+        figure.suptitle(
+            rf"Relative over-coverage $e^{{h_c}}$,  $h_c={bandwidth:.2f}$",
+            fontweight="bold",
+        )
 
         # The arithmetic, on the two borders: labelled once, on the top edge.
         _edge_profile(zoom, xs, row, profile_max, excess_max, vertical=False,
@@ -622,7 +759,7 @@ def figure_excess_focus(ctx, output: Path) -> Path:
 
 def figure_memory_fields(ctx, output: Path) -> Path:
     """Fig. 3 -- recency and over-coverage fields on one workspace map."""
-    bandwidth = float(ctx["stein"].coarse_bandwidth)
+    bandwidth = float(ctx["stein"].fine_bandwidth)
     recency = np.asarray(ctx["recency"])
     stream_x, stream_y, stream_points = _grid(ctx, n=34)
     recency_field = _rho(ctx, stream_points, recency, bandwidth)
@@ -636,7 +773,7 @@ def figure_memory_fields(ctx, output: Path) -> Path:
     with plt.rc_context(rc=paper_style("column")):
         figure, axis = plt.subplots(figsize=(3.35, 3.15), constrained_layout=True)
         axis.grid(False)
-        _target_contours(axis, ctx, levels=4, linewidth=0.5, alpha=0.72)
+        _target_contours(axis, ctx)
         memory = np.asarray(ctx["memory"])
         axis.plot(*memory.T, color="#30343B", linewidth=1.2, alpha=0.88, zorder=4)
 
@@ -660,8 +797,9 @@ def figure_memory_fields(ctx, output: Path) -> Path:
         axis.plot([], [], color=FLOW_COLOR, marker=r"$\rightarrow$", linestyle="none",
                   markersize=7, label=r"over-coverage $\boldsymbol{\rho}^{h_c,\mathrm{exc}}_t$")
 
-        axis.plot(*ctx["position"], marker="o", markersize=4.2, color=ROBOT_COLOR,
-                  markeredgewidth=0, clip_on=False, zorder=5)
+        axis.plot(*ctx["position"], marker="o", markersize=5.5, color=ROBOT_COLOR,
+                  markeredgecolor=ROBOT_EDGE, markeredgewidth=0.9, clip_on=False,
+                  zorder=5)
         _modes(axis, ctx)
         _map_axes(axis, ctx, ylabel=True)
         axis.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=2,
@@ -786,12 +924,12 @@ def figure_extra(ctx, output_dir: Path) -> list[Path]:
         # Why p*_h and not p*: comparing a smoothed occupancy against an
         # unsmoothed target manufactures excess that is pure bandwidth artefact.
         axis = axes[0]
-        coarse = float(stein.coarse_bandwidth)
+        bandwidth = float(stein.fine_bandwidth)
         line_y = ctx["slice_y"]
         xs = np.linspace(*ctx["limits_x"], 400)
         slice_points = jnp.stack((xs, jnp.full_like(xs, line_y)), axis=-1)
         raw = np.asarray(pdf(slice_points, ctx["gmm"]))
-        matched = np.asarray(pdf(slice_points, smoothed(ctx["gmm"], coarse)))
+        matched = np.asarray(pdf(slice_points, smoothed(ctx["gmm"], bandwidth)))
         axis.fill_between(xs, matched, raw, where=raw > matched, color=ACCENT,
                           alpha=0.16, linewidth=0)
         axis.plot(xs, matched, color=TARGET_COLOR, linewidth=1.1)

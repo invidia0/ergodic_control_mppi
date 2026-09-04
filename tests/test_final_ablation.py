@@ -1,0 +1,571 @@
+"""Regressions for the final nine-map ablation driver.
+
+The expensive part of this campaign is unrunnable in a test, so what is pinned here is
+everything that decides *whether the expensive part is valid*: the grouping widths that
+define the numerical branch, the resume identity that must not let one branch satisfy
+another, the atomic group write that a corrupt archive already cost us once, and the map
+guard that keeps a perlin map out of a pillar campaign.
+"""
+
+import csv
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+import unittest.mock
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+_spec = importlib.util.spec_from_file_location(
+    "final_ablation", ROOT / "scripts" / "final_ablation.py"
+)
+final_ablation = importlib.util.module_from_spec(_spec)
+sys.modules["final_ablation"] = final_ablation
+_spec.loader.exec_module(final_ablation)
+
+from ergodic_control_mppi.experiments.uav_ablation import (  # noqa: E402
+    _BY_NAME,
+    FINAL_ARMS,
+)
+
+
+def _map(map_seed: int, obs_num: int) -> dict:
+    return {
+        "map_seed": map_seed,
+        "obs_num": obs_num,
+        "run_dir": f"results/uav/density_{obs_num}/maps/map_{map_seed}",
+        "occupied_cells": 800,
+        "reachable_fraction": 0.84,
+        "grid_shape": [134, 267],
+        "initial_state": [-15.57, 0.42, 0.0, 0.0, 0.0, 0.0],
+    }
+
+
+NINE = [_map(500 + i, obs) for obs in (15, 25, 35) for i in range(3)]
+SEEDS = range(43, 55)
+
+
+class ArmTableTest(unittest.TestCase):
+    def test_every_final_arm_exists_and_is_unique(self):
+        self.assertEqual(len(set(FINAL_ARMS)), len(FINAL_ARMS))
+        for arm in FINAL_ARMS:
+            self.assertIn(arm, _BY_NAME)
+
+    def test_baseline_levels_are_not_swept_against_themselves(self):
+        # theta 15 and lam_max 1e3 became the profile on 2026-08-05, so an arm at either
+        # value would pair the control against itself and dilute the axis with a null.
+        self.assertNotIn("theta_15", FINAL_ARMS)
+        self.assertNotIn("lam_max_1e3", FINAL_ARMS)
+        self.assertIn("baseline", FINAL_ARMS)
+
+    def test_campaign_size_matches_the_registered_design(self):
+        self.assertEqual(len(FINAL_ARMS), 46)
+
+
+class GroupingTest(unittest.TestCase):
+    """The grouping *is* the numerical-branch contract, so it is pinned exactly."""
+
+    def setUp(self):
+        self.groups = list(final_ablation.groups(NINE, SEEDS))
+
+    def test_every_group_has_exactly_one_width(self):
+        for label, execution, lanes in self.groups:
+            self.assertEqual(execution, f"batch{len(lanes)}", label)
+
+    def test_unquarantined_arm_is_one_group_of_108(self):
+        theta = [g for g in self.groups if g[0] == "theta_0"]
+        self.assertEqual(len(theta), 1)
+        self.assertEqual(len(theta[0][2]), 108)
+
+    def test_quarantined_axis_is_chunked_at_its_own_width(self):
+        chunks = [g for g in self.groups if g[0].startswith("K_1000")]
+        self.assertEqual(len(chunks), 4)
+        for _, execution, lanes in chunks:
+            self.assertEqual(len(lanes), 27)
+            self.assertEqual(execution, "batch27")
+
+    def test_quarantined_axis_gets_a_baseline_at_its_own_width(self):
+        # Without this the K arms have no comparator on their own branch, and the
+        # comparison silently reaches across widths -- the exact error the width is for.
+        replicates = [g for g in self.groups if g[0].startswith("baseline_K")]
+        self.assertEqual(len(replicates), 4)
+        self.assertTrue(all(len(lanes) == 27 for _, _, lanes in replicates))
+        self.assertTrue(all(arm == "baseline" for _, _, lanes in replicates
+                            for _, arm, _ in lanes))
+
+    def test_each_arm_covers_every_map_and_seed_exactly_once(self):
+        seen = {}
+        for _, _, lanes in self.groups:
+            for entry, arm, seed in lanes:
+                key = (arm, entry["obs_num"], entry["map_seed"], seed)
+                # baseline appears twice by design: once on each branch.
+                seen[key] = seen.get(key, 0) + 1
+        for arm in FINAL_ARMS:
+            cells = [k for k in seen if k[0] == arm]
+            self.assertEqual(len(cells), 108, arm)
+            expected = 2 if arm == "baseline" else 1
+            self.assertTrue(all(seen[k] == expected for k in cells), arm)
+
+    def test_total_cell_count(self):
+        # 46 arms x 108, plus the 108-cell baseline replicate the K quarantine needs.
+        self.assertEqual(sum(len(lanes) for _, _, lanes in self.groups), 46 * 108 + 108)
+
+
+class IdentityTest(unittest.TestCase):
+    def setUp(self):
+        self.lane = (NINE[0], "theta_0", 43)
+
+    def test_execution_and_hardware_are_part_of_identity(self):
+        base = final_ablation.identity(self.lane, 20000, "thinkpad", "batch108")
+        self.assertNotEqual(
+            base, final_ablation.identity(self.lane, 20000, "thinkpad", "batch27")
+        )
+        self.assertNotEqual(
+            base, final_ablation.identity(self.lane, 20000, "jeff", "batch108")
+        )
+        self.assertNotEqual(
+            base, final_ablation.identity(self.lane, 10000, "thinkpad", "batch108")
+        )
+
+    def test_same_seed_at_two_densities_is_two_cells(self):
+        # All three prepare runs probe seeds 511-610, so one seed can be selected at two
+        # densities where it is a completely different field. Keyed on the seed alone those
+        # collide: resume skips a cell that never ran, and the analysis pairs rows across
+        # densities. NINE deliberately reuses seeds to hold this.
+        sparse = final_ablation.identity((_map(501, 15), "theta_0", 43), 20000, "h", "b108")
+        dense = final_ablation.identity((_map(501, 35), "theta_0", 43), 20000, "h", "b108")
+        self.assertNotEqual(sparse, dense)
+
+    def test_same_cell_on_same_branch_is_the_same_key(self):
+        self.assertEqual(
+            final_ablation.identity(self.lane, 20000, "thinkpad", "batch108"),
+            final_ablation.identity((dict(NINE[0]), "theta_0", 43), 20000,
+                                    "thinkpad", "batch108"),
+        )
+
+
+class ConfigCacheTest(unittest.TestCase):
+    """The seed-collision bug that made the campaign claim nine maps it did not have.
+
+    `_configs` cached each map's config, manifest and arrays under the map seed alone. Seed
+    525 was selected at both 15 and 25 pillars -- 492 against 824 occupied cells -- so the
+    second density silently reused the first's arrays and 564 rows were labelled with a
+    density they were not flown at. Nothing downstream could catch it: every check keys on
+    the label, not on the field.
+    """
+
+    def test_same_seed_at_two_densities_loads_two_maps(self):
+        loaded = []
+
+        def fake_grid_config(run_dir):
+            loaded.append(run_dir)
+            return (f"config:{run_dir}", f"manifest:{run_dir}", f"arrays:{run_dir}")
+
+        cache = {}
+        with unittest.mock.patch.object(final_ablation, "_grid_config", fake_grid_config):
+            sparse = final_ablation._configs(cache, _map(525, 15))
+            dense = final_ablation._configs(cache, _map(525, 25))
+            again = final_ablation._configs(cache, _map(525, 15))
+
+        self.assertNotEqual(sparse, dense)
+        self.assertEqual(sparse, again, "the cache must still cache")
+        self.assertEqual(len(loaded), 2, f"loaded {loaded}")
+
+
+class AppendRowsTest(unittest.TestCase):
+    def _row(self, arm="theta_0", seed=43):
+        row = dict.fromkeys(final_ablation.FIELDS, "")
+        row.update({"arm": arm, "map_seed": 500, "seed": seed, "steps": 20000,
+                    "hardware": "test", "execution": "batch108"})
+        return row
+
+    def test_group_is_written_whole_and_reread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "final.csv"
+            rows = [self._row(seed=s) for s in range(43, 55)]
+            final_ablation.append_rows(output, rows)
+            final_ablation.append_rows(output, [self._row(arm="theta_45", seed=43)])
+            with output.open(encoding="utf-8", newline="") as stream:
+                written = list(csv.DictReader(stream))
+            self.assertEqual(len(written), 13)
+            self.assertEqual(len(final_ablation.completed(output)), 13)
+
+    def test_stale_header_refuses_rather_than_shifting_columns(self):
+        # A DictWriter emits values in FIELDS order whatever the file says, so appending a
+        # new column to an old archive shifts every later row by one and looks like it
+        # worked. It happened once; this is the guard.
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "final.csv"
+            with output.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(final_ablation.FIELDS[:-1])
+                writer.writerow(["x"] * (len(final_ablation.FIELDS) - 1))
+            with self.assertRaises(SystemExit):
+                final_ablation.append_rows(output, [self._row()])
+
+
+class MapGuardTest(unittest.TestCase):
+    def _write_map(self, directory: Path, meta: dict, obs_num: int = 25) -> Path:
+        # Under a density_<obs>/ root: the density label comes from the path, and the guard
+        # that enforces that is itself under test below.
+        run_dir = directory / f"density_{obs_num}" / "maps" / f"map_{meta['map_seed']}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "manifest.json").write_text(json.dumps(meta), encoding="utf-8")
+        np.savez(
+            run_dir / "arrays.npz",
+            occupancy=np.zeros((134, 267), dtype=np.float32),
+            reachable_mask=np.ones((80, 80), dtype=bool),
+            grid=np.zeros((134, 267), dtype=np.float32),
+            initial_state=np.array([-15.57, 0.42, 0, 0, 0, 0], dtype=np.float32),
+        )
+        return run_dir
+
+    def test_pillar_map_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self._write_map(
+                Path(directory), {"map_seed": 514, "map_source": "random_forest"}
+            )
+            entry = final_ablation._check_map(run_dir, 514, 25)
+            self.assertEqual(entry["obs_num"], 25)
+            self.assertEqual(entry["grid_shape"], [134, 267])
+
+    def test_perlin_map_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self._write_map(
+                Path(directory), {"map_seed": 518, "map_source": "perlin3d"}
+            )
+            with self.assertRaises(SystemExit):
+                final_ablation._check_map(run_dir, 518, 25)
+
+    def test_density_label_must_match_the_path(self):
+        # The recorder writes no obs_num into a map manifest, so the path is the only
+        # witness that a map labelled 35-pillar is not a 15-pillar one under a wrong root.
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self._write_map(
+                Path(directory), {"map_seed": 514, "map_source": "random_forest"},
+                obs_num=15,
+            )
+            with self.assertRaises(SystemExit):
+                final_ablation._check_map(run_dir, 514, 35)
+
+    def test_flown_map_rebuilt_differently_is_refused(self):
+        # If a pinned map's rebuild does not reproduce the flown geometry, the recorded
+        # flights describe a different field than the campaign and every transfer claim
+        # silently compares two environments.
+        flight = final_ablation.FLOWN.get((25, 516))
+        if flight is None or not flight.exists():
+            self.skipTest("no archived 516 flight")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self._write_map(
+                Path(directory), {"map_seed": 516, "map_source": "random_forest"}
+            )
+            with self.assertRaises(SystemExit):
+                final_ablation._check_map(run_dir, 516, 25)
+
+    def test_real_rebuilt_516_matches_its_flight(self):
+        rebuilt = ROOT / "results" / "uav" / "density_25" / "maps" / "map_516"
+        if not (rebuilt / "arrays.npz").exists():
+            self.skipTest("516 not rebuilt yet")
+        entry = final_ablation._check_map(rebuilt, 516, 25)
+        self.assertEqual(entry["occupied_cells"], 882)
+
+    def test_map_with_no_source_key_is_refused(self):
+        # results/uav/paper01 is exactly this: a perlin map whose manifest predates the
+        # map_source field. It must fail by construction, not by being remembered.
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = self._write_map(Path(directory), {"map_seed": 518})
+            with self.assertRaises(SystemExit):
+                final_ablation._check_map(run_dir, 518, 25)
+
+    def test_real_paper01_is_refused_if_present(self):
+        paper01 = ROOT / "results" / "uav" / "paper01"
+        if not (paper01 / "manifest.json").exists():
+            self.skipTest("paper01 not present")
+        with self.assertRaises(SystemExit):
+            final_ablation._check_map(paper01, 518, 25)
+
+
+class LoadMapsTest(unittest.TestCase):
+    def _manifest(self, directory: Path, entries: list[dict]) -> Path:
+        path = Path(directory) / "maps.json"
+        path.write_text(json.dumps({"maps": entries}), encoding="utf-8")
+        return path
+
+    def test_nine_consistent_maps_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                len(final_ablation.load_maps(self._manifest(Path(directory), NINE))), 9
+            )
+
+    def test_mismatched_grid_shape_refuses(self):
+        odd = dict(NINE[0], grid_shape=[100, 200])
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit):
+                final_ablation.load_maps(
+                    self._manifest(Path(directory), [odd] + NINE[1:])
+                )
+
+    def test_mismatched_start_state_refuses(self):
+        # run_batch broadcasts one start across lanes, so a second start would silently fly
+        # some maps from the wrong place rather than erroring.
+        odd = dict(NINE[0], initial_state=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit):
+                final_ablation.load_maps(
+                    self._manifest(Path(directory), [odd] + NINE[1:])
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class SensitivityMathTest(unittest.TestCase):
+    """The Fisher panel's arithmetic, against cases computed by hand."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "report_figures", ROOT / "scripts" / "report_figures.py"
+        )
+        self.rf = importlib.util.module_from_spec(spec)
+        sys.modules["report_figures"] = self.rf
+        spec.loader.exec_module(self.rf)
+
+    def _table(self, arm_shift: dict, cells=12, maps=(15, 25, 35), seed=0):
+        rng = np.random.default_rng(seed)
+        table = {}
+        keys = [(obs, 500 + i, 43 + s) for obs in maps for i in range(3)
+                for s in range(cells)]
+        # The baseline is keyed by width, as `load_final` writes it, so `baseline_for`
+        # resolves here the same way it does on the real archive.
+        for arm, shift in {"baseline@108": 0.0, **arm_shift}.items():
+            table[arm] = {}
+            for key in keys:
+                table[arm][key] = {
+                    "arm": arm, "axis": "x", "value": "1", "steps": "20000", "lanes": "108",
+                    "obs_num": str(key[0]), "map_seed": str(key[1]), "seed": str(key[2]),
+                    "fourier_ergodic": str(0.05 * np.exp(-shift + 0.1 * rng.standard_normal())),
+                    "all_modes_reached": "1", "mode_cycles": "3",
+                    "mode_dwell_median_s": "9.0", "in_mode_fraction": "0.4",
+                    "path_length_m": "340.0",
+                }
+        return table
+
+    def test_zero_effect_gives_zero_sensitivity(self):
+        table = self._table({"null": 0.0})
+        bands, joint = self.rf.sensitivity(table, "null")
+        # Only fourier varies in this fixture; a null arm's standardised effect should sit
+        # near zero rather than at some arbitrary floor.
+        self.assertLess(bands["fourier_ergodic"], 0.5)
+        self.assertLess(joint, 0.5)
+
+    def test_standardised_effect_matches_hand_calculation(self):
+        table = self._table({"shifted": 0.4})
+        arm, base, _ = self.rf.paired_final(table, "shifted", "fourier_ergodic", "log")
+        difference = arm - base
+        expected = abs(difference.mean() / difference.std(ddof=1))
+        bands, _ = self.rf.sensitivity(table, "shifted")
+        self.assertAlmostEqual(bands["fourier_ergodic"], expected, places=9)
+
+    def test_sensitivity_is_direction_agnostic(self):
+        # It is a magnitude: an arm that halves the metric and one that doubles it are
+        # equally influential, which is the right reading for "how much does this move".
+        # Built as an exact negation rather than two random draws -- with independent noise
+        # the two means are -0.4+eps and +0.4+eps, whose magnitudes genuinely differ.
+        table = self._table({"up": 0.0, "down": 0.0}, seed=1)
+        for index, key in enumerate(table["baseline@108"]):
+            base = float(table["baseline@108"][key]["fourier_ergodic"])
+            offset = 0.3 + 0.02 * index
+            table["up"][key]["fourier_ergodic"] = str(base * np.exp(offset))
+            table["down"][key]["fourier_ergodic"] = str(base * np.exp(-offset))
+        self.assertAlmostEqual(
+            self.rf.sensitivity(table, "up")[0]["fourier_ergodic"],
+            self.rf.sensitivity(table, "down")[0]["fourier_ergodic"],
+            places=9,
+        )
+
+    def _archive(self, path: Path):
+        """A miniature archive with both baseline widths and the duplicated map."""
+        fields = ["arm", "obs_num", "map_seed", "seed", "lanes", "fourier_ergodic",
+                  "all_modes_reached", "mode_cycles", "mode_dwell_median_s",
+                  "in_mode_fraction", "path_length_m", "steps", "axis", "value"]
+        maps = [(15, 513), (15, 525), (25, 516), (25, 525)]
+        with path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            # baseline@108 first and baseline@27 last, matching the real file: with a
+            # width-blind key the trailing width-27 rows win and serve every arm.
+            for arm, lanes, value in (("baseline", 108, 1.0), ("wide", 108, 2.0),
+                                      ("narrow", 27, 4.0), ("baseline", 27, 8.0)):
+                for obs, map_seed in maps:
+                    for seed in range(43, 46):
+                        writer.writerow({
+                            "arm": arm, "obs_num": obs, "map_seed": map_seed, "seed": seed,
+                            "lanes": lanes, "fourier_ergodic": value,
+                            "all_modes_reached": 1, "mode_cycles": 2,
+                            "mode_dwell_median_s": 9.0, "in_mode_fraction": 0.4,
+                            "path_length_m": 340.0, "steps": 20000, "axis": "x",
+                            "value": "1",
+                        })
+
+    def test_load_final_keeps_a_baseline_per_lane_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "archive.csv"
+            self._archive(path)
+            table = self.rf.load_final(path)
+
+        self.assertIn("baseline@108", table)
+        self.assertIn("baseline@27", table)
+        self.assertNotIn("baseline", table)
+        # Each arm resolves to the baseline on its own numerical branch. Collapsed to one
+        # key, the trailing width-27 rows served everything and `wide` was scored 2.0 vs 8.0
+        # instead of 2.0 vs 1.0 -- which is what the real campaign was doing for 41 arms.
+        self.assertEqual(self.rf.baseline_for(table, "wide"), "baseline@108")
+        self.assertEqual(self.rf.baseline_for(table, "narrow"), "baseline@27")
+        arm, base, _ = self.rf.paired_final(table, "wide", "fourier_ergodic")
+        self.assertTrue(np.allclose(arm, 2.0) and np.allclose(base, 1.0))
+        arm, base, _ = self.rf.paired_final(table, "narrow", "fourier_ergodic")
+        self.assertTrue(np.allclose(arm, 4.0) and np.allclose(base, 8.0))
+
+    def test_load_final_drops_the_duplicated_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "archive.csv"
+            self._archive(path)
+            table = self.rf.load_final(path)
+
+        # 25p/525 is the same field as 15p/525 -- the driver's cache flew it twice. Counted
+        # as a map it would cast a second, always-identical vote in the promotion gate.
+        self.assertIn((25, 525), self.rf.DUPLICATE_MAPS)
+        keys = {(obs, seed) for obs, seed, _ in table["wide"]}
+        self.assertEqual(keys, {(15, 513), (15, 525), (25, 516)})
+        self.assertEqual(len(self.rf.per_map_effects(table, "wide")), 3)
+
+    def test_typical_reference_is_the_per_cell_median_arm(self):
+        # Why the reference exists at all: paired against itself the baseline is exactly
+        # zero on every cell, so under the default reference it cannot be drawn as a column.
+        table = self._table({"a": 0.3, "b": -0.3})
+        arm, base, _ = self.rf.paired_final(table, "baseline@108", "fourier_ergodic")
+        self.assertTrue(np.array_equal(arm, base))
+
+        self.rf.add_typical_reference(table)
+        cell = next(iter(table["baseline@108"]))
+        self.assertAlmostEqual(
+            float(table[self.rf.TYPICAL][cell]["fourier_ergodic"]),
+            float(np.median([float(table[a][cell]["fourier_ergodic"])
+                             for a in ("baseline@108", "a", "b")])),
+            places=12,
+        )
+        # And with it the baseline becomes a real column. Bracket it deterministically --
+        # one arm strictly better on every cell, one strictly worse -- so the median arm is
+        # the baseline itself and its drawn effect is exactly zero rather than approximately.
+        for cell in table["baseline@108"]:
+            value = float(table["baseline@108"][cell]["fourier_ergodic"])
+            table["a"][cell]["fourier_ergodic"] = repr(value * 0.5)
+            table["b"][cell]["fourier_ergodic"] = repr(value * 2.0)
+        table.pop(self.rf.TYPICAL)
+        self.rf.add_typical_reference(table)
+        arm, base, cells = self.rf.paired_final(table, "baseline@108", "fourier_ergodic",
+                                                reference=self.rf.TYPICAL)
+        self.assertEqual(len(cells), len(table["baseline@108"]))
+        self.assertTrue(np.allclose(arm, base))
+        # The bracketing arms are drawn at exactly +/-1 log2 unit, which is what the dot
+        # matrix colours: the reference is a yardstick, not one of the runs.
+        worse, reference, _ = self.rf.paired_final(table, "b", "fourier_ergodic",
+                                                   reference=self.rf.TYPICAL)
+        self.assertTrue(np.allclose(np.log2(reference / worse), -1.0))
+
+    def test_joint_is_not_bounded_by_the_marginal_sum(self):
+        # Recorded because the opposite was asserted while designing this panel and the
+        # synthetic data disproved it: correlated outcomes can make the Mahalanobis
+        # distance exceed the sum of marginals, so neither bounds the other.
+        table = self._table({"shifted": 0.4})
+        bands, joint = self.rf.sensitivity(table, "shifted")
+        self.assertGreater(joint, 0.0)
+        self.assertGreater(sum(bands.values()), 0.0)
+
+    def test_per_map_effects_are_standardised_by_their_own_noise(self):
+        table = self._table({"shifted": 0.4})
+        raw = self.rf.per_map_effects(table, "shifted", standardize=False)
+        standard = self.rf.per_map_effects(table, "shifted")
+        self.assertEqual(len(raw), 9)
+        # 0.4 in log units is ~0.58 in log2; standardising must not change the sign, and
+        # over 12 seeds it should push a real effect well past 1 sigma.
+        for key in raw:
+            self.assertGreater(raw[key], 0.0)
+            self.assertGreater(standard[key], 1.0)
+
+    def test_one_map_effect_is_not_read_as_consistent(self):
+        # The 516 trap in miniature: a large effect on exactly one of nine maps must not
+        # produce a strip that looks consistent, which is what a fixed neutral band did.
+        #
+        # Thresholded at 2 sigma, the strip's first colour edge, not at 1: a 1-sigma edge
+        # fires on 32% of null cells, so three of the eight untouched maps would light up
+        # by chance and the arm would read as patchy-but-real. That is the whole reason the
+        # edge sits at 2.
+        table = self._table({"trap": 0.0})
+        for key, row in table["trap"].items():
+            if (key[0], key[1]) == (25, 501):
+                row["fourier_ergodic"] = str(float(row["fourier_ergodic"]) * 0.4)
+        standard = self.rf.per_map_effects(table, "trap")
+        resolved = {k for k, v in standard.items() if abs(v) > 2.0}
+        self.assertIn((25, 501), resolved)
+        self.assertLessEqual(len(resolved), 2)
+        self.assertGreater(standard[(25, 501)], 10.0)
+
+
+class StepBudgetTest(unittest.TestCase):
+    """The one branch in `fig_step_budget`: the residual is signed.
+
+    XLA fuses the whole step, so the stages timed in isolation can sum to *more* than the
+    fused total. A pie cannot draw a negative wedge, and silently clamping one to zero
+    would invent cost that does not exist -- so a negative residual must never reach the
+    ring at all.
+    """
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "report_figures", ROOT / "scripts" / "report_figures.py"
+        )
+        self.rf = importlib.util.module_from_spec(spec)
+        sys.modules["report_figures"] = self.rf
+        spec.loader.exec_module(self.rf)
+
+    def _report(self, total: float) -> dict:
+        stages = {"rollouts_KT": 3.0, "memory_QP2": 0.8,
+                  "sample_epsilon": 0.6, "attraction_T2": 0.5}
+        accounted = sum(stages.values())
+        return {"stages": {
+            "shape": {"K": 250, "T": 350, "P": 825, "Q": 1},
+            "device": "cuda:0",
+            "stages": {k: {"ms_median": v} for k, v in stages.items()},
+            "accounted_ms": accounted,
+            "total_ms": total,
+            "residual_ms": total - accounted,
+        }}
+
+    def _wedges(self, total: float):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "timing.json"
+            report.write_text(json.dumps(self._report(total)), encoding="utf-8")
+            with unittest.mock.patch.object(self.rf, "save",
+                                            lambda figure, path: (figure, Path(path))):
+                figure, _ = self.rf.fig_step_budget(report, Path(directory) / "f.png")
+            import matplotlib.patches
+            return [w.theta2 - w.theta1 for w in figure.axes[0].patches
+                    if isinstance(w, matplotlib.patches.Wedge)]
+
+    def test_negative_residual_draws_no_extra_wedge(self):
+        # Fused cheaper than the sum of its parts: four stages, four wedges, no fifth.
+        angles = self._wedges(4.5)
+        self.assertEqual(len(angles), 4)
+        self.assertTrue(all(a > 0 for a in angles))
+        self.assertAlmostEqual(sum(angles), 360.0, places=3)
+
+    def test_positive_residual_becomes_its_own_wedge(self):
+        # Real unattributed overhead is drawn, not folded into a stage that did not spend it.
+        angles = self._wedges(5.5)
+        self.assertEqual(len(angles), 5)
+        self.assertAlmostEqual(sum(angles), 360.0, places=3)

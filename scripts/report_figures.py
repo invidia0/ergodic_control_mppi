@@ -133,16 +133,16 @@ OUTCOMES = (
 # here -- Nature's red-orange-to-blue was the alternative -- puts "worse" reds directly under
 # the dot panel's "worse" reds and invites reading the two as one scale. Being sequential
 # also makes the stack read as ordered layers rather than five unrelated categories.
-# The paper's shared categorical steps, in stacking order. Five *named outcomes* are an
-# identity encoding, not a magnitude one, so discrete hues say what a single-hue ramp only
-# implied by position: these are five different measurements, not five levels of one.
-# Same steps as VIOLIN_COLOURS and STEP_COLOURS, and validated the same way against the
-# panel (#DCE2EC) -- adjacent-pair checks, since a stack only ever abuts its neighbours.
-# The order is load-bearing for two reasons: lavender must not neighbour the periwinkle
-# (dE 1.1 for deuteranopes), and the warm pair sits at the top of the stack, furthest from
-# the diverging red/green verdict panels above, so "worse" orange does not line up under
-# "worse" red and invite reading the two panels as one scale.
-BAND_COLOURS = ("#7FADFF", "#5FC97A", "#C08CFF", "#F0A04B", "#EC7BA8")
+# Five outcomes, five hues from the project palette, in stacking order. An identity
+# encoding, not a magnitude one, so discrete hues say what a single-hue ramp only implied by
+# position. Green and orange are a step darker than the palette's own: at full brightness
+# both sat above the lightness band and washed out against the white panel.
+#
+# Validated against that panel -- lightness band, chroma floor, adjacent-pair CVD (worst
+# dE 22.4 protan) and normal-vision separation (26.7) all pass. The order is load-bearing:
+# red is flanked by blue and purple, the only two hues here it is not confusable with. Beside
+# orange it is dE 12.0 even in normal vision, and beside green dE 4.7 for deuteranopes.
+BAND_COLOURS = ("#0078FF", "#00C98A", "#FF6B6B", "#F09A4C", "#9B7BFF")
 
 
 def load_arms(path: Path) -> dict[str, dict[int, dict[str, str]]]:
@@ -400,32 +400,29 @@ def holm_by_axis(table, arms: list[str], pvalues: list[float]) -> list[bool]:
     return reject
 
 
-# Eleven bins for the dots, five for the strip, in matched pairs so both panels always speak
-# the same diverging language. `rdylgn` is the original red-yellow-green; `rdblu` is drawn
-# from the sensitivity panel's own endpoints -- its coral `#ff6361` and navy `#003f5c` -- so
-# all three panels come from one family. Both carry a light grey neutral: the warm ivory that
-# preceded it sat within a few points of the shipped column's highlight.
 # Eleven bins for the dots, five for the strip, sharing one neutral so both panels speak the
-# same diverging language. Two hues and a grey, not a rainbow: the red-yellow-green ramp this
-# replaced ran three hues, so a mid-scale value read as its own category rather than as a
-# position between the poles. The poles are the rose and the green of the paper's shared
-# steps, deepened away from the neutral and lightened toward it -- each half validated on the
-# white panel as an ordinal ramp (monotone lightness, adjacent dL >= 0.06, one hue per side).
-# Rose and green still carry "bad" and "good" without consulting a legend, which is what a
-# red-blue or magenta-amber ramp -- both tried -- does not.
+# same diverging language: red - orange - yellow - grey - green - cyan - blue, worst to best.
+# Multi-hue on each side is the point -- red and green carry "bad" and "good" without
+# consulting a legend, and eleven bins need more separation than one hue gives over eleven
+# steps.
 #
-# The palest bin on each side deliberately sits under the 2:1 contrast floor an ordinal ramp
-# would normally hold: it abuts the neutral and means "almost no change", so it has to stay
-# recessive. Darkening it to clear the floor makes a null look like an effect.
+# The named stops are project-palette values and the four bins between them are straight
+# midpoints of their neighbours, so the ramp interpolates the palette rather than
+# approximating it. One exception: the yellow stop is pushed off the palette's #FFD166,
+# which is a golden amber and read as a second orange next to the real one; and the cyan
+# stop is a saturated cyan rather than the palette's muted #4DD5E7, which read as teal.
 #
-# The neutral is a light grey rather than the warm ivory it replaced: a warm neutral on a warm
-# ramp reads as a low value on the scale instead of as the absence of one. The top bin keeps
-# its hue break -- the shared periwinkle now -- because it is an open-ended ">4x" bin rather
-# than one more step.
-NEUTRAL_BIN = "#d9d9d9"
-DOT_COLOURS = ["#8C2340", "#BB3D63", "#D96087", "#E98BAB", "#F4AEC4", NEUTRAL_BIN,
-               "#ADE2BD", "#7ACF95", "#48B570", "#1F8449", "#3D7BD9"]
-STRIP_COLOURS = ["#BB3D63", "#E98BAB", NEUTRAL_BIN, "#7ACF95", "#1F8449"]
+# Two things the validator would flag, both accepted. The scale is not single-hue -- that
+# rule is for sequential ramps and this is a polarity encoding. And the bins flanking the
+# neutral sit under the 2:1 contrast floor, which is what they are for: they mean "almost no
+# change", so they have to stay recessive. Darkening them makes a null look like an effect.
+# Clear space in data units between the top row of dots and a sideways group header.
+HEADER_GAP = 0.4
+
+NEUTRAL_BIN = "#C0D4E9"
+DOT_COLOURS = ["#FF6B6B", "#FF8A64", "#FFAA5C", "#FFC861", "#FFE566", NEUTRAL_BIN,
+               "#00E89D", "#00DEC6", "#00D5F0", "#00A6F8", "#0078FF"]
+STRIP_COLOURS = ["#FF6B6B", "#FFAA5C", NEUTRAL_BIN, "#00D5F0", "#0078FF"]
 DOT_EDGES = [-9, -2.0, -1.5, -1.0, -0.5, -0.15, 0.15, 0.5, 1.0, 1.5, 2.0, 9]
 
 
@@ -664,7 +661,11 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
     with plt.rc_context(paper_style("double")):
         # Type scale for a 6.9in canvas. Points are absolute, so these are the sizes that
         # actually reach the page: 4.4pt is the floor IEEE figure text stays legible at.
-        tiny, small, mid, lead = 4.7, 5.2, 5.7, 6.2
+        # One factor over the whole set, so the internal hierarchy is unchanged and only the
+        # scale moves. The old 4.7pt arm labels were the smallest type in the paper by some
+        # margin -- the class's own scriptsize is 7pt -- and they carry maths, which needs
+        # more size than prose at the same nominal point.
+        tiny, small, mid, lead = 6.3, 7.0, 7.7, 8.4
         # 6.9in is this project's full-width `figure*` size -- every other double-column
         # figure in the repo uses it. Sized for inclusion at 1:1, not scaled down by LaTeX:
         # matplotlib text is in absolute points, so drawing at 13in and letting
@@ -678,7 +679,7 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
         # the shared x axis easier to read across the two panels.
         heights = [3.0, 0.60, 1.45] if consistency else [3.0, 0.95]
         figure, panels = plt.subplots(
-            len(heights), 1, figsize=(6.9, 5.2 if consistency else 3.6), sharex=True,
+            len(heights), 1, figsize=(7.167, 6.0 if consistency else 4.4), sharex=True,
             gridspec_kw={"height_ratios": heights, "hspace": 0.085 if consistency else 0.04},
         )
         top, bottom = panels[0], panels[-1]
@@ -707,10 +708,11 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
         # A warm off-white. It has to clear the `#d9d9d9` neutral in *both* panels or the
         # shipped column's own unresolved cells vanish into their own highlight -- the one
         # column a reader goes looking for. A cool grey was tried and sat too close to it.
-        if shipped in arms:
-            slot = next(i for i, (_, a) in enumerate(columns) if a == shipped)
-            for axes in panels:
-                axes.axvspan(slot - 0.5, slot + 0.5, color="#f9f4ea", zorder=0)
+        # Both the band and the axis separators are cut off at the top of the dots rather
+        # than run to the axes ceiling. Above the dots the panel holds nothing but the group
+        # headers, and rules crossing a row of text read as a table the figure does not have
+        # -- they also pushed the ink up against the keys. Cut, the empty band is white and
+        # the whole block can sit lower.
 
         # ---- top: one dot per run, one sort per column
         #
@@ -729,6 +731,14 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
         # rows and buys ~3.8 pt of pitch in both directions. Row-major keeps the ramp
         # monotone (each row is four adjacent ranks) and keeps height proportional to count.
         limit = int(np.ceil(runs / dots_per_row))
+        rules_top = limit + 0.9
+        if shipped in arms:
+            slot = next(i for i, (_, a) in enumerate(columns) if a == shipped)
+            top.add_patch(plt.Rectangle((slot - 0.5, -limit - 6.0), 1.0,
+                                        rules_top + limit + 6.0,
+                                        facecolor="#f9f4ea", edgecolor="none", zorder=0))
+            for axes in panels[1:]:
+                axes.axvspan(slot - 0.5, slot + 0.5, color="#f9f4ea", zorder=0)
         span = 0.62 if dots_per_row > 1 else 0.0
         # Dot size read off the realised panel rather than hard-coded: the pitch depends on
         # the figure width, the column count and the fill width all at once, and a constant
@@ -761,12 +771,17 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
         ticks = list(range(-runs, runs + 1, 24))
         top.set_yticks([t / dots_per_row for t in ticks])
         top.set_yticklabels([str(abs(t)) for t in ticks], fontsize=small, color="black")
-        top.text(-3.3, limit * 0.55, "IMPROVED >", rotation=90, ha="center", va="center",
-                 fontsize=small, color="black")
-        top.text(-3.3, -limit * 0.55, "< WORSENED", rotation=90, ha="center",
-                 va="center", fontsize=small, color="black")
-        top.text(-3.3, 0.0, "RUNS", rotation=90, ha="center", va="center",
-                 fontsize=small, color="black")
+        # One string, not three placed at fixed data positions: rotated 90 it already reads
+        # bottom-to-top in the right order, and three separate texts collide as soon as the
+        # type grows, since their spacing is in data units and their length is in points.
+        # x in data, y in axes fraction: the ceiling is refitted below to whatever the
+        # group headers need, which moves data y=0 off the panel's middle and slides the
+        # label down into the sensitivity panel's own label.
+        from matplotlib.transforms import blended_transform_factory
+
+        top.text(-3.3, 0.5, "< WORSENED   RUNS   IMPROVED >", rotation=90,
+                 ha="center", va="center", fontsize=tiny, color="black",
+                 transform=blended_transform_factory(top.transData, top.transAxes))
         top.text(-1.0, -limit - 4.0, "No tour", ha="right", va="center",
                  fontsize=tiny, color="black")
 
@@ -860,7 +875,11 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
         for axes in panels:
             for axis in order[1:]:
                 first = min(i for i, (a, _) in enumerate(columns) if a == axis)
-                axes.axvline(first - 0.5, color="#e8e8e8", linewidth=0.7, zorder=1)
+                if axes is top:
+                    axes.vlines(first - 0.5, -limit - 6.0, rules_top,
+                                color="#e8e8e8", linewidth=0.7, zorder=1)
+                else:
+                    axes.axvline(first - 0.5, color="#e8e8e8", linewidth=0.7, zorder=1)
         # One row, every axis. Stacking each header onto two lines is what makes this fit:
         # the constraint is the widest *line*, not the phrase, so "Obstacle / penalty" clears
         # a one-arm block where "obstacle penalty" never could. The baseline's pseudo-axis is
@@ -875,7 +894,7 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
         for axis in (a for a in order if a != axis_of.get(shipped)):
             members = [i for i, (a, _) in enumerate(columns) if a == axis]
             label = AXIS_LABELS.get(axis, axis.replace("_", " "))
-            text = top.text(float(np.mean(members)), limit + 1.6, label, ha="center",
+            text = top.text(float(np.mean(members)), limit + HEADER_GAP, label, ha="center",
                             va="bottom", fontsize=small, color="black", linespacing=1.15)
             edges = top.transData.transform(
                 [(min(members) - 0.5, 0.0), (max(members) + 0.5, 0.0)])
@@ -896,9 +915,24 @@ def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
                 if text.get_rotation():
                     text.set_va("center")
                     text.set_position((text.get_position()[0], middle))
-        # Then fit the ceiling to whatever the tallest header actually needs. Iterated,
-        # because the labels are placed in data units and moving the limit moves them.
+        # Then fit the ceiling to whatever the tallest header actually needs, and keep the
+        # sideways ones off the dots. Iterated, because the labels are placed in data units
+        # and moving the limit moves them.
+        floor = limit + HEADER_GAP
         for _ in range(3):
+            # Centred on the upright band, a sideways label spends half its length downward,
+            # and the longest of them reach into the top row of dots. Lift any that do, one
+            # by one: they are different lengths, so a shared offset either leaves the long
+            # ones overlapping or pushes the short ones needlessly far up.
+            for text in headers:
+                if not text.get_rotation():
+                    continue
+                # `bottom` is the sensitivity axes in this scope, hence the long name.
+                label_bottom = top.transData.inverted().transform(
+                    (0.0, text.get_window_extent(renderer=renderer).y0))[1]
+                if label_bottom < floor:
+                    at_x, at_y = text.get_position()
+                    text.set_position((at_x, at_y + (floor - label_bottom)))
             tallest = max(t.get_window_extent(renderer=renderer).y1 for t in headers)
             top.set_ylim(-limit - 6.0,
                          top.transData.inverted().transform((0.0, tallest))[1] + 1.0)
@@ -1173,21 +1207,22 @@ STEP_STAGES = (
     ("attraction_T2", "Stein attraction", r"$T^2$ kernel"),
 )
 
-# Keyed by stage, not by rank: a wedge keeps its colour if the timings ever re-sort.
-# Same bright, lifted-toward-white register as VIOLIN_COLOURS and the Fig. 3 edge fills,
-# but a different hue set -- these four are validated as a *ring*, where the last wedge
-# touches the first. Checked with the dataviz palette validator against a white surface:
-# lightness band, chroma floor, adjacent-pair CVD and normal-vision separation all pass in
-# this cyclic order (worst adjacent pair dE 16.7 in normal vision; CVD separation is a WARN
-# at dE 6.8 deutan for orange/green, which the per-wedge direct labels license). Pairs that
-# look fine and are not, all of which the order below keeps apart: periwinkle/lavender is
-# dE 1.1 for deuteranopes, periwinkle/teal is 14.6 even in normal vision, and orange/coral
-# is 9.3 -- the last is why the smallest wedge is rose rather than the coral used elsewhere.
+# Keyed by stage, not by rank: a wedge keeps its colour if the timings ever re-sort. Four of
+# the paper's five shared hues, so the donut reads as part of the same family as the violins
+# and the sensitivity bands.
+#
+# Validated as a *ring*, where the last wedge touches the first, which is a tighter
+# constraint than a row: with four hues every one of them has two neighbours, so red cannot
+# avoid both of the hues it is confusable with. This order takes the better of the two --
+# normal vision clears every pair (worst dE 23.4), and the cost is red beside green at dE 4.7
+# for deuteranopes. Acceptable here only because colour carries nothing on this chart: every
+# wedge is directly labelled with its name, milliseconds and share. Contrast against white is under 3:1, which is fine here only because
+# every wedge is directly labelled with its name, milliseconds and share.
 STEP_COLOURS = {
-    "rollouts_KT": "#7FADFF",     # periwinkle, the paper's subject colour
-    "memory_QP2": "#5FC97A",      # green -- the lightest that clears the lightness band
-    "sample_epsilon": "#F0A04B",  # orange
-    "attraction_T2": "#EC7BA8",   # rose -- coral here is dE 9.3 against the orange
+    "rollouts_KT": "#0078FF",     # blue
+    "memory_QP2": "#00C98A",      # green
+    "sample_epsilon": "#FF6B6B",  # red
+    "attraction_T2": "#F09A4C",   # orange
     "_residual": "#B9C0CC",       # grey: unattributed overhead is not a stage
 }
 
@@ -1224,7 +1259,7 @@ def fig_step_budget(report: Path, output: Path) -> Path:
     colours = [STEP_COLOURS[name] for name, _, _ in order]
 
     with plt.rc_context(rc=paper_style("column")):
-        figure, axis = plt.subplots(figsize=(3.4, 1.95))
+        figure, axis = plt.subplots(figsize=(4.06, 2.31))
         axis.set_facecolor("white")
         figure.patch.set_facecolor("white")
         axis.grid(False)
@@ -1239,7 +1274,7 @@ def fig_step_budget(report: Path, output: Path) -> Path:
             wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 0.8},
             labels=[f"{label}\n{ms:.2f} ms ({pct:.0f}%)"
                     for (_, label, _), ms, pct in zip(order, values, share)],
-            labeldistance=1.30, textprops={"fontsize": 6.8, "color": "#23272F"},
+            labeldistance=1.30, textprops={"fontsize": 7.5, "color": "#23272F"},
             radius=radius,
         )
         # The ring is square but the canvas is not, and `pie` leaves the axes at the data
@@ -1250,15 +1285,15 @@ def fig_step_budget(report: Path, output: Path) -> Path:
         axis.set_ylim(-0.88, 1.14)
         # Centre carries the one number the reader needs -- the fused step.
         axis.text(0, 0, f"{total:.2f} ms", ha="center", va="center",
-                  fontsize=9.5, fontweight="bold", color="#23272F")
+                  fontsize=11.0, fontweight="bold", color="#23272F")
         shape = data["shape"]
         figure.text(0.5, 0.995, "Step computation time breakdown",
-                    ha="center", va="top", fontsize=8.5, fontweight="bold",
+                    ha="center", va="top", fontsize=9.0, fontweight="bold",
                     color="#23272F")
         figure.text(0.5, 0.90,
                     f"$K{{=}}{shape['K']}$, $T{{=}}{shape['T']}$, "
                     f"$P{{=}}{shape['P']}$, $Q{{=}}{shape['Q']}$ on GPU",
-                    ha="center", va="top", fontsize=6.5, color="#5A6472")
+                    ha="center", va="top", fontsize=7.0, color="#5A6472")
         figure.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.03)
         path = save(figure, output)
         plt.close(figure)
@@ -1288,26 +1323,26 @@ def load_baselines(*paths: Path) -> dict:
     return {tier: dict(methods) for tier, methods in table.items()}
 
 
-# Lighter accents on the blue panel: one hue per baseline, held across all three panels so a
-# method keeps its colour. Ours stays the periwinkle, deliberately the only cool-neutral
-# among four saturated hues, so the subject of the comparison reads as the subject. A large
-# filled area wants a lighter tint than a thin line would, so every hue is lifted toward
-# white -- the same register as STEP_COLOURS, which these now share their steps with.
+# One hue per baseline, held across all three panels so a method keeps its colour, and the
+# same five the sensitivity bands use -- a reader who has learned the palette on one figure
+# does not relearn it on the next. Ours is the blue, the subject of the comparison.
 #
-# The earlier set was lifted too far. Validated against the panel (#DCE2EC) rather than
-# against white, it failed on its own terms: ours/HEDAC were dE 10.3 apart in *normal*
-# vision, SVES/HEDAC dE 2.0 for deuteranopes, and two of the five read as gray. The steps
-# below sit a half-step darker and pass every check on that surface -- lightness band,
-# chroma floor, adjacent CVD (worst dE 13.7 deutan) and normal-vision separation (16.7).
+# Four steps for five keys, which is deliberate: ours draws no visible mark in any of the
+# three panels -- the violin panels plot the baselines only, and in the safety panel its bar
+# is 0% -- so SVES can take the blue and the four visible violins are the four hues. Should
+# ours ever post a nonzero collision rate, give it its own step then.
 #
-# Four steps for five keys, which is deliberate but worth knowing about: ours draws no
-# visible mark in any of the three panels -- the two violin panels plot the baselines only,
-# and in the safety panel its bar is 0% -- so SVES can take the periwinkle and leave the
-# four *visible* marks identical to STEP_COLOURS. Should ours ever post a nonzero collision
-# rate, that bar and SVES's would come out the same colour; give ours its own step then.
+# Validated against the panel (#E2E3E6): lightness band, chroma floor, adjacent-pair CVD
+# (worst dE 8.8 protan) and normal-vision separation (23.4) all pass. Red leads because it is
+# confusable with both orange and green, so it needs an end slot with a single neighbour. Contrast against the panel is
+# under 3:1, which is only acceptable because every violin sits above its own axis label --
+# colour is not carrying identity alone.
+#
+# The dict order is the plotting order and the checks are on adjacent pairs, so reordering
+# the methods means revalidating.
 VIOLIN_COLOURS = {
-    "ours": "#7FADFF", "hedac": "#5FC97A", "sves": "#7FADFF",
-    "fmec": "#F0A04B", "smc": "#EC7BA8",
+    "ours": "#0078FF", "hedac": "#0078FF", "sves": "#00C98A",
+    "fmec": "#FF6B6B", "smc": "#F09A4C",
 }
 
 
@@ -1378,7 +1413,7 @@ def fig_baselines_violins(table: dict, directory: Path, metric: str = "fourier_e
             effects = _paired_effects(table, tier, metric)
             if not effects:
                 continue
-            figure, axes = plt.subplots(figsize=(3.4, 1.85))
+            figure, axes = plt.subplots(figsize=(3.5, 1.85))
             _violin(axes, [e for _, e in effects],
                     [VIOLIN_COLOURS[m] for m, _ in effects],
                     [BASELINE_LABELS[m] for m, _ in effects])
@@ -1409,7 +1444,7 @@ def fig_baselines_violins(table: dict, directory: Path, metric: str = "fourier_e
                               / len(runs))
                 labels.append(BASELINE_LABELS[method])
                 colours.append(VIOLIN_COLOURS[method])
-            figure, axes = plt.subplots(figsize=(3.4, 1.75))
+            figure, axes = plt.subplots(figsize=(3.5, 1.75))
             positions = range(len(struck))
             axes.bar(positions, struck, width=0.66, linewidth=0, color=colours, zorder=3)
             for slot, (value, method) in enumerate(zip(struck, methods)):

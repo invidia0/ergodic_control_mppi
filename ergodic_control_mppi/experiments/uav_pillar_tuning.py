@@ -204,10 +204,16 @@ def stage_arms(stage: str, base_arm: str, winner: str) -> dict[str, dict]:
     raise ValueError(f"unknown stage: {stage}")
 
 
-def _grid_config(run_directory: Path):
+def _grid_config(run_directory: Path, config_path: str = "configs/uav_profile.yaml"):
+    """Load a map's grid onto a controller config.
+
+    ``config_path`` exists for the Cor. "flow_matching_consistency" sweep, which flies the
+    same maps under several controller configurations; everything else takes the default and
+    is unaffected.
+    """
     manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
     arrays = np.load(run_directory / "arrays.npz", allow_pickle=False)
-    config = load_config("configs/uav_profile.yaml")
+    config = load_config(config_path)
     workspace = replace(
         config.controller.workspace,
         grid=jnp.asarray(np.asarray(arrays["grid"], dtype=np.float32)),
