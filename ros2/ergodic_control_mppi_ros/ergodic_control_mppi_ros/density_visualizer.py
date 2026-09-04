@@ -12,7 +12,7 @@ from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker
 
 from ergodic_control_mppi.config import AppConfig, load_config
-from ergodic_control_mppi.mppi.stein import pdf
+from ergodic_control_mppi.mppi.field import pdf
 
 
 def _centers(lower: float, upper: float, resolution: float) -> np.ndarray:

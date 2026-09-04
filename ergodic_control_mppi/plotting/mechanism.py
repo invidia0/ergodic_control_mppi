@@ -2,19 +2,18 @@
 
 Every field, weight and bandwidth drawn here is produced by calling the
 controller's own functions -- ``kernel``, ``kernel_gradient``, ``smoothed``,
-``pdf``, ``stein_repulsion`` -- on a memory buffer taken from a real run. Nothing
+``pdf``, ``kde_repulsion`` -- on a memory buffer taken from a real run. Nothing
 is hand-drawn, so a figure cannot drift away from the implementation; the
-composition of those calls is pinned against ``multiscale_memory_flow`` itself in
+composition of those calls is pinned against ``memory_flow`` itself in
 ``tests/test_plotting.py``.
 
     python -m ergodic_control_mppi.plotting.mechanism --output-dir theory/pictures
 
-Four figures, in the order Sec. III-C introduces them:
+Three figures, in the order Sec. III-C introduces them:
 
     fig_occupancy       o_t^h and the fading trail that produced it
     fig_excess_focus    the relative excess e_{t,i}^h, read off one memory point
     fig_memory_fields   the recency and over-coverage fields
-    fig_scale_bank      the gauge, and what each scale contributes
 
 The source run is cached; delete the .npz to regenerate it.
 """
@@ -22,7 +21,6 @@ The source run is cached; delete the .npz to regenerate it.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -33,17 +31,16 @@ from matplotlib.colors import LinearSegmentedColormap, PowerNorm, to_rgb
 from matplotlib.ticker import MultipleLocator
 
 from ergodic_control_mppi.config import load_config
-from ergodic_control_mppi.mppi.stein import (
+from ergodic_control_mppi.mppi.field import (
     ACTIVITY_FLOOR,
     kernel,
     kernel_gradient,
     pdf,
     smoothed,
-    stein_repulsion,
+    kde_repulsion,
 )
 from ergodic_control_mppi.plotting.style import (
-    SEQUENTIAL_CMAP,
-    TRAIL_CMAP,
+        TRAIL_CMAP,
     ACCENT,
     NEUTRAL,
     OUTSIDE_TICKS,
@@ -188,24 +185,20 @@ def _source(config_path: str, cache: Path, device: str, steps: int) -> dict[str,
 def _context(config, arrays):
     """Per-step derived quantities, exactly as core.py builds them."""
     params = config.controller
-    stein, workspace, gmm = params.stein, params.workspace, params.gmm
+    field, workspace, gmm = params.field, params.workspace, params.gmm
     memory = jnp.asarray(arrays["memory"])
 
     ages = jnp.arange(memory.shape[0])[::-1]
-    recency = stein.memory_decay ** ages
+    recency = field.memory_decay ** ages
     density_floor = 1.0 / (
         (workspace.x_limits[1] - workspace.x_limits[0])
         * (workspace.y_limits[1] - workspace.y_limits[0])
     )
-    # Attraction source and bandwidth: the median rollout, as core.py:171-176.
+    # The median rollout: the query set the field is evaluated on, and the plan the
+    # self-repulsion term repels from. There is no estimated bandwidth any more -- `h` is
+    # a design constant, so the panels draw the scale the controller actually uses.
     particles = jnp.asarray(arrays["surrogate"])
-    differences = particles[:, None, :] - particles[None, :, :]
-    bandwidth = jnp.maximum(
-        jnp.median(jnp.sum(differences * differences, axis=-1)), stein.self_bandwidth
-    )
-    scales = np.asarray(
-        jnp.geomspace(stein.fine_bandwidth, stein.coarse_bandwidth, stein.memory_scales)
-    )
+    bandwidth = float(field.fine_bandwidth)
     # Slice through whichever mode the buffer actually occupies, so panel (b)'s
     # three curves are comparable instead of all sitting near zero.
     means = np.asarray(gmm.means)
@@ -214,9 +207,9 @@ def _context(config, arrays):
         float(np.mean(np.linalg.norm(buffer_np - mean, axis=-1) < 3.0)) for mean in means
     ]
     return {
-        "params": params, "stein": stein, "gmm": gmm, "workspace": workspace,
+        "params": params, "field": field, "gmm": gmm, "workspace": workspace,
         "memory": memory, "recency": recency, "density_floor": density_floor,
-        "particles": particles, "bandwidth": bandwidth, "scales": scales,
+        "particles": particles, "bandwidth": bandwidth,
         "full_path": np.asarray(arrays["path"]),
         "position": np.asarray(arrays["position"]),
         "slice_y": float(means[int(np.argmax(occupancy_per_mode))][1]),
@@ -229,7 +222,7 @@ def _field_at(ctx, points, bandwidth: float) -> tuple[np.ndarray, np.ndarray, np
     """Occupancy, scale-matched target and relative excess at arbitrary points.
 
     Term for term eq. (occupancy_density), (smoothed_target) and
-    (relative_excess), which is what ``stein.py:174-178`` evaluates at the memory
+    (relative_excess), which is what ``field.py:memory_weights`` evaluates at the memory
     points. Blocked over the query axis: the full ``(N, P)`` kernel matrix is
     ~200 MB at N = 180^2, P = 1500.
     """
@@ -261,30 +254,25 @@ def _grid(ctx, n: int = 180, limits=None):
     return grid_x, grid_y, np.stack((grid_x.ravel(), grid_y.ravel()), axis=-1)
 
 
-def _rho(ctx, points, masses, bandwidth: float, rotation=None) -> np.ndarray:
+def _rho(ctx, points, masses, bandwidth: float) -> np.ndarray:
     """Memory repulsion of eq. (memory_repulsion), as the controller computes it.
 
-    ``stein_repulsion`` divides by the mass sum, so passing the raw recency gives
-    exactly rho(.; q^rec); ``rotation`` overrides C = R(theta) for the panel that
-    isolates the curl.
+    ``kde_repulsion`` divides by the mass sum, so passing the raw recency gives
+    exactly rho(.; q^rec).
     """
-    stein = ctx["stein"]
-    if rotation is not None:
-        stein = replace(stein, rotation=jnp.asarray(rotation, dtype=jnp.float32))
     return np.asarray(
-        stein_repulsion(
+        kde_repulsion(
             jnp.asarray(points, dtype=jnp.float32).reshape(-1, 2),
-            ctx["memory"], jnp.asarray(masses), stein, bandwidth,
+            ctx["memory"], jnp.asarray(masses), bandwidth,
         )
     )
 
 
-def _rho_excess(ctx, points, bandwidth: float, rotation=None) -> np.ndarray:
-    """The over-coverage field, gate included -- ``stein.py:188-190`` verbatim."""
+def _rho_excess(ctx, points, bandwidth: float) -> np.ndarray:
+    """The over-coverage field, gate included -- ``field.py:memory_weights`` verbatim."""
     _, _, excess, activity = _excess(ctx, bandwidth)
     gate = activity / (activity + ACTIVITY_FLOOR)
-    return gate * _rho(ctx, points, np.asarray(ctx["recency"]) * excess, bandwidth,
-                       rotation=rotation)
+    return gate * _rho(ctx, points, np.asarray(ctx["recency"]) * excess, bandwidth)
 
 
 def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4, flat: str | None = None):
@@ -452,7 +440,7 @@ def figure_occupancy(ctx, output: Path) -> Path:
     kernels, so linearly the halo around the track is invisible and only a thin
     ridge survives.
     """
-    bandwidth = float(ctx["stein"].fine_bandwidth)
+    bandwidth = float(ctx["field"].fine_bandwidth)
     grid_x, grid_y, points = _grid(ctx, n=220)
     occupancy, _, _ = _field_at(ctx, points, bandwidth)
 
@@ -589,10 +577,7 @@ def figure_excess_focus(ctx, output: Path) -> Path:
     cover. The crop is centred exactly on the point, so both profiles peak at
     the middle of their edge.
     """
-    # The bandwidth actually in play. `memory_scales = 1` makes `geomspace` return the
-    # fine endpoint alone, so `coarse_bandwidth` is never evaluated by the controller and
-    # drawing the mechanism at it illustrated a scale the vehicle never sees.
-    bandwidth = float(ctx["stein"].fine_bandwidth)
+    bandwidth = float(ctx["field"].fine_bandwidth)
     index, excess = _focus_point(ctx, bandwidth)
     memory = np.asarray(ctx["memory"])
     focus = memory[index]
@@ -759,7 +744,7 @@ def figure_excess_focus(ctx, output: Path) -> Path:
 
 def figure_memory_fields(ctx, output: Path) -> Path:
     """Fig. 3 -- recency and over-coverage fields on one workspace map."""
-    bandwidth = float(ctx["stein"].fine_bandwidth)
+    bandwidth = float(ctx["field"].fine_bandwidth)
     recency = np.asarray(ctx["recency"])
     stream_x, stream_y, stream_points = _grid(ctx, n=34)
     recency_field = _rho(ctx, stream_points, recency, bandwidth)
@@ -815,99 +800,6 @@ def figure_memory_fields(ctx, output: Path) -> Path:
     return path
 
 
-def _scale_field(ctx, points, bandwidth: float) -> np.ndarray:
-    """One term of the bank: the gauged, balance-blended field at ``bandwidth``.
-
-    ``stein.py:186-191`` verbatim, for a single scale.
-    """
-    balance = float(ctx["stein"].memory_balance)
-    blended = (1.0 - balance) * _rho(ctx, points, np.asarray(ctx["recency"]), bandwidth)
-    blended += balance * _rho_excess(ctx, points, bandwidth)
-    return float(np.sqrt(0.5 * np.e * bandwidth)) * blended
-
-
-def figure_scale_bank(ctx, output: Path) -> Path:
-    """Fig. 4 -- why there are Q scales, and why none carries its own gain.
-
-    Left, stacked: raw above gauged, so "before/after" is spatial rather than
-    encoded by dash-vs-solid, which would compete with the hue identifying the
-    scale. Right: what each gauged scale contributes as a field, under one shared
-    colour scale -- the point of the gauge is that they are commensurate, which
-    per-panel normalization would hide.
-    """
-    stein = ctx["stein"]
-    scales = ctx["scales"]
-    # Ordinal ramp: h_0 < h_1 < h_2 is ordered, so it takes one hue light->dark,
-    # not three categorical hues.
-    colors = [SEQUENTIAL_CMAP(v) for v in np.linspace(0.12, 1.0, len(scales))]
-
-    grid_x, grid_y, points = _grid(ctx, n=200)
-    contributions = [np.linalg.norm(_scale_field(ctx, points, float(h)), axis=-1)
-                     for h in scales]
-    shared_max = max(c.max() for c in contributions)
-
-    with plt.rc_context(rc=paper_style("double")):
-        # Height is set so the two stacked profile axes and the square maps end
-        # up the same height: taller and the maps float in slack, shorter and the
-        # profiles are too squat to read.
-        figure = plt.figure(figsize=(6.9, 2.2), constrained_layout=True)
-        grid = figure.add_gridspec(2, 4, width_ratios=[1.2, 1.0, 1.0, 1.0])
-        ax_raw = figure.add_subplot(grid[0, 0])
-        ax_gauged = figure.add_subplot(grid[1, 0], sharex=ax_raw)
-
-        radii = np.linspace(1e-3, 3.6, 400)
-        probe = jnp.stack((radii, jnp.zeros_like(radii)), axis=-1)
-        origin = jnp.zeros_like(probe)
-        peaks = []
-        for index, (bandwidth, color) in enumerate(zip(scales, colors)):
-            raw = np.linalg.norm(np.asarray(kernel_gradient(probe, origin, bandwidth)), axis=-1)
-            gauged = float(np.sqrt(0.5 * np.e * bandwidth)) * raw
-            peaks.append(gauged.max())
-            ax_raw.plot(radii, raw, color=color, linewidth=1.0)
-            ax_gauged.plot(radii, gauged, color=color, linewidth=1.0)
-            # Direct label at the peak instead of a legend box.
-            ax_raw.annotate(rf"$h_{index}\!=\!{bandwidth:.2f}$",
-                            xy=(float(radii[int(np.argmax(raw))]), raw.max()),
-                            xytext=(2.5, 1.0), textcoords="offset points",
-                            fontsize=6.0, color=color)
-
-        # Self-check, not decoration: the gauge is correct iff every scale peaks
-        # at exactly 1. Fail loudly rather than ship a wrong figure.
-        if not np.allclose(peaks, 1.0, atol=1e-5):
-            raise AssertionError(f"gauge broken: peak magnitudes {peaks} != 1")
-
-        ax_gauged.axhline(1.0, color="#5C6B87", linewidth=0.5, zorder=1)
-        ax_raw.set_ylabel(r"$\|\nabla\kappa_h\|$", labelpad=2)
-        ax_gauged.set_ylabel("gauged", labelpad=2)
-        ax_gauged.set_xlabel(r"$r=\|\mathbf{z}-\mathbf{m}_{t,i}\|$ [m]", labelpad=1)
-        ax_raw.tick_params(labelbottom=False)
-        ax_raw.set_ylim(0, 4.0)
-        ax_gauged.set_ylim(0, 1.3)
-        ax_raw.set_title("(a) raw: peaks differ 8x", pad=3)
-        ax_gauged.set_title(r"$\times\sqrt{he/2}$: peaks coincide at 1", pad=3,
-                            fontsize=6.5, fontweight="normal")
-
-        # (b)-(d) what each gauged scale actually contributes over the workspace.
-        for index, (bandwidth, magnitude) in enumerate(zip(scales, contributions)):
-            axis = figure.add_subplot(grid[:, index + 1])
-            mesh = _field_map(axis, grid_x, grid_y, magnitude, vmax=shared_max)
-            _trail(axis, ctx, linewidth=0.7, zorder=3)
-            _modes(axis, ctx)
-            _map_axes(axis, ctx, ylabel=(index == 0))
-            axis.set_title(rf"({'bcd'[index]}) $h_{index}={bandwidth:.2f}$", pad=3)
-            if index == len(scales) - 1:
-                _inline_colorbar(figure, axis, mesh,
-                                 r"$\sqrt{he/2}\,\|\boldsymbol{\rho}^h_t\|$  (shared)",
-                                 backing=True)
-
-        path = save(figure, output)
-        plt.close(figure)
-
-    print("  gauged scale peaks: "
-          + "  ".join(f"h={h:.2f}: {c.max():.4g}" for h, c in zip(scales, contributions)))
-    return path
-
-
 def figure_extra(ctx, output_dir: Path) -> list[Path]:
     """Rebuttal-only: matched target, activity gate, effective blend.
 
@@ -916,7 +808,7 @@ def figure_extra(ctx, output_dir: Path) -> list[Path]:
     eps_S is for, or why the two fields are blended after normalization rather
     than blending their weights.
     """
-    stein = ctx["stein"]
+    field = ctx["field"]
     paths = []
     with plt.rc_context(rc=paper_style("double")):
         figure, axes = plt.subplots(1, 3, figsize=(6.9, 2.3))
@@ -924,7 +816,7 @@ def figure_extra(ctx, output_dir: Path) -> list[Path]:
         # Why p*_h and not p*: comparing a smoothed occupancy against an
         # unsmoothed target manufactures excess that is pure bandwidth artefact.
         axis = axes[0]
-        bandwidth = float(stein.fine_bandwidth)
+        bandwidth = float(field.fine_bandwidth)
         line_y = ctx["slice_y"]
         xs = np.linspace(*ctx["limits_x"], 400)
         slice_points = jnp.stack((xs, jnp.full_like(xs, line_y)), axis=-1)
@@ -994,13 +886,12 @@ def main() -> None:
     arrays = _source(args.config, args.cache, args.device, args.steps)
     config = load_config(args.config)
     ctx = _context(config, arrays)
-    print(f"scale bank: {np.round(ctx['scales'], 3).tolist()}  P = {len(arrays['memory'])}")
+    print(f"h = {float(ctx['field'].fine_bandwidth):.3f}  P = {len(arrays['memory'])}")
 
     written = [
         figure_occupancy(ctx, args.output_dir / "fig_occupancy.pdf"),
         figure_excess_focus(ctx, args.output_dir / "fig_excess_focus.pdf"),
         figure_memory_fields(ctx, args.output_dir / "fig_memory_fields.pdf"),
-        figure_scale_bank(ctx, args.output_dir / "fig_scale_bank.pdf"),
     ]
     if args.extra:
         written.extend(figure_extra(ctx, args.output_dir))

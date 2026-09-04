@@ -59,10 +59,10 @@ class ExpansionTest(unittest.TestCase):
         self.campaign = load_campaign(CAMPAIGN)
 
     def test_cell_id_is_stable_and_distinguishing(self):
-        first = Cell("s", "arm", {"stein.memory_gain": 5.0}, 43, 43, "trimodal", 100)
-        same = Cell("s", "arm", {"stein.memory_gain": 5.0}, 43, 43, "trimodal", 100)
-        other = Cell("s", "arm", {"stein.memory_gain": 6.0}, 43, 43, "trimodal", 100)
-        seeded = Cell("s", "arm", {"stein.memory_gain": 5.0}, 44, 43, "trimodal", 100)
+        first = Cell("s", "arm", {"reference.memory_gain": 5.0}, 43, 43, "trimodal", 100)
+        same = Cell("s", "arm", {"reference.memory_gain": 5.0}, 43, 43, "trimodal", 100)
+        other = Cell("s", "arm", {"reference.memory_gain": 6.0}, 43, 43, "trimodal", 100)
+        seeded = Cell("s", "arm", {"reference.memory_gain": 5.0}, 44, 43, "trimodal", 100)
         self.assertEqual(first.cell_id, same.cell_id)
         self.assertNotEqual(first.cell_id, other.cell_id)
         self.assertNotEqual(first.cell_id, seeded.cell_id)
@@ -83,14 +83,14 @@ class ExpansionTest(unittest.TestCase):
         self.assertEqual(len({c.cell_id for c in cells}), len(cells))
 
     def test_patched_applies_density_seeds_and_axes(self):
-        cell = Cell("s", "arm", {"stein.memory_gain": 42.0, "mppi.T": 7},
+        cell = Cell("s", "arm", {"reference.memory_gain": 42.0, "mppi.T": 7},
                     11, 22, "bimodal", 33)
         base = yaml.safe_load(self.campaign.base_config.read_text(encoding="utf-8"))
         data = _patched(base, self.campaign, cell)
         self.assertEqual(data["seed"], 11)
         self.assertEqual(data["steps"], 33)
         self.assertEqual(data["map"]["obstacles"]["seed"], 22)
-        self.assertEqual(data["stein"]["memory_gain"], 42.0)
+        self.assertEqual(data["reference"]["memory_gain"], 42.0)
         self.assertEqual(data["mppi"]["T"], 7)
         self.assertEqual(len(data["density"]["weights"]), 2)
         # The base config must not be mutated in place.
@@ -230,10 +230,10 @@ class InvalidCellTest(unittest.TestCase):
                         "ok": {},
                         # h_f = 2 * 0.8^2 = 1.28 > h_c = 1.0 -> rejected by config.py
                         "impossible": {
-                            "stein.fill_resolution": 0.8,
-                            "stein.coarse_bandwidth": 1.0,
+                            "reference.fill_resolution": 0.8,
+                            "reference.coarse_bandwidth": 1.0,
                         },
-                        "ok_too": {"stein.memory_gain": 5.0},
+                        "ok_too": {"reference.memory_gain": 5.0},
                     },
                 }
             }
@@ -271,7 +271,7 @@ class ArchiveRoundTripTest(unittest.TestCase):
                 "kind": "arms",
                 "steps": 60,
                 "seeds": [43, 44],
-                "arms": {"full": {}, "memory_off": {"stein.memory_gain": 0.0}},
+                "arms": {"full": {}, "memory_off": {"reference.memory_gain": 0.0}},
             }
         }
         config = root / "campaign.yaml"

@@ -17,7 +17,6 @@ import numpy as np
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.experiments.theory_audit import (
     endpoint_jacobian,
-    preconditioning_conditioning,
     step_residuals,
 )
 from ergodic_control_mppi.metrics.ergodicity import compute_ball_ergodic_metric
@@ -62,12 +61,22 @@ class ExecutedTrackingBoundTest(unittest.TestCase):
             self.assertLessEqual(row.eps_track, row.rhs_full * (1.0 + 1e-5))
 
     def test_k0_slack_is_exactly_the_weighted_rollout_spread(self):
-        """With eps_avg = 0 the k=0 bound is Jensen, so its slack *is* Var_w(v)."""
+        """With eps_avg = 0 the sharp k=0 bound collapses to eps_fm_k0, whose slack is Var_w(v).
+
+        No factor 2: the bound is ``(sqrt(eps_avg) + sqrt(eps_fm))^2``, so at eps_avg = 0 it
+        *is* eps_fm_k0. That the remaining slack is exactly the weighted rollout spread is
+        what says the k=0 step is Jensen and nothing else.
+        """
         with tempfile.TemporaryDirectory() as directory:
             rows = _walk(_params(directory), steps=12)
         for row in rows:
+            # The identity is a difference of two ~250 m^2/s^2 quantities whose gap is
+            # ~1e-4, so it is only resolvable to the float32 ulp at that magnitude -- about
+            # 1.5e-5 here. A fixed decimal tolerance would be asserting precision the
+            # representation does not have; four ulps is what the arithmetic can carry.
+            tolerance = 4.0 * float(np.spacing(np.float32(row.eps_track)))
             self.assertAlmostEqual(
-                row.rhs_k0 / 2.0 - row.eps_track, row.jensen_slack, places=4
+                row.rhs_k0 - row.eps_track, row.jensen_slack, delta=tolerance
             )
 
     def test_averaging_gap_vanishes_under_a_convex_update(self):
@@ -98,7 +107,7 @@ class ExecutedTrackingBoundTest(unittest.TestCase):
 
 
 class AssumptionTest(unittest.TestCase):
-    """As. "endpoint" and Rem. "preconditioning", both checkable exactly."""
+    """As. "endpoint" and the Sec. III-E margins, both checkable exactly."""
 
     def test_endpoint_map_has_full_row_rank_at_two_steps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,11 +135,23 @@ class AssumptionTest(unittest.TestCase):
         )
         self.assertEqual(np.linalg.matrix_rank(saturated), 0)
 
-    def test_preconditioner_is_nonsingular(self):
+    def test_promotion_cannot_overturn_the_smallest_margin(self):
+        """Sec. III-E's split: the bend promotes, but only the demotion empties a basin.
+
+        The multiplicative bend shifts a log-weight by at most ``log((c+1)/c)``. If that
+        ever exceeds the smallest ``Delta_j``, promotion alone could free a mode and the
+        pre-registered null on ``c`` would have no basis.
+        """
+        from ergodic_control_mppi.mppi.field import responsibility_gaps
+
         with tempfile.TemporaryDirectory() as directory:
-            determinant, conditioning = preconditioning_conditioning(_params(directory))
-        self.assertNotAlmostEqual(determinant, 0.0)
-        self.assertGreaterEqual(conditioning, 1.0)
+            params = _params(directory)
+        ceiling = float(params.field.deficit_ceiling)
+        if ceiling <= 0:
+            self.skipTest("destination bias disabled in this config")
+        promotion = np.log((ceiling + 1.0) / ceiling)
+        gaps = np.asarray(responsibility_gaps(params.gmm), dtype=np.float64)
+        self.assertLess(promotion, gaps.min())
 
 
 class BallErgodicMetricTest(unittest.TestCase):
@@ -304,7 +325,7 @@ class IdealFlowKernelTest(unittest.TestCase):
             origin = carry.state[:2]
             initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2))
             evaluation = jnp.concatenate((initial, sampled[:, :-1]), axis=1)
-            flow = reference_flow(params, evaluation, carry.memory)[0]
+            flow = reference_flow(params, evaluation, carry.memory, carry.service_mass)[0]
 
             # eps_track is zero for this kernel wherever the projection is inactive: the
             # executed spatial velocity IS the reference. If this drifts, the "ideal" run is

@@ -169,7 +169,7 @@ class ClosedLoopGridAvoidanceTest(unittest.TestCase):
             data = yaml.safe_load(Path("configs/uav_profile.yaml").read_text(encoding="utf-8"))
             data.update(steps=150, seed=43)
             data["mppi"].update(K=32, T=15)
-            data["stein"]["memory_time"] = 1.0
+            data["reference"]["memory_time"] = 1.0
             path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
             config = load_config(path)
 

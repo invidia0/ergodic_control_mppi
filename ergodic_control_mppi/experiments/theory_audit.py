@@ -55,11 +55,16 @@ class StepResiduals(NamedTuple):
             the only term the proof of Prop. "executed_flow_tracking" uses.
         eps_fm_full: the same weighted average over the complete ``T``-step residual, which
             is what the paper's ``eps_FM`` denotes.
-        rhs_k0: ``2 eps_avg + 2 eps_fm_k0``, the bound as the proof builds it.
-        rhs_full: ``2 eps_avg + 2 eps_fm_full``, the bound as stated.
+        rhs_k0: ``(sqrt(eps_avg) + sqrt(eps_fm_k0))^2``, the bound as the proof builds it.
+            The sharp L^2 triangle inequality -- Young at its optimal parameter -- rather
+            than the ``||a+b||^2 <= 2||a||^2 + 2||b||^2`` split, whose factor 2 the audit
+            measured at 2.001 slack and which was therefore the entire looseness. Tight when
+            the two errors are parallel.
+        rhs_full: the same with ``eps_fm_full``, the bound as stated.
         jensen_slack: ``sum_b w_b ||v_b - v_bar||^2``, the weighted spread of the first-slot
-            rollout velocities. With ``eps_avg = 0`` this is exactly ``rhs_k0/2 - eps_track``,
-            so it *is* the conservatism of the k=0 bound, not a proxy for it.
+            rollout velocities. With ``eps_avg = 0`` the sharp bound collapses to
+            ``eps_fm_k0``, and this is exactly ``rhs_k0 - eps_track`` -- so it *is* the
+            conservatism of the k=0 bound, not a proxy for it.
         flow_speed: ``||h(z_t)||`` in m/s.
         gauge_regularized: 1.0 when the speed gauge sat in its regularized branch. Detected
             from the output alone: the gauge returns exactly ``reference_speed`` whenever the
@@ -79,6 +84,18 @@ class StepResiduals(NamedTuple):
     saturated_fraction: float
 
 
+def _sharp(first: jax.Array, second: jax.Array) -> jax.Array:
+    """``(sqrt(a) + sqrt(b))^2``: the sharp L^2 triangle bound on ``||u + w||^2``.
+
+    Young's inequality at the optimal parameter, rather than at the parameter 1 that gives
+    the textbook ``2a + 2b``. The two agree only when ``a = b``; at the measured
+    ``eps_avg ~ 4e-10`` against ``eps_fm ~ 0.6`` the cross term is ``~3e-5``, so this is
+    ``eps_fm`` to five decimal places and the factor 2 the audit measured as 2.001 slack is
+    recovered outright.
+    """
+    return jnp.square(jnp.sqrt(first) + jnp.sqrt(second))
+
+
 def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Array:
     """Return the residual terms for one carry, as a stacked array under JIT."""
     epsilon, _ = sample_epsilon(carry.key, params)
@@ -86,14 +103,15 @@ def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Ar
         params, carry.state, carry.controls, epsilon, carry.temperature
     )
     result = mppi_step(
-        params, carry.controls, carry.state, carry.key, carry.temperature, carry.memory
+        params, carry.controls, carry.state, carry.key, carry.temperature, carry.memory,
+        carry.service_mass,
     )
 
     origin = carry.state[:2]
     initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2))
     evaluation = jnp.concatenate((initial, sampled_positions[:, :-1]), axis=1)
     displacements = sampled_positions - evaluation
-    flow = reference_flow(params, evaluation, carry.memory)
+    flow = reference_flow(params, evaluation, carry.memory, carry.service_mass)
 
     delta_t = params.model.delta_t
     weights = result.weights
@@ -124,8 +142,8 @@ def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Ar
     speed = jnp.linalg.norm(reference)
     return jnp.stack([
         eps_track, eps_avg, eps_fm_k0, eps_fm_full,
-        2.0 * eps_avg + 2.0 * eps_fm_k0, 2.0 * eps_avg + 2.0 * eps_fm_full, jensen,
-        speed, (speed < params.stein.reference_speed - 1e-6).astype(jnp.float32), saturated,
+        _sharp(eps_avg, eps_fm_k0), _sharp(eps_avg, eps_fm_full), jensen,
+        speed, (speed < params.field.reference_speed - 1e-6).astype(jnp.float32), saturated,
     ])
 
 
@@ -168,18 +186,6 @@ def endpoint_jacobian(
         )[0]
 
     return np.asarray(jax.jacfwd(endpoint)(controls.reshape(-1)))
-
-
-def preconditioning_conditioning(params: ControllerParams) -> tuple[float, float]:
-    """Return ``(det C, cond C)`` for the curl-augmented preconditioner of Rem. "preconditioning".
-
-    The remark's claim is that a nonsingular ``C`` preserves the zero set of the reference
-    field. ``det C != 0`` is the whole content of the hypothesis, and ``cond C`` bounds how
-    far a near-zero of ``h`` can move under ``C``, so the two numbers settle the remark
-    without a grid sweep.
-    """
-    matrix = np.asarray(params.stein.rotation, dtype=np.float64).reshape(2, 2)
-    return float(np.linalg.det(matrix)), float(np.linalg.cond(matrix))
 
 
 def residual_walk(
@@ -303,10 +309,12 @@ def ideal_step(params: ControllerParams, carry):
     is the idealization, not a bug -- it is what makes eps_track identically zero, which is
     the premise Cor. "flow_matching_consistency" needs and the thing being tested here.
     """
+    from ergodic_control_mppi.mppi.field import responsibilities
     from ergodic_control_mppi.mppi.single import SingleControllerState, adapt_temperature
 
     result = mppi_step(
-        params, carry.controls, carry.state, carry.key, carry.temperature, carry.memory
+        params, carry.controls, carry.state, carry.key, carry.temperature, carry.memory,
+        carry.service_mass,
     )
     # Same construction as _residuals: one key, so these rollouts are the ones the step used,
     # and flow[0] is h(z_t) exactly because every rollout starts at z_t.
@@ -317,7 +325,7 @@ def ideal_step(params: ControllerParams, carry):
     origin = carry.state[:2]
     initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2))
     evaluation = jnp.concatenate((initial, sampled_positions[:, :-1]), axis=1)
-    flow = reference_flow(params, evaluation, carry.memory)[0]
+    flow = reference_flow(params, evaluation, carry.memory, carry.service_mass)[0]
 
     nominal = step(carry.state, result.control, params.model)
     advanced = project_admissible(origin + params.model.delta_t * flow, params.workspace)
@@ -334,6 +342,8 @@ def ideal_step(params: ControllerParams, carry):
         temperature=adapt_temperature(carry.temperature, result.weights, params),
         memory=jnp.concatenate((carry.memory[1:], next_state[None, :2]), axis=0),
         step_index=carry.step_index + 1,
+        service_mass=params.field.service_decay * carry.service_mass
+        + responsibilities(next_state[:2], params.gmm),
     )
     return next_carry
 

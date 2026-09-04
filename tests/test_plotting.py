@@ -177,20 +177,19 @@ class RampContrastTest(unittest.TestCase):
 class MechanismFieldTest(unittest.TestCase):
     """The figures must compute what the controller computes, not a lookalike.
 
-    ``_field_at`` / ``_rho`` / ``_rho_excess`` transcribe ``stein.py:174-191`` so
-    they can be evaluated on a grid instead of only at the memory points. Pinning
-    them against ``multiscale_memory_flow`` itself -- with the bank collapsed to a
-    single scale, which is the only configuration in which the two are comparable
-    term for term -- is what stops the figures drifting from the implementation.
+    ``_field_at`` / ``_rho`` / ``_rho_excess`` transcribe ``field.py:memory_weights`` and
+    ``kde_repulsion`` so they can be evaluated on a grid instead of only at the memory
+    points. Pinning their ``memory_balance`` blend against ``memory_flow`` itself is what
+    stops the figures drifting from the implementation.
     """
 
-    def test_scale_field_matches_the_controller(self):
+    def test_memory_field_matches_the_controller(self):
         from dataclasses import replace
 
         import jax.numpy as jnp
 
-        from ergodic_control_mppi.mppi.stein import multiscale_memory_flow
-        from ergodic_control_mppi.plotting.mechanism import _scale_field
+        from ergodic_control_mppi.mppi.field import memory_flow
+        from ergodic_control_mppi.plotting.mechanism import _rho, _rho_excess
 
         with tempfile.TemporaryDirectory() as temporary:
             config = load_config(write_small_config(Path(temporary), steps=2))
@@ -203,13 +202,16 @@ class MechanismFieldTest(unittest.TestCase):
         bandwidth = 0.7
         floor = 1.0 / 400.0
 
-        single = replace(params.stein, memory_scales=1,
-                         fine_bandwidth=bandwidth, coarse_bandwidth=bandwidth)
-        ctx = {"stein": single, "gmm": params.gmm, "memory": memory,
+        field = replace(params.field, fine_bandwidth=bandwidth)
+        ctx = {"field": field, "gmm": params.gmm, "memory": memory,
                "recency": recency, "density_floor": floor}
 
-        expected = multiscale_memory_flow(points, memory, recency, params.gmm, single, floor)
-        got = _scale_field(ctx, points, bandwidth)
+        expected = memory_flow(points, memory, recency, params.gmm, field, floor)
+        balance = float(field.memory_balance)
+        got = float(np.sqrt(0.5 * np.e * bandwidth)) * (
+            (1.0 - balance) * _rho(ctx, points, np.asarray(recency), bandwidth)
+            + balance * _rho_excess(ctx, points, bandwidth)
+        )
         # Guard against passing on two zero fields.
         self.assertGreater(float(np.abs(np.asarray(expected)).max()), 1e-3)
         self.assertTrue(

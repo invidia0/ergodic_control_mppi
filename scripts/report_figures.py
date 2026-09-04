@@ -4,7 +4,6 @@ Reads the shipped UAV per-seed CSVs and renders the three figures the report nee
 
     fig_paired_arms      per-seed paired effect vs the shipped arm (violin + points)
     fig_effect_forest    median ratio + bootstrap CI, Holm-marked
-    fig_agreement_matrix campaign vs UAV verdict per mechanism claim
     fig_dot_matrix       every run as one dot, axes ranked by spread of their medians
 
     uv run python scripts/report_figures.py --output results/report
@@ -35,56 +34,51 @@ from ergodic_control_mppi.plotting.style import (
 )
 
 BASELINE = "baseline"
-ARMS = ["h_0.94", "h_6.6", "theta_0", "theta_15", "theta_45"]
+# The three necessity rows plus the two bandwidth anchors: the arms the
+# mechanism argument stands or falls on.
+ARMS = ["memory_off", "plan_off", "release_off", "h_0.47", "h_5.0"]
 ARM_LABELS = {
     "h_0.94": "$h{=}0.94$",
     "h_2.35": "$h{=}2.35$",
-    "h_6.6": "$h{=}6.6$",
-    "h_8.5": "$h{=}8.5$",
-    "theta_0": r"$\theta{=}0$",
-    "theta_15": r"$\theta{=}15$",
-    "theta_45": r"$\theta{=}45$",
-    "theta_60": r"$\theta{=}60$",
-    "theta_75": r"$\theta{=}75$",
-    "gain_8": r"$k_{\mathcal{M}}{=}8$",
     "gain_30": r"$k_{\mathcal{M}}{=}30$",
     "gain_60": r"$k_{\mathcal{M}}{=}60$",
     "tau_3": r"$\tau_{\mathcal{M}}{=}3$",
     "tau_11": r"$\tau_{\mathcal{M}}{=}11$",
-    "tau_20": r"$\tau_{\mathcal{M}}{=}20$",
-    "tau_30": r"$\tau_{\mathcal{M}}{=}30$",
     "T_150": "$T{=}150$",
     "T_500": "$T{=}500$",
     "T_750": "$T{=}750$",
     "K_125": "$N{=}125$",
     "K_500": "$N{=}500$",
-    "ell_self_0.25": r"$\ell_{\min}{=}0.25$",
-    "ell_self_4.0": r"$\ell_{\min}{=}4.0$",
     "balance_0.5": "$a{=}0.5$",
     "flow_1500": r"$\gamma{=}1500$",
     "flow_6000": r"$\gamma{=}6000$",
     "penalty_0.1": r"$w_{\rm obs}{\times}0.1$",
     "boundary_0.1": r"$w_{\partial}{\times}0.1$",
-    "lam_max_1e5": r"$\lambda_{\max}{=}10^5$",
     "explore_0": r"$f_{\rm ex}{=}0$",
-    "explore_0.3": r"$f_{\rm ex}{=}0.3$",
-    # Added for the final nine-map campaign.
-    "theta_30": r"$\theta{=}30$",
-    "alpha_0.8": r"$\alpha{=}0.80$",
+    # The mechanism axes of the gradient-field campaign.
+    "plan_off": "Plan rep. off",
+    "plan_3": "$g{=}3$",
+    "plan_10": "$g{=}10$",
+    "h_0.47": "$h{=}0.47$",
+    "h_5.0": "$h{=}5.0$",
+    "gain_120": r"$k_{\mathcal{M}}{=}120$",
+    "release_off": r"Release off",
+    "release_1.75": r"$\sigma^*{=}1.75$",
+    "release_3.0": r"$\sigma^*{=}3.0$",
+    "ceiling_0": "$c{=}0$",
+    "ceiling_0.5": "$c{=}0.5$",
+    "service_20": r"$\tau_s{=}20$",
+    "service_90": r"$\tau_s{=}90$",
+    "transit_1": r"$\beta{=}1$",
+    "transit_8": r"$\beta{=}8$",
+    "floor_1.0": r"$\varepsilon_s{=}1.0$",
     "alpha_0.9": r"$\alpha{=}0.90$",
-    "alpha_0.99": r"$\alpha{=}0.99$",
-    "alpha_1.0": r"$\alpha{=}1.0$",
-    "h_4.0": "$h{=}4.0$",
-    "h_11.0": "$h{=}11.0$",
-    "ell_self_2.0": r"$\ell_{\min}{=}2.0$",
+    "alpha_0.9": r"$\alpha{=}0.90$",
     "K_1000": "$N{=}1000$",
     "lam_max_1e4": r"$\lambda_{\max}{=}10^4$",
     "refspeed_2.5": "$v{=}2.5$",
     "refspeed_3.0": "$v{=}3.0$",
     "memory_off": "Memory off",
-    "Q2": "$Q{=}2$",
-    "Q3_fine": "$Q{=}3$ fine",
-    "Q3_coarse": "$Q{=}3$ coarse",
     "baseline@108": "Baseline",
     "baseline@27": "Baseline (w27)",
 }
@@ -98,18 +92,21 @@ AXIS_LABELS = {
     "T": "Horizon\n$T$",
     "alpha": "Control\ncost $\\alpha$",
     "K": "Rollout\nsamples $N$",
-    "theta": "Curl\n$\\theta$",
     "memory_time": "Memory\ntime $\\tau_{\\mathcal{M}}$",
     "exploration": "Explore\nfraction $f_{\\rm ex}$",
     "fine_bandwidth": "Memory\nbandwidth $h_f$",
     "reference_speed": "Ref.\nspeed $v$",
     "penalty_scale": "Obstacle\npenalty $w_{\\rm obs}$",
-    "memory_scales": "Scale\nbank $Q$",
     "boundary_scale": "Wall\npenalty $w_{\\partial}$",
     "lam_max": "Temp.\ncap $\\lambda$",
-    "ell_self": "Attraction\nfloor $\\ell_{\\min}$",
+    "plan_gain": "Plan\nrepulsion $g$",
+    "release_ratio": "Release\nratio $\\sigma^*$",
+    "deficit_ceiling": "Destination\nbend $c$",
+    "service_time": "Service\ntime $\\tau_s$",
+    "transit_speedup": "Transit\nspeedup $\\beta$",
+    "service_floor": "Service\nfloor $\\varepsilon_s$",
     "memory_balance": "Memory\nbalance $a$",
-    "flow_weight": "Stein\nflow $\\gamma$",
+    "track_weight": "Stein\nflow $\\gamma$",
 }
 
 # The five outcomes the sensitivity panel decomposes over, with the transform that makes a
@@ -120,11 +117,11 @@ AXIS_LABELS = {
 # effect, so an arm that halves the dwell and one that doubles it are equally influential --
 # which is the right reading for "how much does this knob move the system".
 OUTCOMES = (
+    ("occupancy_mse", "log", "Occupancy MSE"),
     ("fourier_ergodic", "log", "Fourier ergodicity"),
     ("tours", "raw", "Tours"),
     ("mode_dwell_median_s", "log", "Dwell"),
     ("in_mode_fraction", "logit", "In-mode fraction"),
-    ("speed_mps", "raw", "Achieved speed"),
 )
 # One colour per outcome, listed **bottom-to-top** in stacking order -- the reverse of how a
 # published legend reads down the page, so a palette lifted from one has to be flipped.
@@ -162,15 +159,6 @@ def paired(table, arm: str, metric: str) -> tuple[np.ndarray, np.ndarray]:
     return a, b
 
 
-# 25p/525 is a second copy of a map already in the campaign, not a ninth map. Seed 525
-# qualified at both 15 and 25 pillars -- 492 against 824 occupied cells -- but
-# `final_ablation.py`'s `_configs` cached map arrays by seed alone, so every lane labelled
-# 25p/525 flew the 15-pillar field. Its rows are bit-identical to 15p/525's. Left in, one map
-# would cast two votes in every per-map gate and the campaign would claim nine maps it does
-# not have. The driver is fixed; this drops the rows the broken driver already wrote.
-DUPLICATE_MAPS = {(25, 525)}
-
-
 def load_final(path: Path) -> dict[str, dict[tuple, dict[str, str]]]:
     """Index the campaign as ``arm -> cell -> row`` with ``cell`` the paired unit.
 
@@ -189,8 +177,6 @@ def load_final(path: Path) -> dict[str, dict[tuple, dict[str, str]]]:
     with path.open(encoding="utf-8", newline="") as stream:
         for row in csv.DictReader(stream):
             cell = (int(row["obs_num"]), int(row["map_seed"]), int(row["seed"]))
-            if cell[:2] in DUPLICATE_MAPS:
-                continue
             arm = row["arm"]
             table[f"{arm}@{row['lanes']}" if arm == BASELINE else arm][cell] = row
     return table
@@ -334,7 +320,7 @@ def sensitivity(table, arm: str,
     return per_outcome, float(np.sqrt(max(joint, 0.0)))
 
 
-def per_map_effects(table, arm: str, metric: str = "fourier_ergodic",
+def per_map_effects(table, arm: str, metric: str = "occupancy_mse",
                     standardize: bool = True,
                     reference: str | None = None) -> dict[tuple, float]:
     """Per-map effect keyed ``(obs_num, map_seed)``, standardised by its own noise.
@@ -426,7 +412,7 @@ STRIP_COLOURS = ["#FF6B6B", "#FFAA5C", NEUTRAL_BIN, "#00D5F0", "#0078FF"]
 DOT_EDGES = [-9, -2.0, -1.5, -1.0, -0.5, -0.15, 0.15, 0.5, 1.0, 1.5, 2.0, 9]
 
 
-def fig_dot_matrix(table, output: Path, metric: str = "fourier_ergodic") -> Path:
+def fig_dot_matrix(table, output: Path, metric: str = "occupancy_mse") -> Path:
     """Every run in the campaign as one dot, arms grouped by axis and ranked by spread.
 
     The forest and violin figures summarise each arm to a median and an interval, which
@@ -556,7 +542,7 @@ def fig_dot_matrix(table, output: Path, metric: str = "fourier_ergodic") -> Path
         return path
 
 
-def fig_final_ablation(table, output: Path, metric: str = "fourier_ergodic",
+def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
                        reference: str | None = None, dots_per_row: int = 4,
                        consistency: bool = True) -> Path:
     """The nine-map campaign in one figure: dots, per-map consistency, sensitivity.
@@ -1051,7 +1037,7 @@ def fig_paired_arms(table, output: Path, metric: str = "occupancy_mse") -> Path:
         )
         axis.set_ylabel(r"$\log_2$(arm / shipped), occupancy MSE")
         axis.set_title("Paired per-seed effect against the shipped arm "
-                       r"($\theta{=}30$, $h{=}5.0$), "
+                       r"($h{=}0.94$, $g{=}6$, $\sigma^*{=}2.24$), "
                        f"$n={paired(table, ARMS[0], metric)[0].size}$")
         # Headroom so the callout never collides with the topmost violin.
         low, high = axis.get_ylim()
@@ -1130,99 +1116,25 @@ def fig_effect_forest(table, output: Path, arms: list[str] | None = None,
     return path
 
 
-# (claim, campaign log2 effect or None, uav log2 effect or None, campaign quoted?, note)
-CLAIMS = [
-    ("memory is load-bearing", np.log2(13.6), np.log2(12.2), True, "both significant"),
-    ("bank vs one good scale", np.log2(1.07), np.log2(1.0), True, "agree"),
-    ("memory_balance inert", np.log2(1.089), np.log2(1.0), True, "agree"),
-    ("curl must be kept", np.log2(1.108), np.log2(1.0 / 0.977), True, "agree, neither sig."),
-    ("memory_gain = 60", np.log2(0.9), np.log2(4.0), True, "DISAGREE (density)"),
-    ("lengthscale rule", np.log2(1.0), np.log2(1.165), True, "DISAGREE (scale transfer)"),
-    ("horizon T = 150", np.log2(0.784), None, True, "confounded by lam_max"),
-]
-
-
-def fig_agreement_matrix(output: Path, campaign_dir: Path | None = None) -> Path:
-    """Campaign vs UAV effect per mechanism claim, on a diverging scale.
-
-    Diverging is the right job here: the quantity has a meaningful zero (no effect)
-    and a direction (worse / better), so a neutral midpoint must read as "nothing".
-    """
-    labels = [c[0] for c in CLAIMS]
-    grid = np.array([[c[1] if c[1] is not None else np.nan,
-                      c[2] if c[2] is not None else np.nan] for c in CLAIMS])
-    # Clip at 4x. The memory row is 12-14x and would otherwise own the whole ramp,
-    # flattening every remaining row to white -- the rows the figure exists to compare.
-    limit = 2.0
-
-    with plt.rc_context(rc=paper_style("double")):
-        figure, axis = plt.subplots(figsize=(6.9, 3.4))
-        mesh = axis.imshow(grid, cmap=DIVERGING_CMAP, vmin=-limit, vmax=limit,
-                           aspect="auto")
-        for i in range(grid.shape[0]):
-            for j in range(grid.shape[1]):
-                value = grid[i, j]
-                if np.isnan(value):
-                    axis.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1,
-                                                 facecolor="#DCE2EC", hatch="///",
-                                                 edgecolor="#98A4BA", linewidth=0.4))
-                    axis.text(j, i, "not run", ha="center", va="center",
-                              fontsize=6.5, color="#5A6472")
-                else:
-                    # Ink stays neutral; the cell fill carries the magnitude.
-                    shade = "#FFFFFF" if abs(value) > 0.62 * limit else "#23272F"
-                    mark = r"$\gg$" if abs(value) > limit else ""
-                    axis.text(j, i, f"{mark}{2**value:.2f}x", ha="center", va="center",
-                              fontsize=7.0, color=shade)
-        axis.set_xticks([0, 1])
-        axis.set_xticklabels(["campaign\n(quoted)", "UAV\n(re-analyzed)"])
-        axis.set_yticks(np.arange(len(labels)))
-        axis.set_yticklabels(labels)
-        for i, claim in enumerate(CLAIMS):
-            axis.text(1.06, i, claim[4], va="center", fontsize=6.5,
-                      color=ACCENT if "DISAGREE" in claim[4] else "#5A6472",
-                      transform=axis.get_yaxis_transform())
-        axis.set_xlim(-0.5, 1.5)
-        axis.grid(False)
-        axis.set_title("Mechanism claims: campaign vs UAV deployment")
-        # Fixed positions: tight_layout cannot see the notes column (it is text drawn
-        # in axes coords), so it reclaims the space and collides with it.
-        axis.set_position((0.19, 0.26, 0.42, 0.63))
-        # Horizontal bar underneath: a vertical one would sit between the cells and
-        # their notes column and break the left-to-right read.
-        bar = figure.colorbar(mesh, cax=figure.add_axes((0.19, 0.11, 0.42, 0.035)),
-                              orientation="horizontal", extend="both")
-        bar.set_label(r"$\log_2$ effect vs reference (worse $\rightarrow$), clipped at $\pm2$",
-                      fontsize=7)
-        bar.ax.tick_params(labelsize=6)
-        path = save(figure, output)
-        plt.close(figure)
-    return path
-
-
 STEP_STAGES = (
     ("rollouts_KT", "Rollouts", r"$K{\times}T$ dynamics + stage cost"),
-    ("memory_QP2", "Memory feedback", r"$Q$ scales over $T{\times}P$"),
+    ("memory_P2", "Memory feedback", r"$T{\times}P$ kernel"),
     ("sample_epsilon", "Noise sampling", r"$K{\times}T{\times}3$ Gaussians"),
-    ("attraction_T2", "Stein attraction", r"$T^2$ kernel"),
+    ("plan_T2", "Plan repulsion", r"$T^2$ kernel"),
+    ("attraction_T", "Score attraction", r"$T$ pointwise"),
 )
 
-# Keyed by stage, not by rank: a wedge keeps its colour if the timings ever re-sort. Four of
-# the paper's five shared hues, so the donut reads as part of the same family as the violins
-# and the sensitivity bands.
-#
-# Validated as a *ring*, where the last wedge touches the first, which is a tighter
-# constraint than a row: with four hues every one of them has two neighbours, so red cannot
-# avoid both of the hues it is confusable with. This order takes the better of the two --
-# normal vision clears every pair (worst dE 23.4), and the cost is red beside green at dE 4.7
-# for deuteranopes. Acceptable here only because colour carries nothing on this chart: every
-# wedge is directly labelled with its name, milliseconds and share. Contrast against white is under 3:1, which is fine here only because
-# every wedge is directly labelled with its name, milliseconds and share.
+# Keyed by stage, not by rank: a wedge keeps its colour if the timings ever re-sort. The
+# paper's shared hues, so the donut reads as part of the same family as the violins and the
+# sensitivity bands. Colour carries nothing on this chart -- every wedge is directly
+# labelled with its name, milliseconds and share -- which is what makes a five-hue ring
+# acceptable where the adjacent-pair CVD separation is tighter than the bands' 22.4 dE.
 STEP_COLOURS = {
     "rollouts_KT": "#0078FF",     # blue
-    "memory_QP2": "#00C98A",      # green
+    "memory_P2": "#00C98A",       # green
     "sample_epsilon": "#FF6B6B",  # red
-    "attraction_T2": "#F09A4C",   # orange
+    "plan_T2": "#F09A4C",         # orange
+    "attraction_T": "#9B7BD4",    # violet
     "_residual": "#B9C0CC",       # grey: unattributed overhead is not a stage
 }
 
@@ -1292,7 +1204,7 @@ def fig_step_budget(report: Path, output: Path) -> Path:
                     color="#23272F")
         figure.text(0.5, 0.90,
                     f"$K{{=}}{shape['K']}$, $T{{=}}{shape['T']}$, "
-                    f"$P{{=}}{shape['P']}$, $Q{{=}}{shape['Q']}$ on GPU",
+                    f"$P{{=}}{shape['P']}$ on GPU",
                     ha="center", va="top", fontsize=7.0, color="#5A6472")
         figure.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.03)
         path = save(figure, output)
@@ -1618,6 +1530,42 @@ def self_check() -> None:
     print("self-check ok")
 
 
+# (axis, levels in panel order, label template, figure builder). The level strings are the
+# ones `mechanism_captures.py` writes into its filenames, so a missing capture is a missing
+# panel rather than a mislabelled one.
+MECHANISM_FIGURES = (
+    ("plan_gain", ("0", "3", "6", "10"), "$g={}$", "fig_plan_gain"),
+    ("release_ratio", ("off", "1.5", "2.24", "3.0"), r"$\sigma^*={}$", "fig_service_gate"),
+)
+
+
+def mechanism_figures(directory: Path, output: Path, seed: int = 43) -> list[Path]:
+    """Render the empty-workspace mechanism figures from whatever captures exist.
+
+    Open field, so nothing drawn here is attributable to obstacle avoidance -- which is the
+    whole point: these figures make a mechanism claim, and the clutter tier makes the
+    constraint claim.
+    """
+    from ergodic_control_mppi.plotting.trajectories import (
+        figure_plan_gain, figure_service_gate, load_captures,
+    )
+
+    written = []
+    for axis, levels, template, name in MECHANISM_FIGURES:
+        paths, titles = [], []
+        for level in levels:
+            candidate = directory / f"{axis}_{level}_s{seed}.npz"
+            if candidate.exists():
+                paths.append(candidate)
+                titles.append(template.format(level))
+        if not paths:
+            continue
+        captures = load_captures(paths, titles)
+        builder = figure_plan_gain if name == "fig_plan_gain" else figure_service_gate
+        written.append(builder(captures, output / f"{name}.png"))
+    return written
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     # Both of these now default into the 2026-08-05 quarantine, not the live tree. They are
@@ -1640,6 +1588,10 @@ def main() -> None:
                                  Path("results/uav/baselines_clutter.csv")])
     parser.add_argument("--timing", type=Path,
                         default=Path("results/campaign/timing/timing_uav.json"))
+    # Empty-workspace mechanism captures, from `scripts/mechanism_captures.py`. Rendered
+    # when present; these are the Sec. III-D and III-E figures.
+    parser.add_argument("--captures", type=Path,
+                        default=Path("results/report/captures"))
     parser.add_argument("--output", type=Path, default=Path("results/report"))
     parser.add_argument("--self-check", action="store_true", help="run assertions and exit")
     args = parser.parse_args()
@@ -1652,7 +1604,6 @@ def main() -> None:
     written = [
         fig_paired_arms(table, args.output / "fig_paired_arms.png"),
         fig_effect_forest(table, args.output / "fig_effect_forest.png"),
-        fig_agreement_matrix(args.output / "fig_agreement_matrix.png", args.campaign_dir),
     ]
     if args.sweep_ablation.exists():
         sweep = load_arms(args.sweep_ablation)
@@ -1686,6 +1637,7 @@ def main() -> None:
         written.append(fig_baselines(baselines, args.output / "fig_baselines.png"))
     if args.timing.exists():
         written.append(fig_step_budget(args.timing, args.output / "fig_step_budget.png"))
+    written.extend(mechanism_figures(args.captures, args.output))
     for path in written:
         print(f"wrote {path}")
 

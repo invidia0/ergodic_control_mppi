@@ -36,26 +36,36 @@ class GMMParams:
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
-class SteinParams:
-    """Stein-flow geometry and fading-memory coverage feedback.
+class FieldParams:
+    """The reference potential field and its service gate.
 
-    The memory term is a bank of ``memory_scales`` log-spaced bandwidths between
-    ``fine_bandwidth`` and ``coarse_bandwidth``, each gauge-normalized so one
-    ``memory_gain`` suffices; ``memory_balance`` interpolates trail avoidance
-    against over-coverage correction. Both bandwidths are derived from the robot
-    resolution and the target density rather than tuned.
+    Three terms, all gradients of explicit potentials in the query position: the
+    analytic score of the (possibly deficit-bent) target, KDE repulsion from the
+    fading memory of executed positions, and KDE repulsion of the plan from itself.
+    One bandwidth ``fine_bandwidth`` governs both kernels, so ``memory_gain`` and
+    ``plan_gain`` are commensurate under the shared ``sqrt(he/2)`` gauge.
+
+    There is no rotation. ``R(theta) grad Phi`` is not a gradient unless
+    ``R = I``, and the potential is the point.
     """
 
-    memory_scales: int = field(metadata={"static": True})
-    rotation: jax.Array
-    self_bandwidth: float
-    flow_weight: float
-    coarse_bandwidth: float
+    track_weight: float
     fine_bandwidth: float
     memory_decay: float
     reference_speed: float
     memory_gain: float
     memory_balance: float
+    plan_gain: float
+    transit_speedup: float
+    dwell_slowdown: float
+    service_floor: float
+    service_decay: float
+    deficit_ceiling: float
+    # Per-mode release: every component leaves at sigma* = release_ratio times its fair
+    # share, with kappa_j = Delta_j / (sigma* - 1) read off the target's own log-odds gaps.
+    # Static: it selects which bend `attraction_target` applies. <= 0 keeps the promotion-
+    # only bend, which cannot overturn a Delta_j margin -- the necessity arm of the campaign.
+    release_ratio: float = field(metadata={"static": True})
 
 
 @jax.tree_util.register_dataclass
@@ -113,6 +123,6 @@ class ControllerParams:
 
     mppi: MPPIParams
     gmm: GMMParams
-    stein: SteinParams
+    field: FieldParams
     workspace: WorkspaceParams
     model: DoubleIntegratorParams

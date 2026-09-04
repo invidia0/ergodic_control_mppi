@@ -46,17 +46,13 @@ METRIC_LABELS = {
 }
 
 AXIS_LABELS = {
-    "stein.memory_time": r"$\tau_{\mathcal{M}}$ [s]",
-    "stein.memory_balance": r"$a$",
-    "stein.memory_gain": r"$k_{\mathcal{M}}$",
-    "stein.memory_scales": r"$Q$",
-    "stein.fill_resolution": r"$\delta_{\mathrm{res}}$ [m]",
-    "stein.fine_bandwidth": r"$h_f$",
-    "stein.coarse_bandwidth": r"$h_c$",
-    "stein.theta": r"$\theta$ [deg]",
-    "stein.weight_stein": r"$\gamma$ (flow weight)",
-    "stein.ell_self": r"$\ell_0$",
-    "stein.reference_speed": r"$v$ [m/s]",
+    "reference.memory_time": r"$\tau_{\mathcal{M}}$ [s]",
+    "reference.memory_balance": r"$a$",
+    "reference.memory_gain": r"$k_{\mathcal{M}}$",
+    "reference.fill_resolution": r"$\delta_{\mathrm{res}}$ [m]",
+    "reference.fine_bandwidth": r"$h_f$",
+    "reference.weight_track": r"$\gamma$ (flow weight)",
+    "reference.reference_speed": r"$v$ [m/s]",
     "mppi.lambda": r"$\lambda$",
     "mppi.T": r"$T$",
     "mppi.K": r"$K$",
@@ -64,20 +60,16 @@ AXIS_LABELS = {
     "map.obstacles.num_obstacles": "obstacles",
 }
 
-LOG_AXES = {"stein.weight_stein", "mppi.lambda", "stein.coarse_bandwidth", "stein.ell_self"}
+LOG_AXES = {"reference.weight_track", "mppi.lambda"}
 
 ARM_LABELS = {
     "full": "Full", "default": "Full",
     "memory_off": r"$k_{\mathcal{M}}=0$",
     "trail_only": r"$a=0$ (trail)",
     "excess_only": r"$a=1$ (excess)",
-    "fine_only": r"$Q=1$ (fine)",
-    "one_good_scale": r"$Q=1$ (midpoint)",
-    "two_scale": r"$Q=2$",
-    "no_curl": r"$\theta=0$",
+    "wide_bandwidth": r"$h=0.632$",
     "weak_flow": r"low $\gamma$",
     "no_speed_gauge": r"$v=0$",
-    "coarse_tuned": r"$h_c=3$",
     "long_buffer": r"$P=5\tau$",
     "best": "Best",
 }
@@ -300,7 +292,7 @@ def plot_interactions(
                       markeredgewidth=0)
             # The reach L = v*T*dt is predicted to set performance on this pair,
             # so overlay its iso-contours as a falsifiable claim.
-            if {name_a, name_b} == {"stein.reference_speed", "mppi.T"}:
+            if {name_a, name_b} == {"reference.reference_speed", "mppi.T"}:
                 _iso_reach(axis, levels_a, levels_b)
 
             bar = figure.colorbar(image, ax=axis, fraction=0.046, pad=0.03)
@@ -614,8 +606,9 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
     stages = report["stages"]
     labels = {
         "rollouts_KT": r"rollouts $O(KT)$",
-        "memory_QP2": r"occupancy KDE $O(QP^2)$",
-        "attraction_T2": r"attraction $O(T^2)$",
+        "memory_P2": r"occupancy KDE $O(P^2)$",
+        "plan_T2": r"plan repulsion $O(T^2)$",
+        "attraction_T": r"score attraction $O(T)$",
         "sample_epsilon": "sampling",
     }
     values = [stages["stages"][key]["ms_median"] for key in labels]
@@ -648,7 +641,7 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
         )
         axis.set_title(
             f"(a) per-step budget\n$K$={shape['K']}, $T$={shape['T']}, "
-            f"$P$={shape['P']}, $Q$={shape['Q']}",
+            f"$P$={shape['P']}",
             fontsize=8,
         )
 
@@ -661,10 +654,9 @@ def plot_timing(timing_json: Path, output: Path) -> Path:
             "K": ("rollouts_ms", 1.0, r"rollouts $\propto K$"),
             "T": ("rollouts_ms", 1.0, r"rollouts $\propto T$"),
             "P": ("memory_ms", 2.0, r"KDE $\propto P^2$"),
-            "Q": ("memory_ms", 1.0, r"KDE $\propto Q$"),
         }
         for (name, rows_list), color in zip(
-            sorted(scaling.items()), TABLEAU[:4]
+            sorted(scaling.items()), TABLEAU[:3]
         ):
             key, slope, label = drives[name]
             levels = np.asarray([row["level"] for row in rows_list], dtype=np.float64)

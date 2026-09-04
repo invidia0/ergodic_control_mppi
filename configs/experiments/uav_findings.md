@@ -1,3 +1,5 @@
+> **Historical record of the withdrawn Stein controller.** Kept for provenance, not as guidance: every number here was measured on the Stein reference flow, which `mppi/field.py` replaced. Under same-version control none of it is comparable to a run of the current code.
+
 # UAV deployment — findings for the paper
 
 > **Historical tuning log.** Its interpretation is superseded by

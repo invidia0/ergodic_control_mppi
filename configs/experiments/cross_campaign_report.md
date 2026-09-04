@@ -1,3 +1,5 @@
+> **Historical record of the withdrawn Stein controller.** Kept for provenance, not as guidance: every number here was measured on the Stein reference flow, which `mppi/field.py` replaced. Under same-version control none of it is comparable to a run of the current code.
+
 # Cross-campaign audit — authoritative interpretation
 
 Written 2026-08-02 from the local per-seed campaign and UAV CSVs. This document supersedes

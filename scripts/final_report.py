@@ -45,19 +45,18 @@ rf = importlib.util.module_from_spec(_spec)
 sys.modules["report_figures"] = rf
 _spec.loader.exec_module(rf)
 
-# 6 of 8, not the 7 of 9 registered before the run: seed 525 was selected at two densities
-# and the driver's config cache flew the 15-pillar field under both labels, so the campaign
-# covers eight distinct maps. 6/8 is a 75% bar against 7/9's 77.8% -- the same strictness,
-# not a threshold relaxed after seeing results. See `DUPLICATE_MAPS` in report_figures.py.
-MAP_AGREEMENT = 6
+# 4 of 6 maps must show the same effect sign. Registered before the run, and the same ~2/3
+# bar the nine-map campaign used. `final_ablation.build_map_manifest` now asserts the six
+# maps are distinct by label *and* by occupied-cell count, so a map cannot cast two votes.
+MAP_AGREEMENT = 4
 # Joint sensitivity, in sigmas of a single run's noise across the five-outcome vector. An
 # arm below this moved the system less than three noise units however small its p-value is,
 # and 108 paired cells can resolve a great deal less than that.
 SENSITIVITY_FLOOR = 3.0
-DENSITIES = (15, 25, 35)
+DENSITIES = (10, 15, 20)
 
 
-def analyse(table, metric: str = "fourier_ergodic") -> list[dict]:
+def analyse(table, metric: str = "occupancy_mse") -> list[dict]:
     """One record per arm: pooled test, per-map agreement, per-density medians."""
     # Both baseline widths are excluded, not just the plain name: `load_final` stores them as
     # `baseline@108` / `baseline@27`, and an arm paired against itself has zero variance on
@@ -129,15 +128,15 @@ def render(records: list[dict], metric: str) -> str:
         f"# Final ablation campaign -- {metric}",
         "",
         f"{len(records)} arms against the shipped profile, {records[0]['cells']} paired "
-        "cells each (8 maps over 3 densities x 12 seeds, 20 000 steps).",
+        "cells each (6 maps over 3 densities x 6 seeds, 20 000 steps).",
         "",
         "`promoted` requires all three of: a Holm-surviving pooled Wilcoxon within the "
-        f"arm's own axis, the same effect sign on at least {MAP_AGREEMENT} of 8 maps, and "
+        f"arm's own axis, the same effect sign on at least {MAP_AGREEMENT} of 6 maps, and "
         f"a joint sensitivity of at least {SENSITIVITY_FLOOR} sigma. The map condition is "
         "the one that matters most: the retracted `alpha = 1.0` finding had p = 0.0005 "
         "pooled and agreed on 1 map of 3.",
         "",
-        "| arm | axis | effect (log2) | p | Holm | maps | 15p | 25p | 35p | sens | promoted |",
+        "| arm | axis | effect (log2) | p | Holm | maps | 10p | 15p | 20p | sens | promoted |",
         "| --- | --- | ---: | ---: | :-: | :-: | ---: | ---: | ---: | ---: | :-: |",
     ]
     for record in records:
@@ -209,7 +208,7 @@ def main() -> None:
                         default=Path("results/uav/ablation_final.csv"))
     parser.add_argument("--output", type=Path,
                         default=Path("results/uav/final_report.md"))
-    parser.add_argument("--metric", default="fourier_ergodic")
+    parser.add_argument("--metric", default="occupancy_mse")
     arguments = parser.parse_args()
 
     table = rf.load_final(arguments.archive)

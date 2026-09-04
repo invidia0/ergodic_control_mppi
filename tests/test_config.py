@@ -23,7 +23,7 @@ class ConfigTest(unittest.TestCase):
     def test_valid_load_and_deterministic_obstacles(self):
         config_a = load_config("configs/mppi_params.yaml")
         config_b = load_config("configs/mppi_params.yaml")
-        self.assertEqual(config_a.controller.stein.self_bandwidth, 1.0)
+        self.assertEqual(config_a.controller.field.fine_bandwidth, 0.94)
         np.testing.assert_array_equal(config_a.controller.workspace.obstacles, config_b.controller.workspace.obstacles)
 
     def test_obstacle_seed_decouples_map_from_run_seed(self):
@@ -52,15 +52,39 @@ class ConfigTest(unittest.TestCase):
         config = load_config(self._mutate(lambda data: data["map"]["obstacles"].update(num_obstacles=0)))
         self.assertEqual(config.controller.workspace.obstacles.shape, (0, 3))
 
-    def test_theta_endpoints(self):
-        for theta in (0, 90):
-            with self.subTest(theta=theta):
-                config = load_config(self._mutate(lambda data, theta=theta: data["stein"].update(theta=theta)))
-                self.assertTrue(np.all(np.isfinite(config.controller.stein.rotation)))
+    def test_withdrawn_stein_knobs_raise(self):
+        """Loud, not silently ignored.
 
-    def test_non_positive_self_bandwidth_is_rejected(self):
+        A stale profile that still sets `theta` would otherwise load, fly a different field
+        from the one it describes, and be compared against arms it is not comparable with.
+        That is the porting hazard this replaces.
+        """
+        for retired in ("theta", "curl_boost", "ell_self", "attraction", "memory_scales",
+                        "coarse_bandwidth", "service_penalty", "plan_repulsion",
+                        "flow_iterations", "flow_step", "ensemble_subsample"):
+            with self.subTest(key=retired), self.assertRaises(ValueError):
+                load_config(self._mutate(
+                    lambda data, key=retired: data["reference"].update({key: 1.0})
+                ))
+
+    def test_the_stein_section_itself_raises(self):
+        def rename(data):
+            data["stein"] = data.pop("reference")
         with self.assertRaises(ValueError):
-            load_config(self._mutate(lambda data: data["stein"].update(ell_self=0)))
+            load_config(self._mutate(rename))
+
+    def test_weight_stein_is_reported_as_renamed(self):
+        with self.assertRaises(ValueError) as raised:
+            load_config(self._mutate(lambda data: data["reference"].update(weight_stein=1.0)))
+        self.assertIn("weight_track", str(raised.exception))
+
+    def test_release_ratio_must_exceed_one(self):
+        """sigma* = 1 is release exactly at fair share, which needs an unbounded penalty."""
+        with self.assertRaises(ValueError):
+            load_config(self._mutate(lambda data: data["reference"].update(release_ratio=1.0)))
+        config = load_config(self._mutate(
+            lambda data: data["reference"].update(release_ratio=0.0)))
+        self.assertEqual(config.controller.field.release_ratio, 0.0)
 
     def test_non_integral_shape_value_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -78,33 +102,35 @@ class ConfigTest(unittest.TestCase):
                 0, [[1, 2], [2, 1]]
             )))
 
-    def test_memory_time_and_scales_are_derived(self):
-        # Assert the derivations, not the tuned values, so tuning the config cannot
-        # break this test: decay = exp(-dt/tau), P = ceil(3 tau/dt), h_f = 2 delta_res^2.
+    def test_memory_and_service_times_are_derived(self):
+        # Assert the derivations, not the tuned values, so tuning the config cannot break
+        # this test: decay = exp(-dt/tau), P = ceil(3 tau/dt), h = 2 delta_res^2.
         raw = yaml.safe_load(Path("configs/mppi_params.yaml").read_text(encoding="utf-8"))
-        tau = raw["stein"]["memory_time"]
+        tau = raw["reference"]["memory_time"]
         delta_t = raw["model"]["delta_t"]
         config = load_config("configs/mppi_params.yaml")
-        stein = config.controller.stein
-        self.assertAlmostEqual(stein.memory_decay, np.exp(-delta_t / tau), places=9)
+        field = config.controller.field
+        self.assertAlmostEqual(field.memory_decay, np.exp(-delta_t / tau), places=9)
         self.assertEqual(config.controller.mppi.memory_length, math.ceil(3.0 * tau / delta_t))
-        self.assertAlmostEqual(stein.fine_bandwidth, 2.0 * raw["stein"]["fill_resolution"] ** 2, places=9)
-        # h_c = median trace(Sigma) = 11, below its mode-separation cap.
-        self.assertAlmostEqual(stein.coarse_bandwidth, 11.0, places=6)
-        self.assertGreater(stein.coarse_bandwidth, stein.fine_bandwidth)
+        # The service window is deliberately independent of the trail: metres of path
+        # against a history of visits.
+        self.assertAlmostEqual(
+            field.service_decay,
+            np.exp(-delta_t / raw["reference"].get("service_time", tau)), places=9)
 
-    def test_coarse_scale_capped_by_mode_separation(self):
-        # min squared separation 2.25 -> cap 0.5625 wins over the 11.0 mode width.
+    def test_bandwidth_derives_from_the_fill_resolution(self):
+        """h = 2 delta_res^2 puts the kernel peak at the desired track spacing."""
         config = load_config(self._mutate(
-            lambda data: data["density"].update(means=[[0.0, 0.0], [1.5, 0.0], [0.0, 1.5]])
+            lambda data: (data["reference"].pop("fine_bandwidth", None),
+                          data["reference"].update(fill_resolution=0.3))
         ))
-        self.assertAlmostEqual(config.controller.stein.coarse_bandwidth, 0.5625, places=6)
+        self.assertAlmostEqual(config.controller.field.fine_bandwidth, 0.18, places=9)
 
     def test_retired_memory_knobs_are_rejected(self):
         for retired in ("deficit_gate", "spiral_weight", "memory_mode", "spiral_bandwidth"):
             with self.subTest(key=retired), self.assertRaises(ValueError):
                 load_config(self._mutate(
-                    lambda data, key=retired: data["stein"].update({key: 1.0})
+                    lambda data, key=retired: data["reference"].update({key: 1.0})
                 ))
 
     def test_malformed_gmm_shape_is_rejected(self):

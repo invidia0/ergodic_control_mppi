@@ -32,7 +32,6 @@ from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.experiments.theory_audit import (
     RESIDUAL_FIELDS,
     endpoint_jacobian,
-    preconditioning_conditioning,
     ideal_batch,
     residual_batch,
 )
@@ -41,6 +40,7 @@ from ergodic_control_mppi.metrics.ergodicity import (
     compute_ball_ergodic_metric,
     compute_team_occupancy_grid,
 )
+from ergodic_control_mppi.mppi.field import responsibility_gaps
 from ergodic_control_mppi.mppi.single import stack_params
 from ergodic_control_mppi.simulation import controller_key, select_device
 
@@ -56,7 +56,7 @@ FIELDS = [
     "map_seed", "obs_num", "seed", "steps", "stride", "samples",
     *RESIDUAL_FIELDS,
     "eps_track_p95", "slack_k0", "slack_full",
-    "ball_ergodic", "tv", "l1", "kl",
+    "ball_ergodic", "tv", "l1", "kl", "reachable_area", "bound_sup",
     "bound_tv", "bound_l1", "bound_kl", "bound_l1_matches_tv", "kl_tail_share",
     "slack_bound_tv", "slack_bound_l1", "slack_bound_kl",
     "c_realized", "outside_fraction", "max_excursion_m", "max_speed",
@@ -74,13 +74,25 @@ def coverage_terms(
 ) -> dict[str, float]:
     """Score one trajectory's stationary coverage error and every Prop. 3 bound.
 
-    Prop. 3 bounds the ball metric by ``|Omega| R TV^2``, and the text then rewrites that via
-    the TV--L1 identity and relaxes it via Pinsker. Those are *not* three independent bounds:
-    since ``TV = ||.||_1 / 2`` whenever a density exists, ``|Omega| R /4 * ||.||_1^2`` is the
-    TV bound written in other symbols -- equal here to machine precision, which
-    ``bound_l1_matches_tv`` asserts rather than merely reporting twice. Only KL is a distinct
-    functional, and being a Pinsker *relaxation* of the same bound it can never be tighter;
-    measured, it is 3--4x looser. So TV is the best of the three, not the worst.
+    The bound is the *lens* bound, not the sup bound. Writing ``mu = rho* - p*`` for the
+    signed difference and expanding the ball integral as a convolution of indicators,
+
+        int_Omega mu(B(z,r))^2 dz = iint |B(x,r) cap B(y,r)| dmu(x) dmu(y)
+                                  <= pi_d r^d |mu|(Omega)^2 = 4 pi_d r^d TV^2,
+
+    since the lens kernel is a positive-definite convolution of indicators and the integrand
+    is non-negative, so restricting to ``Omega`` only lowers it. Integrating ``r`` over
+    ``[0, R]`` gives ``(4 pi_d R^(d+1) / (d+1)) TV^2``. Two things follow: at ``d = 2``,
+    ``R = 5`` the constant is ``4 pi R^3 / 3 = 524`` against the sup bound's ``|Omega| R``
+    = 4000, a 7.6x tightening; and the workspace area drops out entirely, so the bound no
+    longer degrades as ``Omega`` grows.
+
+    The text then rewrites that via the TV--L1 identity and relaxes it via Pinsker. Those
+    are *not* three independent bounds: since ``TV = ||.||_1 / 2`` whenever a density
+    exists, the L1 form is the TV bound in other symbols -- equal here to machine precision,
+    which ``bound_l1_matches_tv`` asserts rather than merely reporting twice. Only KL is a
+    distinct functional, and being a Pinsker *relaxation* of the same bound it can never be
+    tighter; measured, it is 3--4x looser. So TV is the best of the three, not the worst.
     """
     target = np.asarray(arrays["target_grid"], dtype=np.float64)
     mask = np.asarray(arrays["reachable_mask"], dtype=bool)
@@ -115,16 +127,22 @@ def coverage_terms(
         occupancy, target, limits_x, limits_y,
         max_radius=MAX_RADIUS, radii=32, reachable_mask=mask,
     )
-    # |Omega| is the *reachable* area, which is what rho* and p* are both normalized over.
+    # The lens constant 4 pi_d R^(d+1) / (d+1) at d = 2, where pi_2 = pi. The workspace area
+    # does not appear: the lens bound is over R^d and restriction to Omega only lowers it.
+    # `area` is still reported so the sup bound this replaces stays reconstructible from the
+    # CSV -- the tightening is a claim, and a claim needs its comparator.
     area = (limits_x[1] - limits_x[0]) * (limits_y[1] - limits_y[0]) * float(mask.mean())
-    scale = area * MAX_RADIUS
+    scale = 4.0 * np.pi * MAX_RADIUS ** 3 / 3.0
     bounds = {
         "bound_tv": scale * total_variation ** 2,
         "bound_l1": scale * l1 * l1 / 4.0,
         "bound_kl": scale * kl / 2.0,
     }
     terms = {"ball_ergodic": ball, "tv": total_variation, "l1": l1, "kl": kl,
-             "kl_tail_share": kl_tail / kl if kl > 0 else float("nan"), **bounds}
+             "kl_tail_share": kl_tail / kl if kl > 0 else float("nan"),
+             "reachable_area": area,
+             # The withdrawn sup bound, kept as the comparator for the lens tightening.
+             "bound_sup": area * MAX_RADIUS * total_variation ** 2, **bounds}
     # The L1 and TV forms are one inequality in two notations. Keep both columns -- the
     # equality is worth exhibiting -- but treat any drift between them as a bug in the
     # restriction/renormalization above, which is the only way they could come apart.
@@ -655,9 +673,12 @@ def assumptions(arguments) -> None:
           f"min eig(Sigma) {eigenvalues.min():.4g}, cond(Sigma) "
           f"{eigenvalues.max() / eigenvalues.min():.4g}")
 
-    determinant, conditioning = preconditioning_conditioning(params)
-    print(f"Rem. precond. det C {determinant:.6f}, cond C {conditioning:.6f} "
-          "(cond 1 means near-zeros of the field do not move at all)")
+    gaps = np.asarray(responsibility_gaps(params.gmm), dtype=np.float64)
+    ceiling = float(params.field.deficit_ceiling)
+    promotion = np.log((ceiling + 1.0) / ceiling) if ceiling > 0 else 0.0
+    print(f"Sec. III-E    Delta_j {np.round(gaps, 3).tolist()} nats; promotion capped at "
+          f"log((c+1)/c) = {promotion:.3f}, so it cannot overturn the smallest margin "
+          f"({gaps.min():.3f}) -- the demotion term is what empties a basin")
 
 
 def main() -> None:

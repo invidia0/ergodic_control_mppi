@@ -17,16 +17,15 @@ from ergodic_control_mppi.mppi.core import (
     sample_epsilon,
     stage_cost,
 )
-from ergodic_control_mppi.mppi.stein import (
+from ergodic_control_mppi.mppi.field import (
     kernel,
     kernel_gradient,
     logpdf,
-    multiscale_memory_flow,
+    memory_flow,
     pdf,
     score_pdf,
     smoothed,
-    stein_gradient,
-    stein_repulsion,
+    kde_repulsion,
 )
 from tests.helpers import write_small_config
 
@@ -96,7 +95,7 @@ class NumericalTest(unittest.TestCase):
         # trail ~0.3 m from the state, within the fine scale's reach
         memory = jnp.broadcast_to(jnp.array([5.3, 5.0]), (self.params.mppi.memory_length, 2))
         active = mppi_step(self.params, controls, state, key, jnp.array(1.0), memory)
-        off = replace(self.params, stein=replace(self.params.stein, memory_gain=0.0))
+        off = replace(self.params, field=replace(self.params.field, memory_gain=0.0))
         disabled = mppi_step(off, controls, state, key, jnp.array(1.0), memory)
         self.assertFalse(np.allclose(active.control, disabled.control))
 
@@ -110,49 +109,35 @@ class NumericalTest(unittest.TestCase):
         self.assertAlmostEqual(float(blurred.sum()) * cell, 1.0, places=3)
         self.assertLess(float(blurred.max()), float(raw.max()))
 
-    def test_multiscale_memory_flow_gauge_and_balance(self):
-        stein = replace(
-            self.params.stein,
-            memory_scales=3,
-            memory_balance=0.0,
-            fine_bandwidth=0.32,
-            coarse_bandwidth=140.0,
-        )
+    def test_memory_flow_gauge_and_balance(self):
+        field = replace(self.params.field, memory_balance=0.0, fine_bandwidth=0.32)
         positions = jnp.array([[0.0, 0.0], [4.0, -2.0], [-7.0, 5.0]])
         memory = jnp.array([[1.0, 0.5], [1.2, 0.4], [0.8, 0.9], [5.0, -6.0]])
-        recency = stein.memory_decay ** jnp.arange(memory.shape[0])[::-1]
+        recency = field.memory_decay ** jnp.arange(memory.shape[0])[::-1]
         floor = jnp.array(1.0 / 400.0)
 
-        # memory_balance=0 must reduce to the scale-averaged, gauge-normalized trail.
-        scales = jnp.geomspace(stein.fine_bandwidth, stein.coarse_bandwidth, 3)
-        expected = sum(
-            jnp.sqrt(0.5 * jnp.e * bandwidth)
-            * stein_repulsion(positions, memory, recency, stein, bandwidth)
-            for bandwidth in scales
-        ) / 3.0
-        trail = multiscale_memory_flow(
-            positions, memory, recency, self.params.gmm, stein, floor
+        # memory_balance=0 must reduce to the gauge-normalized trail.
+        expected = jnp.sqrt(0.5 * jnp.e * field.fine_bandwidth) * kde_repulsion(
+            positions, memory, recency, field.fine_bandwidth
         )
+        trail = memory_flow(positions, memory, recency, self.params.gmm, field, floor)
         np.testing.assert_allclose(trail, expected, rtol=1e-5, atol=1e-6)
 
-        # The sqrt(h e / 2) gauge bounds every scale by max|grad kappa_h|, so the
-        # averaged field is O(1) whatever the bandwidths -- this is what removes the
-        # separate coarse/fine gains.
+        # The sqrt(h e / 2) gauge bounds the field by max|grad kappa_h|, so it is O(1)
+        # whatever the bandwidth -- which is what makes memory_gain and plan_gain
+        # commensurate under one gauge.
         self.assertLess(float(jnp.max(jnp.linalg.norm(trail, axis=-1))), 1.0 + 1e-5)
-        wide = multiscale_memory_flow(
-            positions,
-            memory,
-            recency,
-            self.params.gmm,
-            replace(stein, fine_bandwidth=0.01, coarse_bandwidth=2.0),
-            floor,
-        )
-        self.assertLess(float(jnp.max(jnp.linalg.norm(wide, axis=-1))), 1.0 + 1e-5)
+        for bandwidth in (0.01, 2.0, 140.0):
+            wide = memory_flow(
+                positions, memory, recency, self.params.gmm,
+                replace(field, fine_bandwidth=bandwidth), floor,
+            )
+            self.assertLess(float(jnp.max(jnp.linalg.norm(wide, axis=-1))), 1.0 + 1e-5)
 
         # Over-coverage correction is a different field ...
-        excess_stein = replace(stein, memory_balance=1.0)
-        excess_only = multiscale_memory_flow(
-            positions, memory, recency, self.params.gmm, excess_stein, floor
+        excess_field = replace(field, memory_balance=1.0)
+        excess_only = memory_flow(
+            positions, memory, recency, self.params.gmm, excess_field, floor
         )
         self.assertFalse(np.allclose(excess_only, trail))
 
@@ -162,8 +147,8 @@ class NumericalTest(unittest.TestCase):
         # density floor drives every e_i -> 0, standing in for a fully under-covered
         # buffer (which a self-kernel KDE cannot actually produce).
         faded = [
-            float(jnp.max(jnp.abs(multiscale_memory_flow(
-                positions, memory, recency, self.params.gmm, excess_stein, jnp.array(scale)
+            float(jnp.max(jnp.abs(memory_flow(
+                positions, memory, recency, self.params.gmm, excess_field, jnp.array(scale)
             ))))
             for scale in (1e3, 1e6, 1e9)
         ]
@@ -234,12 +219,9 @@ class NumericalTest(unittest.TestCase):
         increments = jnp.array(
             [[[0.1, 0.0], [0.2, -0.1]], [[-0.1, 0.2], [0.0, 0.1]]]
         )
-        bandwidth = jnp.array(1.5)
 
         def cost_at(source_particles, gmm):
-            flow = stein_gradient(
-                source_particles, source_particles, gmm, self.params.stein, bandwidth
-            )
+            flow = score_pdf(source_particles, gmm)
             return _flow_tracking_cost(flow[None], increments, time_step)
 
         shift = jnp.array([3.0, -2.0])
@@ -255,26 +237,25 @@ class NumericalTest(unittest.TestCase):
         positions = jnp.array([[0.5, -0.5], [1.0, 2.0]])
         particles = jnp.array([[0.0, 0.0], [1.0, 1.0], [-1.0, 0.5]])
         bandwidth = jnp.array(3.0)
-        stein = self.params.stein
         uniform = jnp.ones((particles.shape[0],))
-        rotated = kernel_gradient(particles[None], positions[:, None], bandwidth) @ stein.rotation.T
+        gradients = kernel_gradient(particles[None], positions[:, None], bandwidth)
         # Uniform weights reproduce the plain (unweighted) mean over particles.
         np.testing.assert_allclose(
-            stein_repulsion(positions, particles, uniform, stein, bandwidth),
-            jnp.mean(rotated, axis=1),
+            kde_repulsion(positions, particles, uniform, bandwidth),
+            jnp.mean(gradients, axis=1),
             rtol=1e-6,
         )
         # Scaling all weights by a constant leaves the normalized result unchanged.
         np.testing.assert_allclose(
-            stein_repulsion(positions, particles, 5.0 * uniform, stein, bandwidth),
-            stein_repulsion(positions, particles, uniform, stein, bandwidth),
+            kde_repulsion(positions, particles, 5.0 * uniform, bandwidth),
+            kde_repulsion(positions, particles, uniform, bandwidth),
             rtol=1e-6,
         )
-        # A one-hot weight selects that particle's rotated contribution.
+        # A one-hot weight selects that particle's contribution.
         one_hot = jnp.array([0.0, 1.0, 0.0])
         np.testing.assert_allclose(
-            stein_repulsion(positions, particles, one_hot, stein, bandwidth),
-            rotated[:, 1, :],
+            kde_repulsion(positions, particles, one_hot, bandwidth),
+            gradients[:, 1, :],
             rtol=1e-6,
         )
 

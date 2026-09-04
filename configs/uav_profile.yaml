@@ -7,18 +7,16 @@
 #
 # Every difference from mppi_params.yaml is marked "UAV:" with its reason.
 #
-# Campaign results merged from configs/experiments/campaign_findings.md: K, memory_time,
-# memory_scales and the bandwidths below carry the settled, scale-corrected findings.
+# The `reference:` block is the shipped gradient-field arm (scratch r_planrep_g6 plus the
+# per-mode release), and every coverage number quoted against it is re-earned by the Phase D
+# campaign -- nothing from the Stein campaign carries over, because the port changes the
+# numerical branch and same-version control forbids comparing across it.
 #
 # Deliberately NOT merged:
 #   - mppi.T = 150. That win is a v = 4.0 phenomenon; at the v = 2 row of the speed x
 #     horizon grid the curve is nearly flat and T = 150 carries the fatter tail. This
 #     profile flies a 2x wider target with a slower vehicle, which argues for a longer
 #     horizon, so T stays 350 and the screen sweeps {100, 150, 250, 350, 500}.
-#   - stein.theta = 0 and memory_gain = 60. Both sit in the campaign's `generalization`
-#     stage, which had not reported when this was written. Do not build on either yet.
-#   - weight_stein = 6000. It scored best, but 3000 is inside the acceptable band and
-#     chasing the better number is not worth a re-screen.
 
 # Run-level settings
 seed: 43
@@ -35,7 +33,7 @@ mppi:
   # a transient short enough not to matter over a 20 000-step run. Raising this to skip the
   # ramp would be a different configuration from the one measured below.
   lambda: 1.0
-  alpha: 0.95       # control-cost weight; (1-alpha) is temperature-independent, so at long T it must be high to keep ESS healthy
+  alpha: 1.0        # control-cost weight; (1-alpha) is temperature-independent, so at long T it must be high to keep ESS healthy
   exploration: 0.1  # fraction of rollouts that ignore warm-start controls
   ess_target: 0.3   # target effective sample size fraction for adaptive lambda
   lam_min: 0.05
@@ -96,68 +94,53 @@ density:
     - [[8.0, 2.0], [2.0, 3.0]]
     - [[8.0, -2.0], [-2.0, 3.0]]
 
-# Stein flow settings
-stein:
-  # Was 30.0. Set to 15 on 2026-08-05: this is what every recorded flight actually flew
-  # (via the sweep_theta_15 override), so the profile now *is* the flown configuration
-  # rather than a reference point nothing was measured at.
-  #
-  # The value is settled, the earlier theta = 0 recommendation is retracted. One controlled
-  # run -- same grid, 12 seeds, alpha = 0.95, one runner, one batch width -- across three
-  # maps, tours at theta 0 / 15 / 45:
-  #     518: 21 / 30 / 17   -> 15 wins (p = 0.078), and 0 missed all-modes in 2 of 12
-  #     516: 36 / 18 / 19   -> 0 wins  (p = 0.0010)
-  #     539: 19 / 22 / 13   -> 15 wins (p = 0.727)
-  # Two of three favour 15 and it reaches more modes on two of three, so 15 ships. The
-  # pillar campaign's "curl monotonically harmful, ship theta = 0" (rho = -0.687,
-  # p = 1.35e-09) was measured on map 516 alone, which is anomalous on this axis and on
-  # alpha both. Large curl *is* harmful everywhere: theta = 45 loses on all three.
-  #
-  # Archived: results/archive/2026-08-05/csv/gate_batch.csv, stage `theta`.
-  theta: 15.0
-  weight_stein: 3000.0
-  ell_self: 1.0
+# Reference potential field: the analytic score, repulsion from the executed trail,
+# and repulsion of the plan from itself -- all gradients of one scalar potential Phi
+# (see ergodic_control_mppi/mppi/field.py:potential). There is no rotation: R(theta) = I
+# is exactly the condition under which the field is a gradient.
+reference:
+  weight_track: 3000.0      # gamma_track: flow-tracking weight; must dominate control/obstacle costs to actually dwell
   # UAV: 1.8 rather than 4.0. The safety shield refuses any command above max_speed
   # (2.0 m/s), so a higher reference speed would be braked continuously rather than flown.
   # Set strictly below the cap, not equal to it: at exactly 2.0 the smoke run grazed the
   # limit and tripped the guard on sampling noise alone.
   reference_speed: 1.8
 
+  # Fading-memory coverage feedback.
   # UAV: 5.5 rather than 10.0. tau sets the trail length the vehicle forgets over, tau*v.
-  # The campaign's winning tau = 2.5 s at v = 4.0 is a 10 m trail; at this profile's
-  # 1.8 m/s the same 10 m needs tau = 5.5. Scaled, not copied. Also drops the derived
-  # memory_length from 1500 to 825.
-  memory_time: 5.5
+  memory_time: 5.5          # tau_M [s]: decay exp(-dt/tau), buffer P = ceil(3 tau/dt)
+  memory_balance: 0.85      # a in [0, 1]: 0 = pure trail avoidance, 1 = pure over-coverage correction
+  memory_gain: 60.0         # k_M: memory strength as a ratio to the attraction (implicit weight 1)
 
-  memory_balance: 0.85  # inert: smallest span of all 11 screened axes (8.9%)
-  memory_gain: 15.0     # >0 is what carries the method; memory_off loses 80/80 seeds
+  # The one lengthscale. The repulsion kernel peaks at sqrt(h/2); h = 0.94 puts that peak
+  # at 0.69 m, the track spacing the plan self-repulsion fills a basin at. This is NOT the
+  # 5.0 the Stein arm flew: with the plan term supplying the filling, the memory no longer
+  # has to be wide enough to evict the vehicle from a basin on its own.
+  fine_bandwidth: 0.94
 
-  # UAV: one scale rather than three. The 10-seed structure grid puts Q=1 at the geometric
-  # midpoint within 3.3% of Q=3 at every balance setting, so the bank buys nothing here.
-  #
-  # The bank is geomspace(fine, coarse, Q) averaged as total/Q (stein.py), so at Q=1 the
-  # *fine* endpoint is the one scale in play and coarse_bandwidth is inert. Adding scales
-  # does not add resolution, it splits weight: Q=3 over [0.08, 0.73, 6.6] puts two thirds
-  # of the memory on track-spacing detail and visits all three modes on 1 seed in 6, as bad
-  # as no coarse scale at all. A single well-placed scale beat every bank tested.
-  #
-  # h is the load-bearing number for mode visitation. The repulsion kernel peaks at
-  # sqrt(h/2), and that peak has to sit at 0.55-0.80 of a mode radius (2.35-2.65 m here):
-  # narrower and the memory only senses track spacing, so nothing ever tells the vehicle a
-  # basin is finished; broader and it evicts the vehicle before a dwell qualifies as a
-  # visit. Measured over 18 seeds, all-three-modes reached in 8000 steps:
-  #   h=0.94 -> 2/18   h=5.0 -> 9/18   h=6.0 -> 5/18   h=6.6 -> 8/18   h=8.5 -> 0/6
-  # h = 5.0 also gives the best occupancy MSE (7.16e-07 against 7.99e-07 at 0.94) and is
-  # the only setting that has completed a full mode cycle, so there is no trade to make.
-  #
-  # NOTE this is *not* the campaign's sqrt(h_f * h_c) = 0.94 midpoint rule. That rule was
-  # fitted on modes at +-6; at +-12 it collapses the scale to 0.28 of a mode radius, well
-  # under the working band. See configs/experiments/campaign_findings.md.
-  memory_scales: 1
-  fine_bandwidth: 5.0
-  # Inert at Q=1. Kept as the correct upper endpoint should the bank ever be re-enabled:
-  # 0.6 x the derived h_c of 11.0 (median tr(Sigma) for this density).
-  coarse_bandwidth: 6.6
+  # Plan self-repulsion. Repels the T horizon points from each other, which is what makes
+  # the plan space-filling inside a basin -- the executed trail can only repel from the
+  # past, and avoiding your own wake still admits a compact repeated circuit. Same
+  # sqrt(he/2) gauge as memory_gain, so the two gains are commensurate. 0 disables it.
+  plan_gain: 6.0
+
+  # Speed schedule: 1/p* is the classical condition for a path's time density to match the
+  # target. beta = 4 keeps reference_speed at a mode peak and reaches 4x it in the corridors.
+  transit_speedup: 4.0
+
+  # Service gate. sigma > 1 means the mode the vehicle is in has had more than its target
+  # share of recent path; the in-mode speed then climbs to the transit speed and the vehicle
+  # leaves under the same schedule that made it stay. 0 disables the gate exactly.
+  service_floor: 0.3        # eps_s
+  service_time: 45.0        # tau_s [s]: a history of visits, deliberately not the trail's 5.5 s
+
+  # Destination bias. deficit_ceiling (c) bounds the promotion of under-served modes at
+  # log((c+1)/c) = 3.04 nats -- which cannot overturn the Delta_j margins of 18.7/31.1 nats,
+  # so promotion alone never empties a basin. release_ratio (sigma*) supplies the demotion
+  # that does, with kappa_j = Delta_j / (sigma* - 1) read off the target itself: every mode
+  # is released at sigma* times its fair share. <= 0 keeps the promotion-only bend.
+  deficit_ceiling: 0.05
+  release_ratio: 2.24
 
 model:
   delta_t: 0.02

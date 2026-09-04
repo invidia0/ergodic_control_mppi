@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ergodic_control_mppi.config import load_config
-from ergodic_control_mppi.mppi.stein import pdf
+from ergodic_control_mppi.mppi.field import pdf
 from ergodic_control_mppi.parameters import ControllerParams, RunConfig
 
 

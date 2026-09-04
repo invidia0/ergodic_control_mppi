@@ -13,7 +13,7 @@ from ergodic_control_mppi.metrics.ergodicity import (
     compute_reachable_mask,
     compute_team_occupancy_grid,
 )
-from ergodic_control_mppi.mppi.stein import pdf
+from ergodic_control_mppi.mppi.field import pdf
 from ergodic_control_mppi.simulation import SimulationResult
 
 

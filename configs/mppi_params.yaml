@@ -13,7 +13,7 @@ mppi:
   lam_min: 0.05
   lam_max: 20.0
   # memory_length is derived as ceil(3 * memory_time / delta_t); set it here only to
-  # override that (the occupancy KDE is O(memory_scales * P^2), so P dominates cost).
+  # override that (the occupancy KDE is O(P^2), so P dominates cost).
   noise:
     sigma:
       - [0.9, 0.0, 0.0]  # linear x  (tighter sampling => cleaner flow tracking / dwelling)
@@ -53,23 +53,48 @@ density:
     - [[8.0, 2.0], [2.0, 3.0]]
     - [[8.0, -2.0], [-2.0, 3.0]]
 
-# Stein flow settings
-stein:
-  theta: 30.0  # degrees: 0 = pure score-descent, 90 = pure curl; 30 => direct transits, reaches all modes
-  weight_stein: 3000.0      # flow-tracking weight; must dominate control/obstacle costs to actually dwell
-  ell_self: 1.0             # floor under the adaptive median RBF bandwidth
-  reference_speed: 4.0      # >0 => track flow DIRECTION at this constant speed (LQR style); 0 => raw magnitude
+# Reference potential field: the analytic score, repulsion from the executed trail,
+# and repulsion of the plan from itself -- all gradients of one scalar potential Phi
+# (see ergodic_control_mppi/mppi/field.py:potential). There is no rotation: R(theta) = I
+# is exactly the condition under which the field is a gradient.
+reference:
+  weight_track: 3000.0      # gamma_track: flow-tracking weight; must dominate control/obstacle costs to actually dwell
+  reference_speed: 4.0
 
-  # Fading-memory coverage feedback: three free parameters, spatial scales derived.
-  memory_time: 10.0         # tau_M [s]: decay exp(-dt/tau), buffer P = ceil(3 tau/dt)
+  # Fading-memory coverage feedback.
+  memory_time: 10.0          # tau_M [s]: decay exp(-dt/tau), buffer P = ceil(3 tau/dt)
   memory_balance: 0.85      # a in [0, 1]: 0 = pure trail avoidance, 1 = pure over-coverage correction
-  memory_gain: 15.0         # k_M: memory strength as a ratio to the attraction (implicit weight 1)
-  memory_scales: 3          # Q log-spaced scales between the fine and coarse bandwidths
-  fill_resolution: 0.2      # delta_res [m]: sensor footprint / track spacing => h_f = 2 delta_res^2
-  # coarse_bandwidth (h_c) defaults to the mode width median_j tr(Sigma_j) -- repulsion
-  # peaks one mode radius out, the same sqrt(h/2) convention as h_f -- capped at
-  # 0.25*min_{r!=s} ||mu_r - mu_s||^2 so it never merges neighbouring modes.
-  # Set coarse_bandwidth / fine_bandwidth explicitly only to override the derivation.
+  memory_gain: 60.0         # k_M: memory strength as a ratio to the attraction (implicit weight 1)
+
+  # The one lengthscale. The repulsion kernel peaks at sqrt(h/2); h = 0.94 puts that peak
+  # at 0.69 m, the track spacing the plan self-repulsion fills a basin at. This is NOT the
+  # 5.0 the Stein arm flew: with the plan term supplying the filling, the memory no longer
+  # has to be wide enough to evict the vehicle from a basin on its own.
+  fine_bandwidth: 0.94
+
+  # Plan self-repulsion. Repels the T horizon points from each other, which is what makes
+  # the plan space-filling inside a basin -- the executed trail can only repel from the
+  # past, and avoiding your own wake still admits a compact repeated circuit. Same
+  # sqrt(he/2) gauge as memory_gain, so the two gains are commensurate. 0 disables it.
+  plan_gain: 6.0
+
+  # Speed schedule: 1/p* is the classical condition for a path's time density to match the
+  # target. beta = 4 keeps reference_speed at a mode peak and reaches 4x it in the corridors.
+  transit_speedup: 4.0
+
+  # Service gate. sigma > 1 means the mode the vehicle is in has had more than its target
+  # share of recent path; the in-mode speed then climbs to the transit speed and the vehicle
+  # leaves under the same schedule that made it stay. 0 disables the gate exactly.
+  service_floor: 0.3        # eps_s
+  service_time: 45.0        # tau_s [s]: a history of visits, deliberately not the trail's 5.5 s
+
+  # Destination bias. deficit_ceiling (c) bounds the promotion of under-served modes at
+  # log((c+1)/c) = 3.04 nats -- which cannot overturn the Delta_j margins of 18.7/31.1 nats,
+  # so promotion alone never empties a basin. release_ratio (sigma*) supplies the demotion
+  # that does, with kappa_j = Delta_j / (sigma* - 1) read off the target itself: every mode
+  # is released at sigma* times its fair share. <= 0 keeps the promotion-only bend.
+  deficit_ceiling: 0.05
+  release_ratio: 2.24
 
 model:
   delta_t: 0.02  # source of truth for integration timestep

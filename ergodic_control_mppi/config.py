@@ -15,8 +15,8 @@ from ergodic_control_mppi.parameters import (
     ControllerParams,
     GMMParams,
     MPPIParams,
+    FieldParams,
     RunConfig,
-    SteinParams,
     WorkspaceParams,
 )
 
@@ -100,28 +100,6 @@ def _positive_definite(value: Any, path: str, shape: tuple[int, ...]) -> np.ndar
     return result
 
 
-def _mode_scale(means: np.ndarray, covariances: np.ndarray) -> float:
-    """Coarse bandwidth h_c: characteristic mode width, capped below mode separation.
-
-    h_c estimates occupancy at the scale of *one* mode, so it must be large
-    enough to aggregate that mode's visitation yet small enough not to merge
-    neighbours: ``r_mode^2 <~ h_c << d_mode^2``.
-
-    Same convention as the fine scale: kernel repulsion peaks at ``sqrt(h/2)``,
-    so ``h = 2 r^2`` puts the peak at radius ``r``. Taking the mode radius as
-    the mean per-axis standard deviation, ``r_mode^2 = tr(Sigma)/2``, gives
-    ``h_c = tr(Sigma)`` -- the peak sits one mode radius out. The pairwise mean
-    separation only supplies an upper bound, capping the peak at half the
-    distance to the nearest neighbouring mode.
-    """
-    width = float(np.median(np.trace(covariances, axis1=1, axis2=2)))
-    if means.shape[0] < 2:
-        return width
-    separation = np.sum((means[:, None, :] - means[None, :, :]) ** 2, axis=-1)
-    np.fill_diagonal(separation, np.inf)
-    return min(width, 0.25 * float(separation.min()))
-
-
 def _generate_obstacles(
     count: int,
     x_limits: np.ndarray,
@@ -162,15 +140,20 @@ def load_config(path: str | Path) -> AppConfig:
     map_raw = _mapping(raw, "map")
     obstacles_raw = _mapping(map_raw, "obstacles", "map")
     density = _mapping(raw, "density")
-    stein_raw = _mapping(raw, "stein")
+    field_raw = _mapping(raw, "reference")
     model_raw = _mapping(raw, "model")
     model_specific = _mapping(model_raw, "double_integrator", "model")
 
     for removed in ("dim_x", "dim_u"):
         if removed in mppi_raw:
             raise ValueError(f"Config key 'mppi.{removed}' was removed; the model dimensions are fixed")
-    if "weight_pdf" in stein_raw:
-        raise ValueError("Config key 'stein.weight_pdf' was removed because it was inactive")
+    if "stein" in raw:
+        raise ValueError(
+            "Config section 'stein' was renamed to 'reference' when the Stein operator was "
+            "replaced by the potential-gradient field; port the block rather than renaming it"
+        )
+    if "weight_pdf" in field_raw:
+        raise ValueError("Config key 'reference.weight_pdf' was removed because it was inactive")
     for removed in (
         "memory_mode",
         "memory_decay",
@@ -180,22 +163,45 @@ def load_config(path: str | Path) -> AppConfig:
         "repulsion_weight",
         "spiral_weight",
     ):
-        if removed in stein_raw:
+        if removed in field_raw:
             raise ValueError(
-                f"Config key 'stein.{removed}' was removed with the two-scale memory term; "
-                "use stein.memory_time, stein.memory_balance and stein.memory_gain"
+                f"Config key 'reference.{removed}' was removed with the two-scale memory "
+                "term; use reference.memory_time, reference.memory_balance and "
+                "reference.memory_gain"
             )
-    for renamed, replacement in (
-        ("repulsion_bandwidth", "coarse_bandwidth"),
-        ("spiral_bandwidth", "fine_bandwidth"),
+    # Withdrawn with the Stein path. These RAISE rather than being silently ignored: a
+    # stale profile that still sets `theta` would otherwise load, fly a different field
+    # from the one it describes, and be compared against arms it is not comparable with.
+    for removed, reason in (
+        ("theta", "the rotation was removed; R(theta) = I is what makes the field a gradient"),
+        ("curl_boost", "the scheduled curl was removed with the rotation"),
+        ("ell_self", "the median-heuristic bandwidth was removed; use reference.fine_bandwidth"),
+        ("attraction", "the Stein attraction was removed; the score branch is the only one"),
+        ("memory_scales", "the scale bank was removed; fine_bandwidth is the only scale"),
+        ("coarse_bandwidth", "the scale bank was removed; fine_bandwidth is the only scale"),
+        ("service_penalty", "superseded by reference.release_ratio, derived per mode"),
+        ("plan_repulsion", "plan self-repulsion is always on; reference.plan_gain = 0 disables it"),
+        ("ensemble_subsample", "the Stein ensemble was removed"),
+        ("flow_iterations", "the Stein flow was removed"),
+        ("flow_step", "the Stein flow was removed"),
     ):
-        if renamed in stein_raw:
-            raise ValueError(f"Config key 'stein.{renamed}' was renamed to 'stein.{replacement}'")
+        if removed in field_raw:
+            raise ValueError(f"Config key 'reference.{removed}' was removed: {reason}")
+    for renamed, replacement in (
+        ("repulsion_bandwidth", "fine_bandwidth"),
+        ("spiral_bandwidth", "fine_bandwidth"),
+        ("weight_stein", "weight_track"),
+        ("flow_weight", "weight_track"),
+    ):
+        if renamed in field_raw:
+            raise ValueError(
+                f"Config key 'reference.{renamed}' was renamed to 'reference.{replacement}'"
+            )
     if "history_len" in mppi_raw:
         raise ValueError("Config key 'mppi.history_len' was removed with multi-robot support")
     for removed in ("ell_x", "alpha_cross"):
-        if removed in stein_raw:
-            raise ValueError(f"Config key 'stein.{removed}' was removed with multi-robot support")
+        if removed in field_raw:
+            raise ValueError(f"Config key 'reference.{removed}' was removed with multi-robot support")
     if "robots" in raw:
         raise ValueError("Config key 'robots' was removed; this controller is single-robot only")
 
@@ -254,10 +260,6 @@ def load_config(path: str | Path) -> AppConfig:
         log_normalizers=jnp.asarray(log_normalizers),
     )
 
-    theta = _number(_required(stein_raw, "theta", "stein"), "stein.theta", 0.0)
-    if theta > 90:
-        raise ValueError("Config key 'stein.theta' must be in [0, 90]")
-    theta_radians = np.deg2rad(theta)
     delta_t = _number(_required(model_raw, "delta_t", "model"), "model.delta_t", 1e-12)
 
     # One physical memory time replaces the (decay, buffer length) pair, making the
@@ -265,58 +267,82 @@ def load_config(path: str | Path) -> AppConfig:
     # dropping gamma^P ~ 5% of the weight: measured indistinguishable from 5 tau at
     # 20000 steps while costing (3/5)^2 = 0.36x of the O(Q P^2) occupancy KDE.
     memory_time = _number(
-        _required(stein_raw, "memory_time", "stein"), "stein.memory_time", 1e-12
+        _required(field_raw, "memory_time", "reference"), "reference.memory_time", 1e-12
     )
     memory_decay = math.exp(-delta_t / memory_time)
     if "memory_length" not in mppi_raw:
         memory_length = math.ceil(3.0 * memory_time / delta_t)
-    # Fine scale from the desired spatial resolution: kernel repulsion peaks at
-    # distance sqrt(h/2), so h_f = 2 * delta_res^2 peaks at the track spacing.
+    # The one lengthscale. Kernel repulsion peaks at distance sqrt(h/2), so
+    # h = 2 * delta_res^2 peaks at the desired track spacing.
     fill_resolution = _number(
-        stein_raw.get("fill_resolution", 0.4), "stein.fill_resolution", 1e-12
+        field_raw.get("fill_resolution", 0.4), "reference.fill_resolution", 1e-12
     )
     fine_bandwidth = _number(
-        stein_raw.get("fine_bandwidth", 2.0 * fill_resolution * fill_resolution),
-        "stein.fine_bandwidth",
+        field_raw.get("fine_bandwidth", 2.0 * fill_resolution * fill_resolution),
+        "reference.fine_bandwidth",
         1e-12,
     )
-    coarse_bandwidth = _number(
-        stein_raw.get("coarse_bandwidth", _mode_scale(means, covariances)),
-        "stein.coarse_bandwidth",
-        1e-12,
+    memory_gain = _number(
+        _required(field_raw, "memory_gain", "reference"), "reference.memory_gain", 0.0
     )
-    memory_scales = _integer(stein_raw.get("memory_scales", 3), "stein.memory_scales", 1)
-    if memory_scales > 1 and coarse_bandwidth <= fine_bandwidth:
-        raise ValueError(
-            "Config key 'stein.coarse_bandwidth' must exceed 'stein.fine_bandwidth' "
-            "to span a scale bank"
-        )
-    memory_gain = _number(_required(stein_raw, "memory_gain", "stein"), "stein.memory_gain", 0.0)
     memory_balance = _number(
-        _required(stein_raw, "memory_balance", "stein"), "stein.memory_balance", 0.0
+        _required(field_raw, "memory_balance", "reference"), "reference.memory_balance", 0.0
     )
     if memory_balance > 1:
-        raise ValueError("Config key 'stein.memory_balance' must be in [0, 1]")
+        raise ValueError("Config key 'reference.memory_balance' must be in [0, 1]")
+    release_ratio = _number(
+        field_raw.get("release_ratio", 0.0), "reference.release_ratio", 0.0
+    )
+    if 0 < release_ratio <= 1:
+        raise ValueError(
+            "Config key 'reference.release_ratio' must exceed 1: sigma* = 1 is release "
+            "exactly at fair share and needs an unbounded penalty. <= 0 disables it."
+        )
 
-    stein = SteinParams(
-        memory_scales=memory_scales,
+    field_params = FieldParams(
         memory_gain=memory_gain,
         memory_balance=memory_balance,
-        rotation=jnp.asarray(
-            [[np.cos(theta_radians), -np.sin(theta_radians)],
-             [np.sin(theta_radians), np.cos(theta_radians)]],
-            dtype=jnp.float32,
-        ),
-        self_bandwidth=_number(
-            _required(stein_raw, "ell_self", "stein"),
-            "stein.ell_self",
-            1e-12,
-        ),
-        flow_weight=_number(_required(stein_raw, "weight_stein", "stein"), "stein.weight_stein", 0.0),
-        coarse_bandwidth=coarse_bandwidth,
         fine_bandwidth=fine_bandwidth,
         memory_decay=memory_decay,
-        reference_speed=_number(stein_raw.get("reference_speed", 0.0), "stein.reference_speed", 0.0),
+        track_weight=_number(
+            _required(field_raw, "weight_track", "reference"), "reference.weight_track", 0.0
+        ),
+        reference_speed=_number(
+            field_raw.get("reference_speed", 0.0), "reference.reference_speed", 0.0
+        ),
+        # Strength of the plan self-repulsion, on the same sqrt(he/2) gauge as memory_gain.
+        # 0 disables the term; it is otherwise always evaluated.
+        plan_gain=_number(field_raw.get("plan_gain", 0.0), "reference.plan_gain", 0.0),
+        # Speed is the time-allocation knob the constant-speed gauge gives away. For a
+        # path's *time* density to track p*, speed must scale as 1/p*: every second spent
+        # where p* ~ 0 is pure ergodic overhead. 1.0 keeps the constant-speed gauge exactly.
+        transit_speedup=_number(
+            field_raw.get("transit_speedup", 1.0), "reference.transit_speedup", 1.0
+        ),
+        # The other half of the 1/p* law. Speeding the corridors shortens the overhead;
+        # slowing the modes lengthens the payload. in_mode_fraction counts *time*, so only
+        # the pair reallocates it -- transit_speedup alone also raises the mean speed and
+        # confounds "spend time better" with "go faster".
+        dwell_slowdown=_number(
+            field_raw.get("dwell_slowdown", 1.0), "reference.dwell_slowdown", 1.0
+        ),
+        # eps_sigma for the service gate; 0.0 disables it and reproduces the static
+        # density schedule exactly.
+        service_floor=_number(
+            field_raw.get("service_floor", 0.0), "reference.service_floor", 0.0
+        ),
+        # Window the service gate reasons over, in seconds. Independent of memory_time:
+        # the trail is a length of path (metres), this is a history of visits, and the
+        # measured sigma only discriminates served from unserved at 40-60 s while the
+        # tuned trail is 5.5 s. Defaults to memory_time.
+        service_decay=math.exp(-delta_t / _number(
+            field_raw.get("service_time", memory_time), "reference.service_time", 1e-12)),
+        # Bound on how far the attraction may be bent toward under-served modes; <= 0
+        # disables it and keeps the true mixture.
+        deficit_ceiling=_number(
+            field_raw.get("deficit_ceiling", 0.0), "reference.deficit_ceiling", 0.0
+        ),
+        release_ratio=release_ratio,
     )
 
     map_x = _limits(_required(map_raw, "x_limits", "map"), "map.x_limits")
@@ -396,4 +422,4 @@ def load_config(path: str | Path) -> AppConfig:
             0.0,
         ),
     )
-    return AppConfig(run=run, controller=ControllerParams(mppi, gmm, stein, workspace, model))
+    return AppConfig(run=run, controller=ControllerParams(mppi, gmm, field_params, workspace, model))

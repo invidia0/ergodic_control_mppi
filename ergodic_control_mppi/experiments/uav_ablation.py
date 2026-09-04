@@ -64,69 +64,67 @@ FIELDS = [
 # `axis` groups them for the analysis; `baseline` is the profile unmodified.
 ARMS: list[tuple[str, str, Any, dict]] = [
     ("baseline", "-", "-", {}),
-    # The lengthscale that decides mode visitation. The repulsion kernel peaks at
-    # sqrt(h/2); the working band is 0.55-0.80 of a mode radius (2.35-2.65 m here).
-    ("h_0.94", "fine_bandwidth", 0.94, {"fine_bandwidth": 0.94}),
+
+    # ------------------------------------------------------------------ mechanism axes
+    # lambda: the fading-memory gain. `memory_off` is a necessity row -- it deletes one of
+    # the three terms of Phi outright and carries the argument that the term is load-bearing.
+    ("memory_off", "memory_gain", 0.0, {"memory_gain": 0.0}),
+    ("gain_30", "memory_gain", 30.0, {"memory_gain": 30.0}),
+    ("gain_120", "memory_gain", 120.0, {"memory_gain": 120.0}),
+    # g: the plan self-repulsion gain. `plan_off` is the second necessity row, and the one
+    # the mechanism claim rests on: the memory can repel from the past but cannot make the
+    # *plan* space-filling, so at g = 0 a compact repeated circuit stays admissible.
+    ("plan_off", "plan_gain", 0.0, {"plan_gain": 0.0}),
+    ("plan_3", "plan_gain", 3.0, {"plan_gain": 3.0}),
+    ("plan_10", "plan_gain", 10.0, {"plan_gain": 10.0}),
+    # h: the one surviving lengthscale. The repulsion kernel peaks at sqrt(h/2), and with
+    # the plan term supplying the filling this no longer has to be basin-sized to evict the
+    # vehicle -- which is why the deployed value moved from 5.0 to 0.94. The levels bracket
+    # both readings.
+    ("h_0.47", "fine_bandwidth", 0.47, {"fine_bandwidth": 0.47}),
     ("h_2.35", "fine_bandwidth", 2.35, {"fine_bandwidth": 2.35}),
-    ("h_4.0", "fine_bandwidth", 4.0, {"fine_bandwidth": 4.0}),
-    ("h_6.0", "fine_bandwidth", 6.0, {"fine_bandwidth": 6.0}),
-    ("h_6.6", "fine_bandwidth", 6.6, {"fine_bandwidth": 6.6}),
-    ("h_8.5", "fine_bandwidth", 8.5, {"fine_bandwidth": 8.5}),
-    ("h_11.0", "fine_bandwidth", 11.0, {"fine_bandwidth": 11.0}),
-    # The bank averages scales as total/Q, so extra scales split weight rather than add
-    # resolution. Included to show a bank cannot beat one well-placed scale.
-    ("Q3_fine", "memory_scales", 3, {"memory_scales": 3, "fine_bandwidth": 0.08,
-                                     "coarse_bandwidth": 6.6}),
-    ("Q3_coarse", "memory_scales", 3, {"memory_scales": 3, "fine_bandwidth": 0.08,
-                                       "coarse_bandwidth": 11.0}),
-    ("Q2", "memory_scales", 2, {"memory_scales": 2, "fine_bandwidth": 0.94,
-                                "coarse_bandwidth": 11.0}),
-    # Temporal half of the memory. Long tau flattens the excess field once the spatial
-    # scale is basin-sized, which removes the gradient that drives transits.
-    #
-    # tau is a trail *length*, tau * v, and the profile scaled it by the reference speed
-    # (1.8 m/s) rather than the achieved one. Measured over the pillar campaign the vehicle
-    # averages 0.45 m/s, so the shipped tau = 5.5 buys a 2.5 m 1/e trail against a 15.6 m
-    # mode-to-mode hop. tau_30 is the level that restores the intended ~13 m.
+    ("h_5.0", "fine_bandwidth", 5.0, {"fine_bandwidth": 5.0}),
+    # tau_M: the temporal half of the memory. tau is a trail *length*, tau * v.
     ("tau_3", "memory_time", 3.0, {"memory_time": 3.0}),
     ("tau_11", "memory_time", 11.0, {"memory_time": 11.0}),
-    ("tau_20", "memory_time", 20.0, {"memory_time": 20.0}),
-    ("tau_30", "memory_time", 30.0, {"memory_time": 30.0}),
-    ("gain_8", "memory_gain", 8.0, {"memory_gain": 8.0}),
-    ("gain_30", "memory_gain", 30.0, {"memory_gain": 30.0}),
-    ("gain_60", "memory_gain", 60.0, {"memory_gain": 60.0}),
-    ("memory_off", "memory_gain", 0.0, {"memory_gain": 0.0}),
-    # The curl. The campaign flagged theta for possible removal; this is the deployment's
-    # own evidence rather than a transfer.
-    #
-    # It is also the only knob that can remove a fixed point rather than move it. At a mode
-    # the inward GMM score and the outward memory repulsion cancel, and the vehicle parks
-    # there for 15-50 s; the rotation applies to both fields, so a large theta turns that
-    # balance into an orbit the memory can then eject it from. Hence the 60/75 levels above
-    # the shipped 30.
-    ("theta_0", "theta", 0.0, {"theta": 0.0}),
-    ("theta_15", "theta", 15.0, {"theta": 15.0}),  # == baseline since 2026-08-05
-    ("theta_30", "theta", 30.0, {"theta": 30.0}),  # the profile's former value
-    ("theta_45", "theta", 45.0, {"theta": 45.0}),
-    ("theta_60", "theta", 60.0, {"theta": 60.0}),
-    ("theta_75", "theta", 75.0, {"theta": 75.0}),
-    # reference_speed normalises the Stein flow, so only its *direction* matters and
-    # this asks for the speed alpha = 1.0 achieves by a different route. Measured at
-    # alpha = 0.95: +67% reference buys +12% achieved speed and degrades everything
-    # else, so the two knobs are not interchangeable. Swept here across three maps.
-    ("refspeed_2.5", "reference_speed", 2.5, {"reference_speed": 2.5}),
-    ("refspeed_3.0", "reference_speed", 3.0, {"reference_speed": 3.0}),
-    ("flow_1500", "flow_weight", 1500.0, {"flow_weight": 1500.0}),
-    ("flow_6000", "flow_weight", 6000.0, {"flow_weight": 6000.0}),
+    # a: trail avoidance against over-coverage correction. One level, because moving b at
+    # fixed lambda walks a hyperbola in (lambda_t, lambda_e) -- the axis screens flat for a
+    # reparameterization reason, not an empirical one.
+    ("balance_0.5", "memory_balance", 0.5, {"memory_balance": 0.5}),
+    # sigma*: the per-mode release. `release_off` is the third necessity row -- it leaves the
+    # promotion-only bend, which is capped at log((c+1)/c) = 3.04 nats and provably cannot
+    # overturn the 18.7/31.1-nat Delta_j margins. If the vehicle still escapes basins at this
+    # level, the demotion term is not what escapes them and Sec. III-E is wrong.
+    ("release_off", "release_ratio", 0.0, {"release_ratio": 0.0}),
+    ("release_1.75", "release_ratio", 1.75, {"release_ratio": 1.75}),
+    ("release_3.0", "release_ratio", 3.0, {"release_ratio": 3.0}),
+    # c: the destination bend. A PRE-REGISTERED NULL. The theory says a 3.04-nat promotion
+    # cannot overturn an 18.7-nat margin, so c should show no effect at any level. A knob
+    # predicted flat and measured flat is evidence for the promotion/demotion split, not a
+    # wasted arm; a knob predicted flat and measured live falsifies it.
+    ("ceiling_0", "deficit_ceiling", 0.0, {"deficit_ceiling": 0.0}),
+    ("ceiling_0.5", "deficit_ceiling", 0.5, {"deficit_ceiling": 0.5}),
+    # tau_s: the service window. Deliberately not the trail's 5.5 s -- the trail is a length
+    # of path and this is a history of visits; measured, sigma only discriminates served from
+    # unserved at 40-60 s.
+    ("service_20", "service_time", 20.0, {"service_time": 20.0}),
+    ("service_90", "service_time", 90.0, {"service_time": 90.0}),
+    # beta: transit speedup. 1 restores the flat constant-speed gauge exactly.
+    ("transit_1", "transit_speedup", 1.0, {"transit_speedup": 1.0}),
+    ("transit_8", "transit_speedup", 8.0, {"transit_speedup": 8.0}),
+    # eps_s: the service floor. One level, because it is a *second* threshold on the same
+    # sigma -- half-release at 1 + eps_s = 1.3 -- competing with the demotion's release at
+    # sigma* = 2.24. Worth measuring once before deciding whether to pin it.
+    ("floor_1.0", "service_floor", 1.0, {"service_floor": 1.0}),
+
+    # ------------------------------------------------------------------ MPPI axes
     # Horizon reach is L = reference_speed * T * dt, and at the achieved speed the shipped
     # T = 350 plans 3.2 m ahead against a 15.6 m hop. T is swept as a proxy for L.
     ("T_150", "T", 150, {"T": 150}),
     ("T_500", "T", 500, {"T": 500}),
     ("T_750", "T", 750, {"T": 750}),
     # Rollout count. More samples average more divergent directions into one update, so K
-    # trades decisiveness for smoothness; the pillar data has K = 250 moving 0.53 m/s
-    # against 0.43 at K = 500, and mean speed is the strongest correlate of completing a
-    # tour (r = +0.42).
+    # trades decisiveness for smoothness.
     ("K_125", "K", 125, {"K": 125}),
     ("K_500", "K", 500, {"K": 500}),
     # The one arm that changes the cost model rather than the numbers: K x T x 2 floats
@@ -134,107 +132,40 @@ ARMS: list[tuple[str, str, Any, dict]] = [
     # launch-latency bound toward throughput bound. Runs on its own matched-width
     # branch -- see scripts/final_ablation.py.
     ("K_1000", "K", 1000, {"K": 1000}),
-    # Floor on the adaptive target-flow bandwidth, which is otherwise the median pairwise
-    # squared distance of the surrogate plan (mppi/core.py). That collapses when the vehicle
-    # is parked, so the floor is what the attraction falls back to. Never tested.
-    ("ell_self_0.25", "ell_self", 0.25, {"self_bandwidth": 0.25}),
-    ("ell_self_2.0", "ell_self", 2.0, {"self_bandwidth": 2.0}),
-    ("ell_self_4.0", "ell_self", 4.0, {"self_bandwidth": 4.0}),
-    # Trail avoidance against over-coverage correction. Called inert by the campaign, but
-    # that was measured at v = 4.0 on modes at +-6.
-    ("balance_0.5", "memory_balance", 0.5, {"memory_balance": 0.5}),
+    # The control-cost coefficient is lambda*(1-alpha), so at alpha < 1 a large control cost
+    # spreads the sample costs, the ESS controller raises lambda to compensate, and that
+    # raises the control cost again. A 48-cell probe measured the runaway: at alpha <= 0.9
+    # lambda is pinned at cap with ESS at the 1/K floor and the vehicle achieves 0.35-0.50
+    # m/s against a commanded 1.8. alpha = 1.0 severs the coupling and is the deployed value,
+    # so 0.9 is here as the low anchor.
+    ("alpha_0.9", "alpha", 0.90, {"alpha": 0.90}),
     # Fraction of rollouts that ignore the warm start. Zero makes the plan fully committed
     # to its previous solution, which is the regime a long dwell lives in.
     ("explore_0", "exploration", 0.0, {"exploration": 0.0}),
-    ("explore_0.3", "exploration", 0.3, {"exploration": 0.3}),
-    # Temperature saturation. Measured on the flown profile, the MPPI weights are one-hot
-    # (ESS 1-7 of 250 against an ess_target of 0.3) and the temperature sits pinned at
-    # lam_max from step ~250 onward, so the update is argmin over rollouts rather than a
-    # weighted average. Two candidate causes, tested separately here because they pull in
-    # opposite directions on constraint hardness.
-    #
-    # (a) The cap is simply too low for the cost scale: reaching ESS = 0.3 needs
-    #     lambda ~ spread/ln(K) ~ 2e4.
-    ("lam_max_1e3", "lam_max", 1e3, {"lam_max": 1e3}),
     ("lam_max_1e4", "lam_max", 1e4, {"lam_max": 1e4}),
-    ("lam_max_1e5", "lam_max", 1e5, {"lam_max": 1e5}),
-    # The other half of the same coupling. The control-cost coefficient is lambda*(1-alpha),
-    # so at the shipped alpha = 0.95 a large control cost spreads the sample costs, the ESS
-    # controller raises lambda to compensate, and that raises the control cost again. A
-    # 48-cell probe measured the runaway directly: at alpha <= 0.9 lambda is pinned at cap
-    # 100% of the time with ESS at the 1/K floor, and the vehicle achieves 0.35-0.50 m/s
-    # against a commanded 1.8. At alpha = 1.0 the coupling is severed, achieved speed rises
-    # to 1.41 m/s and the tour count triples. Whether that is alpha or merely an unsaturated
-    # lambda is what the alpha x lam_max stage decides -- these are not independent axes.
-    # 0.80 and 0.90 sit inside the regime the 48-cell probe called degenerate: lambda
-    # pinned at cap, ESS at the 1/K floor, 0.35-0.50 m/s achieved against 1.8
-    # commanded. They are the *low anchors* of the axis, not candidates -- with them in
-    # the table the alpha panel shows a monotone speed response over five levels
-    # instead of two points and an assertion.
-    ("alpha_0.8", "alpha", 0.80, {"alpha": 0.80}),
-    ("alpha_0.9", "alpha", 0.90, {"alpha": 0.90}),
-    ("alpha_0.99", "alpha", 0.99, {"alpha": 0.99}),
-    ("alpha_1.0", "alpha", 1.0, {"alpha": 1.0}),
-    # (b) The penalties are out of scale against the objective. Per rollout the flow term
-    #     spreads by ~2.5e3 while out-of-map and boundary spread by 3e4-1.1e5, so the
-    #     softmax ranks rollouts on constraint violation and barely sees coverage. Scaling
-    #     the penalties down keeps them decisive (still 10-30x a typical flow step) while
-    #     letting the weights discriminate among the rollouts that satisfy them.
+    ("flow_1500", "track_weight", 1500.0, {"track_weight": 1500.0}),
+    ("flow_6000", "track_weight", 6000.0, {"track_weight": 6000.0}),
+    # reference_speed normalises the field, so only its *direction* matters and this asks
+    # for the speed alpha = 1.0 achieves by a different route.
+    ("refspeed_2.5", "reference_speed", 2.5, {"reference_speed": 2.5}),
+    ("refspeed_3.0", "reference_speed", 3.0, {"reference_speed": 3.0}),
+    # `oom_cost` and the obstacle cost are genuine constraints and *should* dominate -- a
+    # violating rollout deserves ~zero weight. Only boundary_weight * encroach^2 is a
+    # shaping term wearing hard-constraint magnitude, so these two shrink the shaping term
+    # and the constraint set separately rather than together.
     ("penalty_0.1", "penalty_scale", 0.1, {"penalty_scale": 0.1}),
-    ("penalty_0.01", "penalty_scale", 0.01, {"penalty_scale": 0.01}),
-    # Neither single axis can work on its own: rescaling leaves the cap binding, and
-    # raising the cap leaves the penalties drowning the objective. Reaching ESS = 0.3
-    # needs lambda ~ the cost std, which after a 0.01 rescale is still 500-900.
-    ("penalty_0.01_lam1e3", "combined", "0.01+1e3", {"penalty_scale": 0.01, "lam_max": 1e3}),
-    ("penalty_0.01_lam1e4", "combined", "0.01+1e4", {"penalty_scale": 0.01, "lam_max": 1e4}),
-    ("penalty_0.1_lam1e3", "combined", "0.1+1e3", {"penalty_scale": 0.1, "lam_max": 1e3}),
-    ("penalty_0.1_lam1e4", "combined", "0.1+1e4", {"penalty_scale": 0.1, "lam_max": 1e4}),
-    # The structurally honest variant. `oom_cost` and the obstacle cost are genuine
-    # constraints and *should* dominate -- a violating rollout deserves ~zero weight. Only
-    # boundary_weight * encroach^2 is a shaping term wearing hard-constraint magnitude
-    # (up to 225 per step against a flow term averaging 1.5). Shrinking the constraints
-    # along with it is what risks a rollout cutting a corner through an obstacle for
-    # better coverage: at scale 0.01 the obstacle cost falls to 10/step, ~40 over a few
-    # cells, against a flow spread of ~2500. These arms shrink only the shaping term.
     ("boundary_0.1", "boundary_scale", 0.1, {"boundary_scale": 0.1}),
-    ("boundary_0.1_lam1e3", "boundary_scale", "0.1+1e3",
-     {"boundary_scale": 0.1, "lam_max": 1e3}),
-    ("boundary_0.01_lam1e3", "boundary_scale", "0.01+1e3",
-     {"boundary_scale": 0.01, "lam_max": 1e3}),
-    ("boundary_0.01_lam1e4", "boundary_scale", "0.01+1e4",
-     {"boundary_scale": 0.01, "lam_max": 1e4}),
 ]
 
-# The final nine-map campaign's arm set, selected from ARMS rather than redeclared so an arm
-# name means the same override in every archive.
+# The campaign's arm set. Selected from ARMS rather than redeclared so an arm name means the
+# same override in every archive. Here it is every arm: the Stein-era table carried
+# diagnostics for hypotheses that have since closed, and the port dropped them rather than
+# spending cells restating dead questions.
 #
-# Excluded on purpose:
-#   - `theta_15` and `lam_max_1e3`, which *are* the baseline since the 2026-08-05 profile
-#     change. An arm identical to the control would pair against itself.
-#   - `h_6.0`, redundant between 5.0 and 6.6 on an axis that already carries six levels.
-#   - the eight `penalty_x_lam` / `boundary_x_lam` combinations. They were diagnostics for a
-#     temperature-saturation hypothesis the gate campaign closed (settled lambda ~131, 15%
-#     cap contact, no runaway). Keeping them would spend 864 cells restating a dead
-#     question. `penalty_0.1` and `boundary_0.1` stay as the single-factor constraint-scale
-#     axis.
-FINAL_ARMS = (
-    "baseline",
-    "theta_0", "theta_30", "theta_45", "theta_75",
-    "alpha_0.8", "alpha_0.9", "alpha_0.99", "alpha_1.0",
-    "h_0.94", "h_2.35", "h_4.0", "h_6.6", "h_8.5", "h_11.0",
-    "tau_3", "tau_11", "tau_20", "tau_30",
-    "memory_off", "gain_8", "gain_30", "gain_60",
-    "Q2", "Q3_fine", "Q3_coarse",
-    "balance_0.5",
-    "flow_1500", "flow_6000",
-    "ell_self_0.25", "ell_self_2.0", "ell_self_4.0",
-    "T_150", "T_500", "T_750",
-    "K_125", "K_500", "K_1000",
-    "explore_0", "explore_0.3",
-    "lam_max_1e4", "lam_max_1e5",
-    "refspeed_2.5", "refspeed_3.0",
-    "penalty_0.1", "boundary_0.1",
-)
+# 22 mechanism arms and 16 MPPI arms against one baseline. The three necessity rows are
+# `memory_off`, `plan_off` and `release_off` -- one per term of Phi that the argument claims
+# is load-bearing -- and the two `ceiling_*` arms are the pre-registered null.
+FINAL_ARMS = tuple(name for name, *_ in ARMS)
 
 _BY_NAME = {name: (axis, value, overrides) for name, axis, value, overrides in ARMS}
 _unknown = [name for name in FINAL_ARMS if name not in _BY_NAME]
@@ -252,11 +183,11 @@ QUARANTINED_AXES = ("K",)
 def _apply(config, overrides: dict):
     """Return the config with one arm's overrides applied.
 
-    ``memory_time`` and ``theta`` are stored derived (as a decay and a rotation matrix),
-    so they are re-derived here exactly as ``config.py`` does rather than set directly.
+    ``memory_time`` and ``service_time`` are stored derived (as decays), so they are
+    re-derived here exactly as ``config.py`` does rather than set directly.
     """
     delta_t = config.controller.model.delta_t
-    mppi, stein = config.controller.mppi, config.controller.stein
+    mppi, field = config.controller.mppi, config.controller.field
     workspace = config.controller.workspace
     overrides = dict(overrides)
     if "penalty_scale" in overrides:
@@ -287,16 +218,14 @@ def _apply(config, overrides: dict):
         mppi = replace(mppi, alpha=overrides.pop("alpha"))
     if "memory_time" in overrides:
         tau = overrides.pop("memory_time")
-        stein = replace(stein, memory_decay=float(np.exp(-delta_t / tau)))
+        field = replace(field, memory_decay=float(np.exp(-delta_t / tau)))
         mppi = replace(mppi, memory_length=int(np.ceil(3.0 * tau / delta_t)))
-    if "theta" in overrides:
-        angle = np.radians(overrides.pop("theta"))
-        stein = replace(
-            stein,
-            rotation=jnp.asarray(
-                [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
-                dtype=jnp.float32,
-            ),
+    if "service_time" in overrides:
+        # Stored derived, exactly as config.py does it. Unlike memory_time this sets no
+        # buffer length -- the accumulator is a J-vector, so the window is free of the
+        # O(P^2) occupancy term and tau_s can be tens of seconds at no cost.
+        field = replace(
+            field, service_decay=float(np.exp(-delta_t / overrides.pop("service_time")))
         )
     if "T" in overrides:
         mppi = replace(mppi, horizon=overrides.pop("T"))
@@ -304,14 +233,14 @@ def _apply(config, overrides: dict):
         mppi = replace(mppi, samples=overrides.pop("K"))
     if "exploration" in overrides:
         mppi = replace(mppi, exploration=overrides.pop("exploration"))
-    # Whatever is left names a SteinParams field directly; an unknown key raises here
+    # Whatever is left names a FieldParams field directly; an unknown key raises here
     # rather than being silently ignored, which is what keeps an arm table honest.
     if overrides:
-        stein = replace(stein, **overrides)
+        field = replace(field, **overrides)
     return replace(
         config,
         controller=replace(
-            config.controller, mppi=mppi, stein=stein, workspace=workspace
+            config.controller, mppi=mppi, field=field, workspace=workspace
         ),
     )
 

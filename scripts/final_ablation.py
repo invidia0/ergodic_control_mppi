@@ -1,14 +1,13 @@
-"""The final ablation campaign: 46 arms x 9 maps x 3 densities x 12 seeds, one branch.
+"""The final ablation campaign: 38 arms x 6 maps x 3 densities x 6 seeds, one branch.
 
-Why this exists rather than another pass of ``gate_sweeps.py``: two conclusions in this
-project were drawn from a single map and both failed when a third was added -- the pillar
-campaign's ``theta = 0`` and the probe's ``alpha = 1.0`` tour gain, each measured on map
-516, which turned out to be anomalous on both axes. So every arm here is measured on nine
-maps spanning three obstacle densities, and the promotion gate is a *consistency* gate:
-same sign on at least 7 of 9 maps, not merely a small pooled p-value.
+Two conclusions in this project were drawn from a single map and both failed when a third
+was added, each measured on map 516, which turned out to be anomalous on both axes. So
+every arm here is measured on six maps spanning three obstacle densities, and the promotion
+gate is a *consistency* gate: same sign on at least 4 of 6 maps, not merely a small pooled
+p-value.
 
-All nine maps share one grid shape and one start state, so a single ``run_batch`` call holds
-an entire arm across every map and seed. That is what makes 4 968 cells an overnight run.
+All six maps share one grid shape and one start state, so a single ``run_batch`` call holds
+an entire arm across every map and seed. That is what makes 1 368 cells a six-hour run.
 
 **Fixed lane count is load-bearing.** Batched execution is a different numerical branch than
 sequential, and changing the lane count changes the branch again. Comparing an arm in one
@@ -50,7 +49,7 @@ from ergodic_control_mppi.simulation import controller_key, select_device
 # question and must not satisfy this cell.
 FIELDS = [
     "arm", "axis", "value", "map_seed", "obs_num", "seed", "steps",
-    "theta", "alpha", "lam_max",
+    "release_ratio", "alpha", "lam_max",
     "ess_settled_median", "temperature_settled_median", "temperature_cap_fraction",
     "all_modes_reached", "first_all_modes_s", "mode_visits", "mode_cycles",
     "mode_dwell_median_s", "in_mode_fraction", "occupancy_mse", "fourier_ergodic",
@@ -70,38 +69,23 @@ STOP_FILE = Path("results/uav/STOP")
 # A chunk *count* rather than a lane count: the width has to follow the map and seed counts,
 # and a hard-coded 27 silently stops dividing the moment either changes.
 AXIS_CHUNKS = {"K": 4}
-# Per-arm override, checked before the axis rule. `tau_30` sets memory_length = 4500 and
-# something in the memory flow is O(memory_length^2): measured, its I/O arguments come to
-# 4500^2 + 4500*2 floats per lane, which is 8.75 GB across 108 lanes against a 4.76 GB
-# limit. tau_20 (3000) fit at 108 and tau_3/tau_11 are smaller still, so only this one level
-# is quarantined -- at width 27, where the K axis has already produced a baseline replicate
-# it can pair against for free.
-#
-# Legitimate for the same reason the K axis is: every effect is measured against a baseline
-# on its own branch, and the analysis never compares two arms' raw values to each other.
-ARM_CHUNKS = {"tau_30": 4}
 
-# Densities the campaign spans. Three maps each.
-DENSITIES = (15, 25, 35)
-# Pinned for a reason stated before any result: 516 and 539 are the only maps with recorded
-# flights, so they are the only maps where JAX-to-flight transfer can be checked against the
-# same environment. 516 is also the anomalous map, and dropping the map that disagrees after
-# seeing that it disagrees is exactly the failure this campaign exists to prevent.
-PINNED = {25: (516, 539)}
-# Maps that also exist as recorded flights. Their rebuild must reproduce the flown geometry
-# exactly, or the flights no longer describe the campaign map and every JAX-to-flight claim
-# quietly stops meaning anything. Verified 2026-08-05: 516 rebuilds bit-identical.
-FLOWN = {
-    (25, 516): Path("results/uav/pillar_25/flight_theta_15_516_s52/arrays.npz"),
-    (25, 539): Path("results/uav/pillar_25/flight_theta_15_539_s46/arrays.npz"),
-}
+# Densities the campaign spans. Two maps each. 10-20 pillars is well inside the runnable
+# band: 15 gives 0.90 reachable fraction and 25 gives 0.84, both flown without incident, so
+# 20 is comfortably conservative.
+DENSITIES = (10, 15, 20)
+MAPS_PER_DENSITY = 2
+# No pins and no flown maps. Every recorded flight was flown by the Stein controller, so
+# under same-version control none of them describes this campaign's controller -- pinning a
+# map to keep a flight comparison alive would keep a comparison that is already void.
+PINNED: dict[int, tuple[int, ...]] = {}
 
 
 # --------------------------------------------------------------------------- maps
 
 
 def build_map_manifest(output: Path, roots: dict[int, Path]) -> dict:
-    """Pick three maps per density and record them, refusing anything not a pillar field.
+    """Pick two maps per density and record them, refusing anything not a pillar field.
 
     Selection is `select_split`'s ordering -- qualifying seeds ranked by worst-mode blocked
     target mass -- except where :data:`PINNED` overrides it. Every map is checked here rather
@@ -114,15 +98,16 @@ def build_map_manifest(output: Path, roots: dict[int, Path]) -> dict:
         ordered = list(selection["development"]) + list(selection["holdout"])
         chosen = list(PINNED.get(obs_num, ()))
         for seed in ordered:
-            if len(chosen) == 3:
+            if len(chosen) == MAPS_PER_DENSITY:
                 break
             if seed not in chosen:
                 chosen.append(seed)
-        if len(chosen) != 3:
+        if len(chosen) != MAPS_PER_DENSITY:
             raise SystemExit(f"density {obs_num}: only {len(chosen)} maps available")
         for map_seed in chosen:
             run_dir = root / "maps" / f"map_{map_seed}"
             entries.append(_check_map(run_dir, map_seed, obs_num))
+    _assert_distinct(entries)
     manifest = {"densities": list(DENSITIES), "maps": entries}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -160,7 +145,6 @@ def _check_map(run_dir: Path, map_seed: int, obs_num: int) -> dict:
             "from the root, so a mismatched path means the label is wrong."
         )
     arrays = np.load(run_dir / "arrays.npz", allow_pickle=False)
-    _check_matches_flight(arrays, map_seed, obs_num)
     return {
         "map_seed": map_seed,
         "obs_num": obs_num,
@@ -172,26 +156,30 @@ def _check_map(run_dir: Path, map_seed: int, obs_num: int) -> dict:
     }
 
 
-def _check_matches_flight(arrays, map_seed: int, obs_num: int) -> None:
-    """For a map that was also flown, require the rebuild to reproduce it exactly.
+def _assert_distinct(entries: list[dict]) -> None:
+    """Refuse a manifest that names the same field twice.
 
-    ``obs_num`` is unchanged at 25, so the generator's draw sequence is unchanged and the
-    rebuild should be bit-identical. If it is not, the recorded flights describe a different
-    field than the campaign does, and the JAX-to-flight transfer comparison silently becomes
-    a comparison of two different environments. That failure is invisible in the analysis,
-    so it is caught here instead.
+    Seed 525 qualified at both 15 and 25 pillars, and the driver flew the 15-pillar field
+    under both labels -- silently, because every downstream check keys on the label rather
+    than on the array. That is why the old gate read 6-of-8 and why ``report_figures.py``
+    carried a ``DUPLICATE_MAPS`` patch.
+
+    Two assertions, because either alone misses a case. ``(obs_num, map_seed)`` catches the
+    manifest listing one entry twice; ``occupied_cells`` catches two *differently labelled*
+    entries that are the same field, which is the failure that actually happened. Occupied
+    cells collide only for genuinely identical pillar draws, so a false positive here is a
+    map pair that would have been useless as two independent maps anyway.
     """
-    reference = FLOWN.get((obs_num, map_seed))
-    if reference is None or not reference.exists():
-        return
-    flown = np.load(reference, allow_pickle=False)
-    for key in ("occupancy", "grid", "target_grid", "reachable_mask", "initial_state"):
-        if not np.array_equal(np.asarray(arrays[key]), np.asarray(flown[key])):
-            raise SystemExit(
-                f"map {map_seed} at obs_num={obs_num} rebuilt with a different {key!r} than "
-                f"the recorded flight in {reference}. The flights no longer correspond to "
-                "the campaign map -- do not pin this map, or re-record the flight."
-            )
+    labels = [(e["obs_num"], e["map_seed"]) for e in entries]
+    if len(set(labels)) != len(labels):
+        raise SystemExit(f"map manifest repeats an (obs_num, map_seed): {labels}")
+    cells = [e["occupied_cells"] for e in entries]
+    if len(set(cells)) != len(cells):
+        pairs = [(e["obs_num"], e["map_seed"], e["occupied_cells"]) for e in entries]
+        raise SystemExit(
+            f"two maps have identical occupied_cells, so they are the same field under two "
+            f"labels: {pairs}"
+        )
 
 
 def load_maps(path: Path) -> list[dict]:
@@ -223,8 +211,8 @@ def groups(maps: list[dict], seeds: range, arms=FINAL_ARMS):
         axis = _BY_NAME[arm][0] if arm != "baseline" else "-"
         # The default width is one arm's whole cell set, derived rather than hard-coded: it
         # must track the map and seed counts or a smaller campaign would silently run at a
-        # width nothing else used.
-        width = full // ARM_CHUNKS.get(arm, AXIS_CHUNKS.get(axis, 1))
+        # width nothing else used. AXIS_CHUNKS quarantines only the axes that will not fit.
+        width = full // AXIS_CHUNKS.get(axis, 1)
         lanes = [(entry, arm, seed) for entry in maps for seed in seeds]
         if len(lanes) % width:
             raise SystemExit(f"{len(lanes)} lanes is not divisible by width {width}")
@@ -329,9 +317,7 @@ def run_group(label: str, execution: str, lanes: list, cache: dict, arguments) -
             "map_seed": entry["map_seed"], "obs_num": entry["obs_num"],
             # Read back from the realised config, not the override dict, so a lane that did
             # not set an axis records what it actually ran with rather than a blank.
-            "theta": round(float(np.degrees(np.arctan2(
-                float(controller.stein.rotation[1, 0]),
-                float(controller.stein.rotation[0, 0])))), 6),
+            "release_ratio": float(controller.field.release_ratio),
             "alpha": float(controller.mppi.alpha),
             "lam_max": float(controller.mppi.temperature_max),
             "hardware": arguments.hardware, "execution": execution, "lanes": len(lanes),
@@ -400,8 +386,11 @@ def verify_branch(maps: list[dict], arguments) -> bool:
     width = arguments.verify_lanes or (len(maps) * arguments.seeds)
     half = width // 2
     shared = [(entry, "baseline", seed) for seed in range(43, 43 + half)]
-    first = shared + [(entry, "theta_0", seed) for seed in range(43, 43 + half)]
-    second = shared + [(entry, "theta_45", seed) for seed in range(43, 43 + half)]
+    # Two companions that differ in a traced leaf only, so the static signature -- and
+    # therefore the lowering -- is the same in both calls. If the shared half still moves,
+    # it moved because of its neighbours' *values*, which is exactly what the gate asks.
+    first = shared + [(entry, "gain_30", seed) for seed in range(43, 43 + half)]
+    second = shared + [(entry, "gain_120", seed) for seed in range(43, 43 + half)]
 
     outputs = []
     for label, lanes in (("A", first), ("B", second)):

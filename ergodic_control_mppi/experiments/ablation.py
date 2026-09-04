@@ -1,7 +1,7 @@
 """Staged ablation campaign runner.
 
 Every cell is one closed-loop run of the shipped controller with a patched
-config. Parameters are addressed by their dotted YAML path (``stein.memory_gain``,
+config. Parameters are addressed by their dotted YAML path (``reference.memory_gain``,
 ``mppi.T``), so adding an axis is a config edit, not a code change -- the same
 patch-then-``load_config`` mechanism the throwaway A/B runner used, promoted and
 given an archive.
@@ -11,7 +11,7 @@ given an archive.
     python -m ergodic_control_mppi.experiments.ablation --stage screening --device gpu
 
 Cells are ordered so that runs sharing an XLA-static signature are contiguous:
-``mppi.K``, ``mppi.T``, ``mppi.memory_length`` and ``stein.memory_scales`` are
+``mppi.K``, ``mppi.T``, ``mppi.memory_length`` and ``reference.release_ratio`` are
 static pytree fields, so each distinct combination costs a full recompile.
 
 Results are written so that no future question needs the GPU again: a scalar CSV
@@ -144,8 +144,8 @@ def _static_key(data: dict[str, Any]) -> tuple:
     """Group key for XLA recompiles.
 
     The static pytree fields are ``mppi.K``, ``mppi.T``, ``mppi.memory_length``
-    and ``stein.memory_scales``. ``memory_length`` is derived from
-    ``stein.memory_time`` and ``model.delta_t`` when absent, so those two raw
+    and ``reference.release_ratio``. ``memory_length`` is derived from
+    ``reference.memory_time`` and ``model.delta_t`` when absent, so those two raw
     values belong in the key rather than the derivation being duplicated here:
     the resolved signature is a pure function of this tuple, so sorting by it
     groups compiles exactly.
@@ -157,8 +157,8 @@ def _static_key(data: dict[str, Any]) -> tuple:
             "mppi.K",
             "mppi.T",
             "mppi.memory_length",
-            "stein.memory_time",
-            "stein.memory_scales",
+            "reference.memory_time",
+            "reference.release_ratio",
             "model.delta_t",
         )
     )
@@ -333,7 +333,7 @@ def _grids(config) -> tuple[np.ndarray, tuple, tuple, tuple, np.ndarray]:
     Built exactly as plotting/simulation.py and the metrics module expect, so a
     stored run can be re-scored offline without reloading the config.
     """
-    from ergodic_control_mppi.mppi.stein import pdf
+    from ergodic_control_mppi.mppi.field import pdf
     import jax.numpy as jnp
 
     workspace = config.controller.workspace
@@ -565,17 +565,16 @@ def _estimate_ms(data: dict[str, Any]) -> float:
     """Estimated ms/step for a patched config."""
     samples = float(_get_dotted(data, "mppi.K") or 1000)
     horizon = float(_get_dotted(data, "mppi.T") or 350)
-    scales = float(_get_dotted(data, "stein.memory_scales") or 3)
     length = _get_dotted(data, "mppi.memory_length")
     if length is None:
-        memory_time = float(_get_dotted(data, "stein.memory_time") or 10.0)
+        memory_time = float(_get_dotted(data, "reference.memory_time") or 10.0)
         delta_t = float(_get_dotted(data, "model.delta_t") or 0.02)
         length = math.ceil(3.0 * memory_time / delta_t)
     constant, rollout, kde, attraction = COST_MS
     return (
         constant
         + rollout * samples * horizon
-        + kde * scales * float(length) ** 2
+        + kde * float(length) ** 2
         + attraction * horizon * horizon
     )
 

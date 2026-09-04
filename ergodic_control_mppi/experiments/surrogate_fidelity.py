@@ -1,25 +1,25 @@
 r"""Measure what the median-source surrogate costs, instead of assuming it costs something.
 
-:func:`ergodic_control_mppi.mppi.core.reference_flow` does not build eq. (25) from the full
-rollout occupancy measure ``pi_hat_t``. It builds it from one representative path -- the
-per-horizon-step median over rollouts -- and broadcasts the resulting ``(T, 2)`` field to
-every rollout. That is a compression: the paper's ``eps_comp``.
+:func:`ergodic_control_mppi.mppi.core.reference_flow` does not build eq. (25) at each rollout's own
+states. It evaluates it once on one representative path -- the per-horizon-step median over
+rollouts -- and broadcasts the resulting ``(T, 2)`` field to every rollout. That median path
+is also the plan the self-repulsion term repels from. Both are a compression: the paper's
+``eps_comp``.
 
 The compression is only visible to MPPI through the *ranking* it induces over rollouts,
 since the weights are a softmax of the costs and a monotone re-labelling of every cost leaves
 the update unchanged. So the quantity that matters is the rank correlation between
 
-    surrogate:  S_FM(h_median broadcast to all rollouts)     shape (K,)
-    faithful:   S_FM(h built from all K*T states, queried per rollout)   shape (K,)
+    surrogate:  S_track(v* on the median path, broadcast to all rollouts)   shape (K,)
+    faithful:   S_track(v* queried at each rollout's own states)            shape (K,)
 
 not the pointwise field error. This module computes both on real planning steps of the
 deployed profile and reports Spearman rho between them.
 
 Why the rollout count is swept rather than fixed at the deployed ``N=250``: the faithful
-field is O((KT)^2) in the source set, which is the reason the surrogate exists. At ``T=350``
-the exact pairwise median heuristic is affordable up to ``K`` in the low tens and not at
-``K=250``. The sweep is therefore over the range where the faithful field is exactly
-computable, and any claim made from it must state that range.
+field is ``K`` evaluations of a field whose plan term is ``O(T^2)``, against the surrogate's
+one, which is the reason the surrogate exists. The sweep covers the range where the faithful
+field is affordable, and any claim made from it must state that range.
 
     uv run python -m ergodic_control_mppi.experiments.surrogate_fidelity
 """
@@ -35,17 +35,12 @@ from ergodic_control_mppi.mppi.core import (
     _rollouts,
     _smooth,
     effective_sample_fraction,
+    field_at,
     reference_flow,
     sample_epsilon,
 )
 from ergodic_control_mppi.mppi.single import SingleControllerState
-from ergodic_control_mppi.mppi.stein import multiscale_memory_flow, stein_gradient
 from ergodic_control_mppi.parameters import ControllerParams
-
-
-#: Rows of the (KT, KT) pairwise-distance matrix computed at once. Trades peak memory for
-#: parallelism: 256 rows at K*T = 11200 is ~11 MB of float32 per batch.
-_MEDIAN_ROW_BATCH = 256
 
 
 class StepFidelity(NamedTuple):
@@ -54,7 +49,7 @@ class StepFidelity(NamedTuple):
     Attributes:
         spearman: Rank correlation between the two per-rollout *flow* cost vectors. This
             isolates the compression: it is the surrogate's effect on the only term it
-            touches, before the task costs and ``flow_weight`` are applied.
+            touches, before the task costs and ``track_weight`` are applied.
         pearson: Linear correlation of the same two vectors, on the raw cost scale.
         weight_tv: Total-variation distance between the two weight simplices MPPI would
             actually form -- the *total* rollout cost at the step's own temperature. This is
@@ -80,64 +75,30 @@ class StepFidelity(NamedTuple):
     control_gap: float
 
 
-def _speed_gauge(flow: jax.Array, params: ControllerParams) -> jax.Array:
-    """Apply the constant-speed gauge of eq. (speed_gauge), as ``reference_flow`` does."""
-    speed = params.stein.reference_speed
-    norm = jnp.linalg.norm(flow, axis=-1, keepdims=True)
-    return jnp.where(speed > 0, speed * flow / jnp.maximum(norm, 1e-3), flow)
-
-
 def faithful_reference_flow(
-    params: ControllerParams, evaluation_positions: jax.Array, memory: jax.Array
+    params: ControllerParams,
+    evaluation_positions: jax.Array,
+    memory: jax.Array,
+    service_mass: jax.Array | None = None,
 ) -> jax.Array:
-    """Return eq. (25) built from the *whole* rollout ensemble, queried per rollout.
+    """Return the reference field queried at each rollout's own states, shape ``(K, T, 2)``.
 
-    The same operations as :func:`reference_flow` in the same order, with two differences and
-    no others: the Stein source set is all ``K*T`` predicted states rather than the median
-    path, and the field is evaluated at each rollout's own states rather than broadcast.
+    :func:`field_at` verbatim -- the same call the controller makes, with the median path
+    replaced by each rollout's own states in *both* roles it plays. Two things change:
 
-    Args:
-        params: Shared immutable controller parameters.
-        evaluation_positions: Rollout states the increments start from, shape ``(K, T, 2)``.
-        memory: Executed-position ring buffer, shape ``(P, 2)``; oldest first.
+    * the query set, so the score, the memory repulsion and the speed schedule are all read
+      where that rollout actually goes rather than where the median path goes;
+    * the plan the plan-repulsion term repels from, which for a given rollout is its own
+      horizon rather than the shared median.
 
-    Returns:
-        The reference flow at every rollout state, shape ``(K, T, 2)``.
+    Nothing is transcribed, so this cannot drift from the control path. It is
+    ``O(K)`` calls of the deployed field rather than one, which is the whole reason the
+    surrogate exists.
     """
-    samples, horizon, _ = evaluation_positions.shape
-    sources = evaluation_positions.reshape(samples * horizon, 2)
-
-    # Median heuristic over pi_hat_t itself. Chunked over rows because the (KT, KT) matrix is
-    # the memory ceiling of this whole comparison; the median is exact either way.
-    # The batch size is the point of the chunking: one row at a time is a K*T-long sequential
-    # scan, which at the sizes this module runs at costs more than the field it is measuring.
-    def row_square_distances(point: jax.Array) -> jax.Array:
-        difference = sources - point[None, :]
-        return jnp.sum(difference * difference, axis=-1)
-
-    square_distances = jax.lax.map(
-        row_square_distances, sources, batch_size=_MEDIAN_ROW_BATCH
+    return jax.lax.map(
+        lambda states: field_at(params, states, states, memory, service_mass),
+        evaluation_positions,
     )
-    bandwidth = jnp.maximum(
-        jnp.median(square_distances), params.stein.self_bandwidth
-    )
-
-    ages = jnp.arange(memory.shape[0])[::-1]  # 0 = newest (buffer is oldest-first)
-    recency = params.stein.memory_decay ** ages
-    workspace = params.workspace
-    density_floor = 1.0 / (
-        (workspace.x_limits[1] - workspace.x_limits[0])
-        * (workspace.y_limits[1] - workspace.y_limits[0])
-    )
-
-    def rollout_flow(queries: jax.Array) -> jax.Array:
-        flow = stein_gradient(queries, sources, params.gmm, params.stein, bandwidth)
-        flow += params.stein.memory_gain * multiscale_memory_flow(
-            queries, memory, recency, params.gmm, params.stein, density_floor
-        )
-        return _speed_gauge(flow, params)
-
-    return jax.lax.map(rollout_flow, evaluation_positions)
 
 
 def step_fidelity(
@@ -154,10 +115,10 @@ def step_fidelity(
     displacements = sampled_positions - evaluation
 
     surrogate_field = jnp.broadcast_to(
-        reference_flow(params, evaluation, carry.memory)[None],
+        reference_flow(params, evaluation, carry.memory, carry.service_mass)[None],
         evaluation.shape,
     )
-    faithful_field = faithful_reference_flow(params, evaluation, carry.memory)
+    faithful_field = faithful_reference_flow(params, evaluation, carry.memory, carry.service_mass)
 
     delta_t = params.model.delta_t
     surrogate = _flow_tracking_cost(surrogate_field, displacements, delta_t)
@@ -169,9 +130,9 @@ def step_fidelity(
     # The weights MPPI would actually form: the *total* rollout cost at the step's own
     # temperature, exactly as ``mppi_step`` builds it. Softmaxing the bare flow cost instead
     # would compare the two fields at a scale the controller never sees -- the flow term
-    # enters multiplied by ``flow_weight``, and against the task costs it competes with.
+    # enters multiplied by ``track_weight``, and against the task costs it competes with.
     def weights(flow_cost: jax.Array) -> jax.Array:
-        cost = task_costs + params.stein.flow_weight * flow_cost
+        cost = task_costs + params.field.track_weight * flow_cost
         shifted = -(cost - jnp.min(cost)) / carry.temperature
         exponentiated = jnp.exp(shifted)
         return exponentiated / jnp.sum(exponentiated)

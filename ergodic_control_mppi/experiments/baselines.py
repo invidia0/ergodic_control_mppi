@@ -913,8 +913,6 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
         manifest_all = json.loads(maps_path.read_text(encoding="utf-8"))
         cells = []
         for entry in manifest_all["maps"]:
-            if (entry["obs_num"], entry["map_seed"]) == (25, 525):
-                continue  # the duplicated cell; see DUPLICATE_MAPS in report_figures.py
             config, manifest, arrays = _grid_config(Path(entry["run_dir"]), config_path)
             scenario = _open_scenario(config)
             scenario = replace(scenario, name=f"{entry['obs_num']}p_{entry['map_seed']}")

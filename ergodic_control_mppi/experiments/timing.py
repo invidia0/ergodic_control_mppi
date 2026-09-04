@@ -39,9 +39,10 @@ from ergodic_control_mppi.mppi.core import (
     mppi_step,
     sample_epsilon,
 )
-from ergodic_control_mppi.mppi.stein import (
-    multiscale_memory_flow,
-    stein_gradient,
+from ergodic_control_mppi.mppi.field import (
+    kde_repulsion,
+    memory_flow,
+    score_pdf,
 )
 
 DEFAULT_CONFIG = "configs/mppi_params.yaml"
@@ -98,7 +99,7 @@ def measure_stages(
     """Time each stage of one MPPI step plus the whole step."""
     config = _loaded(config_path, overrides)
     params, state, controls, key, temperature, memory, _ = _setup(config, device)
-    stein = params.stein
+    field = params.field
     workspace = params.workspace
 
     epsilon, _ = sample_epsilon(key, params)
@@ -113,22 +114,20 @@ def measure_stages(
     initial = jnp.broadcast_to(state[:2], (params.mppi.samples, 1, 2))
     evaluation = jnp.concatenate((initial, sampled_positions[:, :-1]), axis=1)
     source = jnp.median(evaluation, axis=0)
-    differences = source[:, None, :] - source[None, :, :]
-    bandwidth = jnp.maximum(
-        jnp.median(jnp.sum(differences * differences, axis=-1)), stein.self_bandwidth
-    )
     ages = jnp.arange(memory.shape[0])[::-1]
-    recency = stein.memory_decay ** ages
+    recency = field.memory_decay ** ages
+    ones = jnp.ones((source.shape[0],), dtype=source.dtype)
     density_floor = 1.0 / (
         (workspace.x_limits[1] - workspace.x_limits[0])
         * (workspace.y_limits[1] - workspace.y_limits[0])
     )
 
     sample_fn = jax.jit(lambda k, p: sample_epsilon(k, p)[0])
-    attraction_fn = jax.jit(
-        lambda src, g, s, b: stein_gradient(src, src, g, s, b)
-    )
-    memory_fn = jax.jit(multiscale_memory_flow)
+    # The attraction is pointwise now, so it is O(T) rather than the Stein path's O(T^2).
+    # The quadratic block moved to the plan self-repulsion, which is timed separately.
+    attraction_fn = jax.jit(score_pdf)
+    plan_fn = jax.jit(kde_repulsion)
+    memory_fn = jax.jit(memory_flow)
     step_fn = jax.jit(mppi_step)
 
     stages = {
@@ -136,11 +135,12 @@ def measure_stages(
         "rollouts_KT": _time(
             lambda: rollouts_fn(params, state, controls, epsilon, temperature), repeats
         ),
-        "attraction_T2": _time(
-            lambda: attraction_fn(source, params.gmm, stein, bandwidth), repeats
+        "attraction_T": _time(lambda: attraction_fn(source, params.gmm), repeats),
+        "plan_T2": _time(
+            lambda: plan_fn(source, source, ones, field.fine_bandwidth), repeats
         ),
-        "memory_QP2": _time(
-            lambda: memory_fn(source, memory, recency, params.gmm, stein, density_floor),
+        "memory_P2": _time(
+            lambda: memory_fn(source, memory, recency, params.gmm, field, density_floor),
             repeats,
         ),
         "mppi_step_total": _time(
@@ -150,7 +150,7 @@ def measure_stages(
 
     accounted = sum(
         stages[name]["ms_median"]
-        for name in ("sample_epsilon", "rollouts_KT", "attraction_T2", "memory_QP2")
+        for name in ("sample_epsilon", "rollouts_KT", "attraction_T", "plan_T2", "memory_P2")
     )
     total = stages["mppi_step_total"]["ms_median"]
     return {
@@ -158,7 +158,6 @@ def measure_stages(
             "K": int(params.mppi.samples),
             "T": int(params.mppi.horizon),
             "P": int(params.mppi.memory_length),
-            "Q": int(stein.memory_scales),
         },
         "device": str(jax.devices()[0]) if device != "cpu" else "cpu",
         "stages": stages,
@@ -191,7 +190,7 @@ def measure_scaling(
     device: str = "auto",
     repeats: int = 60,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Per-step cost against each of K, T, P and Q, one axis at a time.
+    """Per-step cost against each of K, T and P, one axis at a time.
 
     P is swept through ``mppi.memory_length`` directly rather than through
     ``memory_time``, so gamma is held fixed and only the truncation moves.
@@ -200,7 +199,6 @@ def measure_scaling(
         "K": ("mppi.K", [125, 250, 500, 1000, 2000, 4000]),
         "T": ("mppi.T", [50, 100, 200, 350, 500, 700]),
         "P": ("mppi.memory_length", [500, 1000, 2000, 3000, 4500, 6000]),
-        "Q": ("stein.memory_scales", [1, 2, 3, 4, 5, 7]),
     }
     out: dict[str, list[dict[str, Any]]] = {}
     for axis, (dotted, levels) in sweeps.items():
@@ -211,9 +209,10 @@ def measure_scaling(
                 {
                     "level": level,
                     "total_ms": report["total_ms"],
-                    "memory_ms": report["stages"]["memory_QP2"]["ms_median"],
+                    "memory_ms": report["stages"]["memory_P2"]["ms_median"],
                     "rollouts_ms": report["stages"]["rollouts_KT"]["ms_median"],
-                    "attraction_ms": report["stages"]["attraction_T2"]["ms_median"],
+                    "attraction_ms": report["stages"]["attraction_T"]["ms_median"],
+                    "plan_ms": report["stages"]["plan_T2"]["ms_median"],
                     "shape": report["shape"],
                 }
             )

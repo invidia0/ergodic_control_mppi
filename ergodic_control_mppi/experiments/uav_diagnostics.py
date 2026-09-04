@@ -689,15 +689,17 @@ def build_discrepancy_report(rows: list[dict[str, str]]) -> str:
         "odometry sampling granularity.",
         "- Tracking lag: best alignment was 0–1 steps and flights travelled 6% farther than "
         "their offline twins.",
-        "- Curl/mirror symmetry: theta=0 wound more (+3.84, +2.07, +5.04 turns versus "
-        "theta=15's -0.66) and starved m2 harder.",
+        "- Curl/mirror symmetry: moot. The rotation was removed with the Stein path; "
+        "R = I is the condition under which the field is a gradient at all.",
         "- Safety shield: command displacement was 0.3 mm.", "",
         "The surviving premise is a rare-event metric: memory_time is 5.5 s, a tour emerges "
         "over about 160 s, and a 400 s run contains only 2.5 such opportunities. The same pure "
         "JAX config scored 3 cycles on Jeff and 0 on the laptop. Any flight-only mechanism "
         "must first exceed that vehicle-free numerical split.", "",
         "Evidence scope: 3 SO3 flights exist in the current geometry; 24 across all campaigns, "
-        "of which 2 scored one cycle. Every recorded flight is theta_15.", "",
+        "of which 2 scored one cycle. **Every recorded flight is the Stein controller**, so "
+        "under same-version control none of them describes the shipped field; the flights "
+        "must be re-recorded before any of this is quoted about it.", "",
         "## Cross-process determinism", "",
         "| Map | Hardware | Runs | Path hashes | Verdict |", "|---:|---|---:|---:|---|",
         *(determinism_lines or ["| — | — | 0 | 0 | pending |"]), "",

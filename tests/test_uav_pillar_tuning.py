@@ -92,7 +92,7 @@ class ArmTest(unittest.TestCase):
                 "screen_cap": 30, "screen_full_max": 30,
                 "approach_cap": 108, "approach_full_max": 108,
                 "holdout_cap": 108, "holdout_full_max": 108,
-                "sweep_cap": 372, "sweep_full_max": 372,
+                "sweep_cap": 444, "sweep_full_max": 444,
             },
         )
         approach = stage_arms("approach", "T500", "base")
@@ -111,7 +111,7 @@ class ArmTest(unittest.TestCase):
         self.assertEqual(set(sweep), set(SWEEP_ARMS))
         self.assertEqual(sweep["baseline"], {})
         # The base arm is unmodified, so the shipped profile is its own control.
-        self.assertEqual(sweep["theta_75"], {"theta": 75.0})
+        self.assertEqual(sweep["plan_off"], {"plan_gain": 0.0})
         for name, _, _, overrides in ARMS:
             if name in SWEEP_ARMS:
                 self.assertEqual(sweep[name], overrides)
@@ -205,7 +205,7 @@ class AblationExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             seeds = range(43, 55)
-            self._write(root, {"baseline": seeds, "theta_75": seeds})
+            self._write(root, {"baseline": seeds, "plan_off": seeds})
             output = write_ablation_copy(root, root / "ablation_543.csv")
             with output.open(encoding="utf-8", newline="") as stream:
                 reader = csv.DictReader(stream)
@@ -214,13 +214,13 @@ class AblationExportTest(unittest.TestCase):
         # exactly as it reads the first campaign's.
         self.assertEqual(fields[: len(ABLATION_FIELDS)], ABLATION_FIELDS)
         self.assertEqual(len(rows), 24)
-        self.assertEqual({row["axis"] for row in rows}, {"-", "theta"})
+        self.assertEqual({row["axis"] for row in rows}, {"-", "plan_gain"})
 
     def test_export_refuses_an_unpaired_arm(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self._write(root, {"baseline": range(43, 55), "theta_75": range(43, 50)})
-            with self.assertRaisesRegex(ValueError, "theta_75"):
+            self._write(root, {"baseline": range(43, 55), "plan_off": range(43, 50)})
+            with self.assertRaisesRegex(ValueError, "plan_off"):
                 write_ablation_copy(root, root / "ablation_543.csv")
 
 

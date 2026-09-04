@@ -12,6 +12,7 @@ from ergodic_control_mppi.mppi.core import (
     effective_sample_fraction,
     mppi_step,
 )
+from ergodic_control_mppi.mppi.field import responsibilities
 from ergodic_control_mppi.parameters import ControllerParams
 
 
@@ -35,6 +36,10 @@ class SingleControllerState(NamedTuple):
         temperature: Scalar ESS-adapted MPPI temperature.
         memory: Fading-memory positions with shape ``(P, 2)``, oldest first.
         step_index: Number of completed control steps.
+        service_mass: Recency-weighted per-component visit mass, shape ``(J,)``. A
+            deterministic contraction of the executed path -- it adds no information the
+            path does not already carry -- whose decay is set by ``service_time``, so the
+            window the service gate reasons over is independent of the memory trail.
     """
 
     state: jax.Array
@@ -43,6 +48,7 @@ class SingleControllerState(NamedTuple):
     temperature: jax.Array
     memory: jax.Array
     step_index: jax.Array
+    service_mass: jax.Array
 
 
 def initialize_single(
@@ -68,6 +74,10 @@ def initialize_single(
         key=key,
         temperature=jnp.asarray(params.mppi.temperature, dtype=jnp.float32),
         memory=jnp.broadcast_to(initial_state[:2], (params.mppi.memory_length, 2)),
+        # Start at the stationary mass of standing still at the initial position, so the
+        # gate does not read a cold accumulator as "nothing has been served anywhere".
+        service_mass=responsibilities(initial_state[:2], params.gmm)
+        / jnp.maximum(1.0 - params.field.service_decay, 1e-12),
         step_index=jnp.asarray(0, dtype=jnp.int32),
     )
 
@@ -95,6 +105,7 @@ def single_step(
         carry.key,
         carry.temperature,
         carry.memory,
+        carry.service_mass,
     )
     next_state = step(carry.state, result.control, params.model)
     next_carry = SingleControllerState(
@@ -104,6 +115,8 @@ def single_step(
         temperature=adapt_temperature(carry.temperature, result.weights, params),
         memory=jnp.concatenate((carry.memory[1:], next_state[None, :2]), axis=0),
         step_index=carry.step_index + 1,
+        service_mass=params.field.service_decay * carry.service_mass
+        + responsibilities(next_state[:2], params.gmm),
     )
     return next_carry, result
 
@@ -119,6 +132,8 @@ def stationary_step(
         state=state,
         memory=jnp.broadcast_to(state[:2], next_carry.memory.shape),
         step_index=jnp.asarray(0, dtype=jnp.int32),
+        service_mass=responsibilities(state[:2], params.gmm)
+        / jnp.maximum(1.0 - params.field.service_decay, 1e-12),
     )
     return held, result
 

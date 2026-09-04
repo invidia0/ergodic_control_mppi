@@ -27,6 +27,7 @@ class RolloutBundle(NamedTuple):
         optimal: The selected plan's state trajectory with shape ``(T, 6)``.
         surrogate: The shared median path the flow was evaluated on, shape ``(T, 2)``.
         memory: The fading-memory buffer at this step, shape ``(P, 2)``, oldest first.
+        service_mass: The per-component visit mass the service gate read, shape ``(J,)``.
         state: The state the step planned from, shape ``(6,)``.
     """
 
@@ -36,6 +37,7 @@ class RolloutBundle(NamedTuple):
     optimal: np.ndarray
     surrogate: np.ndarray
     memory: np.ndarray
+    service_mass: np.ndarray
     state: np.ndarray
 
 
@@ -57,8 +59,13 @@ def replay_step(params: ControllerParams, carry: SingleControllerState) -> Rollo
     costs, _, positions = _rollouts(
         params, carry.state, carry.controls, epsilon, carry.temperature
     )
+    # `service_mass` is not optional here even though `mppi_step` defaults it: without it
+    # the replay reads the service ratio out of the trail instead of the accumulator, which
+    # is a different field and therefore a different step -- exactly the drift this module
+    # exists to prevent.
     result = mppi_step(
-        params, carry.controls, carry.state, carry.key, carry.temperature, carry.memory
+        params, carry.controls, carry.state, carry.key, carry.temperature, carry.memory,
+        carry.service_mass,
     )
     return RolloutBundle(
         positions=np.asarray(positions),
@@ -67,6 +74,7 @@ def replay_step(params: ControllerParams, carry: SingleControllerState) -> Rollo
         optimal=np.asarray(result.optimal_trajectory),
         surrogate=np.asarray(result.surrogate),
         memory=np.asarray(carry.memory),
+        service_mass=np.asarray(carry.service_mass),
         state=np.asarray(carry.state),
     )
 
