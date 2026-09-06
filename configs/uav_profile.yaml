@@ -13,10 +13,21 @@
 # numerical branch and same-version control forbids comparing across it.
 #
 # Deliberately NOT merged:
-#   - mppi.T = 150. That win is a v = 4.0 phenomenon; at the v = 2 row of the speed x
-#     horizon grid the curve is nearly flat and T = 150 carries the fatter tail. This
-#     profile flies a 2x wider target with a slower vehicle, which argues for a longer
-#     horizon, so T stays 350 and the screen sweeps {100, 150, 250, 350, 500}.
+#   - mppi.T = 150. The Phase D campaign PROMOTED it: +0.548 log2 on occupancy MSE
+#     (8.39e-08 against 1.22e-07), p < 1e-4, the same sign on 6 of 6 maps, joint
+#     sensitivity 3.28 sigma -- all three promotion conditions, and 2.5x cheaper per step.
+#     The earlier reason for holding it back ("a v = 4.0 phenomenon, flat at v = 2") is
+#     contradicted by that campaign and is retracted; do not cite it again.
+#
+#     It is held back on a different ground, which is a judgement and not a measurement:
+#     T = 150 buys the coverage by flying 40% further (952 m against 678 m) at slightly
+#     lower clearance (0.948 m against 0.983 m median). Both are still inside the shield's
+#     margin and no cell collided, but the energy and margin implications have not been
+#     checked against the airframe, and merging it would re-open every number in the paper
+#     under same-version control. Sec. V reports it as a promoted-but-unmerged finding.
+#
+#     If it is ever merged: re-fly Phase D against the new baseline, and re-measure the
+#     step budget, which was taken at T = 350.
 
 # Run-level settings
 seed: 43
@@ -99,7 +110,7 @@ density:
 # (see ergodic_control_mppi/mppi/field.py:potential). There is no rotation: R(theta) = I
 # is exactly the condition under which the field is a gradient.
 reference:
-  weight_track: 3000.0      # gamma_track: flow-tracking weight; must dominate control/obstacle costs to actually dwell
+  weight_track: 3000.0      # gamma_track: weight on tracking -grad Phi; must dominate control/obstacle costs to actually dwell
   # UAV: 1.8 rather than 4.0. The safety shield refuses any command above max_speed
   # (2.0 m/s), so a higher reference speed would be braked continuously rather than flown.
   # Set strictly below the cap, not equal to it: at exactly 2.0 the smoke run grazed the

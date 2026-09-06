@@ -50,8 +50,8 @@ ARM_LABELS = {
     "K_125": "$N{=}125$",
     "K_500": "$N{=}500$",
     "balance_0.5": "$a{=}0.5$",
-    "flow_1500": r"$\gamma{=}1500$",
-    "flow_6000": r"$\gamma{=}6000$",
+    "gamma_1500": r"$\gamma{=}1500$",
+    "gamma_6000": r"$\gamma{=}6000$",
     "penalty_0.1": r"$w_{\rm obs}{\times}0.1$",
     "boundary_0.1": r"$w_{\partial}{\times}0.1$",
     "explore_0": r"$f_{\rm ex}{=}0$",
@@ -682,9 +682,21 @@ def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
         # 3-sigma floor, not for its absolute height, so it can be squeezed harder than the
         # dot grid above it. Tightened hspace pulls it up against the dots, which also makes
         # the shared x axis easier to read across the two panels.
-        heights = [3.0, 0.60, 1.45] if consistency else [3.0, 0.95]
+        # Sized so the dot panel is the same number of inches in both variants, rather
+        # than by a canvas height picked per variant. The axis-header block above the dots
+        # costs a fixed height in points whatever the canvas is, so a shorter canvas does
+        # not shrink the headers -- it shrinks the *data* range underneath them. At a hand
+        # -set 4.4in the two-panel figure drew its dots 14% tighter than the three-panel one
+        # (6.8 against 7.9 px per run) while the markers kept their size in points, and the
+        # rows crowded into each other. Deriving the height is what makes the comment above
+        # true.
+        strip_heights, strip_figure = (3.0, 0.60, 1.45), 6.0
+        dots_inches = strip_figure * strip_heights[0] / sum(strip_heights)
+        heights = list(strip_heights) if consistency else [3.0, 0.95]
+        figure_height = (strip_figure if consistency
+                         else dots_inches * sum(heights) / heights[0])
         figure, panels = plt.subplots(
-            len(heights), 1, figsize=(7.167, 6.0 if consistency else 4.4), sharex=True,
+            len(heights), 1, figsize=(7.167, figure_height), sharex=True,
             gridspec_kw={"height_ratios": heights, "hspace": 0.085 if consistency else 0.04},
         )
         top, bottom = panels[0], panels[-1]
@@ -977,21 +989,33 @@ def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
             """Swatch-plus-label key laid out right to left, blocks sized like `_swatches`.
 
             Drawn by hand rather than with `figure.legend`, whose handle box is sized from the
-            font and came out visibly smaller than the two ramps beside it. Widths are
-            estimated from the character count -- exact extents need a renderer, and the row
-            only has to not collide.
+            font and came out visibly smaller than the two ramps beside it.
+
+            Label widths are **measured**, not estimated from the character count. The old
+            estimate charged every glyph the same 0.45 em, and the block it sized also
+            carried the swatch, whose width scales with the figure's aspect ratio -- so on
+            the two-panel variant (shorter canvas, same font) the swatch shrank while the
+            text did not, every block under-provisioned, and "Occupancy MSE" ran into the
+            swatch beside it.
             """
             block = height * figure.get_figheight() / figure.get_figwidth()
-            per_char = 0.45 * tiny / 72.0 / figure.get_figwidth()
-            widths = [block + 0.005 + len(text) * per_char for text in labels]
-            x = right - sum(widths) - 0.010 * (len(labels) - 1)
-            for colour, text, span in zip(colours, labels, widths):
+            gap, pad = 0.010, 0.005
+            figure.canvas.draw()
+            renderer = figure.canvas.get_renderer()
+            texts = [figure.text(0.0, top_y + height / 2, text, ha="left", va="center",
+                                 fontsize=tiny, color="black") for text in labels]
+            widths = [
+                block + pad + item.get_window_extent(renderer=renderer).width
+                / figure.bbox.width
+                for item in texts
+            ]
+            x = right - sum(widths) - gap * (len(labels) - 1)
+            for colour, item, span in zip(colours, texts, widths):
                 figure.patches.append(plt.Rectangle(
                     (x, top_y), block, height, transform=figure.transFigure,
                     facecolor=colour, edgecolor="none", clip_on=False))
-                figure.text(x + block + 0.005, top_y + height / 2, text, ha="left",
-                            va="center", fontsize=tiny, color="black")
-                x += span + 0.010
+                item.set_position((x + block + pad, top_y + height / 2))
+                x += span + gap
 
         # One baseline for all three keys, and it is the thing that sets the top margin: the
         # tick captions hang ~0.016 below it and the axis headers start at `top`, so the two

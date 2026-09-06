@@ -63,7 +63,7 @@ SWEEP_ARMS = (
     "floor_1.0",
     "T_150", "T_500", "T_750",
     "K_125", "K_500",
-    "flow_1500", "flow_6000",
+    "gamma_1500", "gamma_6000",
     "refspeed_2.5", "refspeed_3.0",
     "penalty_0.1", "boundary_0.1",
     "alpha_0.9", "explore_0", "lam_max_1e4",

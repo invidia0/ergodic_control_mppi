@@ -143,8 +143,13 @@ ARMS: list[tuple[str, str, Any, dict]] = [
     # to its previous solution, which is the regime a long dwell lives in.
     ("explore_0", "exploration", 0.0, {"exploration": 0.0}),
     ("lam_max_1e4", "lam_max", 1e4, {"lam_max": 1e4}),
-    ("flow_1500", "track_weight", 1500.0, {"track_weight": 1500.0}),
-    ("flow_6000", "track_weight", 6000.0, {"track_weight": 6000.0}),
+    # gamma_track, the weight on the cost that makes a rollout follow -grad Phi. Named for
+    # the parameter and not for `flow_weight`, the config key it used to have: an arm called
+    # `flow_*` in a campaign whose whole point is that the Stein flow was removed reads as a
+    # survivor of it. Nothing Stein-era is swept here -- `config.py` raises on every
+    # withdrawn key.
+    ("gamma_1500", "track_weight", 1500.0, {"track_weight": 1500.0}),
+    ("gamma_6000", "track_weight", 6000.0, {"track_weight": 6000.0}),
     # reference_speed normalises the field, so only its *direction* matters and this asks
     # for the speed alpha = 1.0 achieves by a different route.
     ("refspeed_2.5", "reference_speed", 2.5, {"reference_speed": 2.5}),

@@ -45,10 +45,19 @@ rf = importlib.util.module_from_spec(_spec)
 sys.modules["report_figures"] = rf
 _spec.loader.exec_module(rf)
 
-# 4 of 6 maps must show the same effect sign. Registered before the run, and the same ~2/3
-# bar the nine-map campaign used. `final_ablation.build_map_manifest` now asserts the six
-# maps are distinct by label *and* by occupied-cell count, so a map cannot cast two votes.
-MAP_AGREEMENT = 4
+# Two thirds of the maps must show the same effect sign. Registered before the run as "4 of
+# 6", and stated as a fraction so a tier with a different map count is still judged by the
+# bar that was registered rather than by a literal that silently changes meaning: the
+# single-map open tier could never reach 4, so every resolved arm there came back
+# "map-dependent" -- an assertion that the effect varies across maps, made from one map.
+# `final_ablation.build_map_manifest` asserts the maps are distinct by label *and* by the
+# sha256 of their occupancy, so a map cannot cast two votes.
+MAP_AGREEMENT_FRACTION = 2.0 / 3.0
+
+
+def map_agreement(total: int) -> int:
+    """Maps that must agree in sign, at this tier's map count. 4 of 6, as registered."""
+    return int(np.ceil(MAP_AGREEMENT_FRACTION * total))
 # Joint sensitivity, in sigmas of a single run's noise across the five-outcome vector. An
 # arm below this moved the system less than three noise units however small its p-value is,
 # and 108 paired cells can resolve a great deal less than that.
@@ -68,9 +77,11 @@ def analyse(table, metric: str = "occupancy_mse") -> list[dict]:
         # Lower is better for the coverage metrics, so a positive effect means the arm won.
         effect = np.log2(base_values / arm_values)
         try:
-            pvalue = float(wilcoxon(arm_values, base_values).pvalue)
+            pvalue = (1.0 if np.array_equal(arm_values, base_values)
+                      else float(wilcoxon(arm_values, base_values).pvalue))
         except ValueError:
             pvalue = 1.0
+        pvalue = pvalue if np.isfinite(pvalue) else 1.0
         signed = rf.per_map_effects(table, arm, metric, standardize=False)
         positive = sum(1 for v in signed.values() if v > 0)
         by_density: dict[int, list[float]] = defaultdict(list)
@@ -103,7 +114,11 @@ def analyse(table, metric: str = "occupancy_mse") -> list[dict]:
 
     for record in records:
         resolved = record["holm"] and record["sensitivity"] >= SENSITIVITY_FLOOR
-        consistent = record["agreement"] >= MAP_AGREEMENT
+        consistent = record["agreement"] >= map_agreement(record["maps_total"])
+        # With one map there is nothing for consistency to test: `consistent` is vacuously
+        # true, so the verdict rests on the pooled test and the sensitivity alone. Recorded
+        # per arm so a reader of the table is not left to infer it from the map count.
+        record["consistency_tested"] = record["maps_total"] > 1
         record["promoted"] = bool(resolved and consistent and record["median_effect"] > 0)
         # Four outcomes, not two. A consistently *harmful* arm is a finding, not a failed
         # promotion, and lumping it in with the map-dependent ones produced the nonsense
@@ -124,17 +139,22 @@ def analyse(table, metric: str = "occupancy_mse") -> list[dict]:
 def render(records: list[dict], metric: str) -> str:
     """Markdown, ordered by joint sensitivity so the ranking leads."""
     records = sorted(records, key=lambda r: -r["sensitivity"])
+    maps = records[0]["maps_total"]
     lines = [
         f"# Final ablation campaign -- {metric}",
         "",
         f"{len(records)} arms against the shipped profile, {records[0]['cells']} paired "
-        "cells each (6 maps over 3 densities x 6 seeds, 20 000 steps).",
+        f"cells each ({maps} map{'s' if maps != 1 else ''}, 20 000 steps).",
         "",
         "`promoted` requires all three of: a Holm-surviving pooled Wilcoxon within the "
-        f"arm's own axis, the same effect sign on at least {MAP_AGREEMENT} of 6 maps, and "
-        f"a joint sensitivity of at least {SENSITIVITY_FLOOR} sigma. The map condition is "
-        "the one that matters most: the retracted `alpha = 1.0` finding had p = 0.0005 "
-        "pooled and agreed on 1 map of 3.",
+        f"arm's own axis, the same effect sign on at least {map_agreement(maps)} of {maps} "
+        f"map{'s' if maps != 1 else ''}, and a joint sensitivity of at least "
+        f"{SENSITIVITY_FLOOR} sigma. The map condition is the one that matters most: the "
+        "retracted `alpha = 1.0` finding had p = 0.0005 pooled and agreed on 1 map of 3."
+        + ("" if maps > 1 else
+           "\n\n**One map only.** The consistency condition is vacuous at this tier, so a "
+           "verdict here rests on the pooled test and the sensitivity alone. This tier is "
+           "the variance floor for the cluttered campaign, not a promotion venue."),
         "",
         "| arm | axis | effect (log2) | p | Holm | maps | 10p | 15p | 20p | sens | promoted |",
         "| --- | --- | ---: | ---: | :-: | :-: | ---: | ---: | ---: | ---: | :-: |",
@@ -186,7 +206,7 @@ def render(records: list[dict], metric: str) -> str:
         "",
         f"## Resolved but below the {SENSITIVITY_FLOOR} sigma floor",
         "",
-        "Holm-significant and practically negligible. With 108 paired cells the test "
+        f"Holm-significant and practically negligible. With {records[0]['cells']} paired cells the test "
         "resolves effects far too small to act on; these arms prove it.",
         "",
         ("\n".join(f"- `{r['arm']}` ({r['axis']}): p = {r['pvalue']:.2e}, "

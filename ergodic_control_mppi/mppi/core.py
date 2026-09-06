@@ -176,7 +176,7 @@ def _flow_tracking_cost(
     """Compute the displacement/velocity flow cost for each rollout.
 
     Args:
-        flow: Stein flow at rollout evaluation states with shape ``(K, T, 2)``.
+        flow: Reference field -grad Phi at rollout evaluation states, shape ``(K, T, 2)``.
         displacements: Consecutive position changes with shape ``(K, T, 2)``.
         time_step: Dynamics integration step.
 
