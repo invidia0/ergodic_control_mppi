@@ -187,8 +187,9 @@ def lane_metrics(positions, velocities, arrays, config, stride, delta_t) -> dict
     outside = ((positions[:, 0] < limits_x[0]) | (positions[:, 0] > limits_x[1])
                | (positions[:, 1] < limits_y[0]) | (positions[:, 1] > limits_y[1]))
 
-    speed = np.linalg.norm(velocities[:, :2], axis=1)
-    jerk = np.diff(velocities[:, :2], n=2, axis=0) / delta_t ** 2
+    # `double_integrator.step` lays the state out as [x, y, vx, vy, yaw, yaw_rate].
+    speed = np.linalg.norm(velocities, axis=1)
+    jerk = np.diff(velocities, n=2, axis=0) / delta_t ** 2
     return {
         "error_final": float(result["error"][-1]),
         "weighted_gap": float(result["weighted_gap"]),
@@ -210,11 +211,13 @@ def lane_metrics(positions, velocities, arrays, config, stride, delta_t) -> dict
 
 
 def fly(params, initial, controls, keys, steps, patched: bool) -> tuple[np.ndarray, float]:
-    """Run every lane of one arm and return paths and the per-lane wall time.
+    """Run every lane of one arm and return paths and the wall time per control step.
 
-    Timed twice: the first call pays compilation, the second is the number the step budget
-    is judged on. Both arms are measured the same way at the same lane count, which is what
-    the comparison needs -- the batched branch is not the deployed one.
+    Timed twice: the first call pays compilation, the second is the measurement. The
+    reported number is one control step of the *batched* loop, which advances all lanes at
+    once and so amortizes launch latency across them -- it is the right quantity for the
+    arm-to-arm ratio and the wrong one for the 50 Hz budget, which :func:`time_single`
+    measures at the deployed shape of one lane.
     """
     original = single.mppi_step
     if patched:
@@ -235,7 +238,30 @@ def fly(params, initial, controls, keys, steps, patched: bool) -> tuple[np.ndarr
         wall = time.perf_counter() - started
     finally:
         single.mppi_step = original
-    return np.asarray(result.path), wall / keys.shape[0]
+    return np.asarray(result.path), wall / steps
+
+
+def time_single(params, initial, controls, key, steps: int, patched: bool) -> float:
+    """Seconds per control step for one lane -- the shape the 50 Hz budget is stated at.
+
+    The batched loop in :func:`fly` shares one launch across lanes, so its per-step number
+    is not what a deployed controller pays. Same two-call protocol: compile, then measure.
+    """
+    original = single.mppi_step
+    if patched:
+        single.mppi_step = witness_step
+    jax.clear_caches()
+    try:
+        runner = jax.jit(single.run_single, static_argnames=("steps", "preflight_steps"))
+        for _ in range(2):
+            started = time.perf_counter()
+            result = runner(params, initial, controls, key,
+                            steps=steps, preflight_steps=PREFLIGHT_STEPS)
+            jax.block_until_ready(result.path)
+            wall = time.perf_counter() - started
+    finally:
+        single.mppi_step = original
+    return wall / steps
 
 
 def calibrate(params, initial, controls, keys) -> None:
@@ -281,8 +307,11 @@ def report(field: list[dict], witness: list[dict], lanes, times: dict) -> bool:
               f"  {better}/{len(field)}")
     for name in ("obstacle_fraction", "outside_fraction", "max_speed"):
         print(f"{name:>18} {median(field, name):12.5g} {median(witness, name):12.5g}")
-    print(f"{'step_ms':>18} {times['field'] * 1e3:12.5g} {times['witness'] * 1e3:12.5g}"
+    print(f"{'step_ms_batched':>18} {times['field'] * 1e3:12.5g} {times['witness'] * 1e3:12.5g}"
           f" {(times['witness'] / times['field'] - 1) * 100:8.1f}%")
+    print(f"{'step_ms_1_lane':>18} {times['field_single'] * 1e3:12.5g}"
+          f" {times['witness_single'] * 1e3:12.5g}"
+          f" {(times['witness_single'] / times['field_single'] - 1) * 100:8.1f}%")
 
     improvement = 1.0 - median(witness, "error_final") / median(field, "error_final")
     agreement = sum(w["error_final"] < f["error_final"]
@@ -302,10 +331,10 @@ def report(field: list[dict], witness: list[dict], lanes, times: dict) -> bool:
         f"no coverage metric worse by > {GATE['max_coverage_regression']:.0%}": all(
             median(witness, name) <= median(field, name) * (1 + GATE["max_coverage_regression"])
             for name in COVERAGE),
-        f"median step <= {GATE['step_budget_ms']} ms":
-            times["witness"] * 1e3 <= GATE["step_budget_ms"],
+        f"1-lane step <= {GATE['step_budget_ms']} ms":
+            times["witness_single"] * 1e3 <= GATE["step_budget_ms"],
         f"step time regression <= {GATE['max_time_regression']:.0%}":
-            times["witness"] <= times["field"] * (1 + GATE["max_time_regression"]),
+            times["witness_single"] <= times["field_single"] * (1 + GATE["max_time_regression"]),
     }
     print()
     for name, ok in checks.items():
@@ -324,6 +353,8 @@ def main() -> None:
     parser.add_argument("--cells", type=int, default=3, help="maps, taken in manifest order")
     parser.add_argument("--seeds", type=int, default=2)
     parser.add_argument("--output", type=Path, default=Path("results/uav/witness_prototype.json"))
+    parser.add_argument("--timing-steps", type=int, default=2000,
+                        help="single-lane steps used for the real-time measurement")
     parser.add_argument("--calibrate", action="store_true")
     arguments = parser.parse_args()
 
@@ -355,10 +386,15 @@ def main() -> None:
             raise SystemExit(f"nonfinite trajectory on the {arm} arm")
         if arm == "witness" and np.array_equal(paths["field"], paths["witness"]):
             raise SystemExit("both arms flew the same path; the objective swap did not take")
-        print(f"[prototype] {arm}: {times[arm] * 1e3:.2f} ms/step/lane", flush=True)
+        times[f"{arm}_single"] = time_single(
+            jax.tree.map(lambda leaf: leaf[0], stacked), initial, controls, keys[0],
+            arguments.timing_steps, patched,
+        )
+        print(f"[prototype] {arm}: {times[arm] * 1e3:.2f} ms/batched step, "
+              f"{times[f'{arm}_single'] * 1e3:.2f} ms/step at one lane", flush=True)
         scores[arm] = [
             lane_metrics(np.asarray(paths[arm][row][:, :2], dtype=np.float64),
-                         np.asarray(paths[arm][row][:, 3:6], dtype=np.float64),
+                         np.asarray(paths[arm][row][:, 2:4], dtype=np.float64),
                          loaded[index][2], loaded[index][0], arguments.stride,
                          float(loaded[index][0].controller.model.delta_t))
             for row, (index, _) in enumerate(lanes)
