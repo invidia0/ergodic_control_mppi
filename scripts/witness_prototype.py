@@ -219,6 +219,10 @@ def fly(params, initial, controls, keys, steps, patched: bool) -> tuple[np.ndarr
     original = single.mppi_step
     if patched:
         single.mppi_step = witness_step
+    # `jax.jit` memoizes on the traced function object, not on what its globals resolve to,
+    # so without this the second arm silently reuses the first arm's compiled objective --
+    # and every metric comes out identical, which reads as "no effect" rather than as a bug.
+    jax.clear_caches()
     try:
         runner = jax.jit(single.run_batch, static_argnames=("steps", "preflight_steps"))
         result = runner(params, initial, controls, keys,
@@ -349,6 +353,8 @@ def main() -> None:
         paths[arm], times[arm] = fly(stacked, initial, controls, keys, arguments.steps, patched)
         if not np.isfinite(paths[arm]).all():
             raise SystemExit(f"nonfinite trajectory on the {arm} arm")
+        if arm == "witness" and np.array_equal(paths["field"], paths["witness"]):
+            raise SystemExit("both arms flew the same path; the objective swap did not take")
         print(f"[prototype] {arm}: {times[arm] * 1e3:.2f} ms/step/lane", flush=True)
         scores[arm] = [
             lane_metrics(np.asarray(paths[arm][row][:, :2], dtype=np.float64),
