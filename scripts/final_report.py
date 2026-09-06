@@ -112,6 +112,9 @@ def analyse(table, metric: str = "occupancy_mse") -> list[dict]:
         for index, significant in zip(indices, keep):
             records[index]["holm"] = bool(significant)
 
+    for record, significant in zip(records, rf.holm([r["pvalue"] for r in records])):
+        record["holm_campaign"] = bool(significant)
+
     for record in records:
         resolved = record["holm"] and record["sensitivity"] >= SENSITIVITY_FLOOR
         consistent = record["agreement"] >= map_agreement(record["maps_total"])

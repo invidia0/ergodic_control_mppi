@@ -92,7 +92,7 @@ class ArmTest(unittest.TestCase):
                 "screen_cap": 30, "screen_full_max": 30,
                 "approach_cap": 108, "approach_full_max": 108,
                 "holdout_cap": 108, "holdout_full_max": 108,
-                "sweep_cap": 444, "sweep_full_max": 444,
+                "sweep_cap": 468, "sweep_full_max": 468,
             },
         )
         approach = stage_arms("approach", "T500", "base")

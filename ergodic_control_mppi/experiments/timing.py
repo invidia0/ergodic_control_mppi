@@ -23,6 +23,7 @@ import argparse
 import copy
 import json
 import statistics
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -197,7 +198,7 @@ def measure_scaling(
     """
     sweeps = {
         "K": ("mppi.K", [125, 250, 500, 1000, 2000, 4000]),
-        "T": ("mppi.T", [50, 100, 200, 350, 500, 700]),
+        "T": ("mppi.T", [50, 100, 150, 200, 350, 500, 700]),
         "P": ("mppi.memory_length", [500, 1000, 2000, 3000, 4500, 6000]),
     }
     out: dict[str, list[dict[str, Any]]] = {}
@@ -225,36 +226,59 @@ def measure_scaling(
     return out
 
 
-def measure_endtoend(
-    config_path: str | Path = DEFAULT_CONFIG, device: str = "auto", steps: int = 2000
-) -> dict[str, Any]:
-    """Whole-loop ms/step with and without an effective memory term.
+def measure_endtoend(config_path: str | Path = DEFAULT_CONFIG, device: str = "auto",
+                     steps: int = 2000, repeats: int = 200) -> dict[str, Any]:
+    """Measure warmed synchronous controller calls, including transfer of the applied control.
 
-    ``memory_length=2`` keeps the code path but shrinks the KDE to nothing, so
-    the difference attributes the memory cost inside the real fused loop -- the
-    cross-check on the micro-benchmarks.
+    Args:
+        config_path: Frozen configuration for this session.
+        device: Requested execution device.
+        steps: Untimed warmup steps on each measured configuration.
+        repeats: Number of synchronized measured calls, excluding compilation.
     """
-    from ergodic_control_mppi.simulation import run_simulation
+    from ergodic_control_mppi.mppi.single import initialize_single, single_step
 
-    out: dict[str, Any] = {"steps": steps}
-    for label, overrides in (
-        ("with_memory", {"steps": steps}),
-        ("memory_length_2", {"steps": steps, "mppi.memory_length": 2}),
-    ):
+    out = {"warmup_steps": steps, "repeats": repeats,
+           "scope": "single_step plus host transfer of applied control; compilation excluded"}
+    for label, overrides in (("with_memory", {}), ("memory_length_2", {"mppi.memory_length": 2})):
         config = _loaded(config_path, overrides)
-        started = time.perf_counter()
-        result = run_simulation(config, device)
-        elapsed = time.perf_counter() - started
-        out[label] = {
-            "ms_per_step": 1000.0 * elapsed / steps,
-            "seconds": elapsed,
-            "P": int(config.controller.mppi.memory_length),
-            "device": result.device,
-        }
-    out["memory_term_ms_per_step"] = (
-        out["with_memory"]["ms_per_step"] - out["memory_length_2"]["ms_per_step"]
-    )
+        params, state, controls, key, _, _, selected = _setup(config, device)
+        carry = initialize_single(params, state, controls, key)
+        advance = jax.jit(single_step)
+
+        def synchronous_step():
+            nonlocal carry
+            carry, result = advance(params, carry)
+            return np.asarray(result.control)
+
+        measured = _time(synchronous_step, repeats=repeats, warmup=steps)
+        out[label] = {**measured, "ms_per_step": measured["ms_median"],
+                      "P": params.mppi.memory_length, "device": str(selected)}
     return out
+
+
+def power_state() -> dict:
+    """Record available mains, GPU, driver and power information without changing settings."""
+    result = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version,power.draw,power.limit,pstate,temperature.gpu,clocks.sm",
+                             "--format=csv,noheader"], capture_output=True, text=True, check=False)
+    return {"gpu": result.stdout.strip(), "gpu_query_status": result.returncode,
+            "mains": {str(p): p.read_text().strip()
+                      for p in Path("/sys/class/power_supply").glob("*/online")}}
+
+
+def _timing_output(output: Path, record: dict, overwrite: bool) -> tuple[Path, str]:
+    """Prepare a staged overwrite so a failed measurement preserves the last report."""
+    from ergodic_control_mppi.experiments.common import ensure_bundle
+
+    staged = output.with_name(f".{output.stem}.pending{output.suffix}") if overwrite else output
+    return staged, ensure_bundle(staged, record, overwrite)
+
+
+def _commit_timing_output(staged: Path, output: Path) -> None:
+    """Atomically publish a completed staged report and its manifest."""
+    if staged != output:
+        staged.replace(output)
+        staged.with_suffix(".manifest.json").replace(output.with_suffix(".manifest.json"))
 
 
 def main() -> None:
@@ -264,11 +288,29 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=200)
     parser.add_argument("--scaling", action="store_true", help="also sweep K, T, P, Q")
     parser.add_argument("--endtoend", action="store_true", help="also run the loop cross-check")
-    parser.add_argument("--steps", type=int, default=2000, help="steps for --endtoend")
+    parser.add_argument("--steps", type=int, default=20,
+                        help="untimed warmup calls before synchronized end-to-end timing")
     parser.add_argument("--output", type=Path, default=Path("results/campaign/timing/timing.json"))
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+    if min(args.repeats, args.steps) < 1:
+        parser.error("repeats and warmup steps must be positive")
+    from ergodic_control_mppi.experiments.common import execution_record, numerical_record
+    from ergodic_control_mppi.simulation import select_device
+
+    staged, digest = _timing_output(args.output, {
+        "controller": numerical_record(load_config(args.config).controller),
+        "execution": execution_record("ergodic_control_mppi/experiments/timing.py", str(select_device(args.device))),
+        "repeats": args.repeats, "warmup_steps": args.steps,
+        "scaling": args.scaling, "endtoend": args.endtoend,
+    }, args.overwrite)
+    if staged.exists():
+        print(f"already measured: {args.output}; use --overwrite for a new session")
+        return
+    power_before = power_state()
 
     report: dict[str, Any] = {
+        "bundle_hash": digest, "power_before": power_before,
         "stages": measure_stages(args.config, args.device, args.repeats)
     }
     breakdown = report["stages"]
@@ -281,14 +323,16 @@ def main() -> None:
 
     if args.scaling:
         print("\nscaling:")
-        report["scaling"] = measure_scaling(args.config, args.device, max(args.repeats // 3, 20))
+        report["scaling"] = measure_scaling(args.config, args.device, args.repeats)
     if args.endtoend:
         print("\nend-to-end cross-check:")
-        report["endtoend"] = measure_endtoend(args.config, args.device, args.steps)
+        report["endtoend"] = measure_endtoend(args.config, args.device, args.steps, args.repeats)
         print(json.dumps(report["endtoend"], indent=2))
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report["power_after"] = power_state()
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _commit_timing_output(staged, args.output)
     print(f"\nwrote {args.output}")
 
 

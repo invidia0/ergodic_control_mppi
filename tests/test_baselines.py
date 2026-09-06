@@ -6,6 +6,7 @@ written. They are cheap and they are the reason a "we win" row can be believed.
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -321,6 +322,14 @@ def _profile():
     return load_config("configs/uav_profile.yaml")
 
 
+class SeedArgumentTest(unittest.TestCase):
+    def test_a_bare_seed_count_is_rejected(self):
+        with patch("sys.argv", ["baselines", "--seeds", "6"]), self.assertRaisesRegex(
+            SystemExit, "comma-separated list, not a count"
+        ):
+            baselines.main()
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -348,24 +357,15 @@ class IncrementalWriteTest(unittest.TestCase):
         self.assertEqual(len(written), 2)
         self.assertEqual({int(r["seed"]) for r in written}, {43, 44})
 
-    def test_a_new_column_rewrites_rather_than_misaligns(self):
-        """`score_run` can return a wider key set for one method than another.
-
-        A plain append would then write values under the wrong headers, which is worse
-        than useless because it looks like data.
-        """
-        import csv
+    def test_a_new_column_is_refused_without_mutating_existing_rows(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory) / "rows.csv"
             rows = [self._row("hedac", "open", 43)]
             baselines._append_row(out, rows[0], rows)
+            before = out.read_bytes()
             rows.append(self._row("ours", "open", 43, ess_settled_median=0.5))
-            baselines._append_row(out, rows[1], rows)
-            with out.open(encoding="utf-8", newline="") as stream:
-                written = list(csv.DictReader(stream))
-        self.assertEqual(len(written), 2)
-        self.assertIn("ess_settled_median", written[0])
-        self.assertEqual(written[1]["ess_settled_median"], "0.5")
-        self.assertEqual(written[1]["method"], "ours")
+            with self.assertRaisesRegex(ValueError, "stale header"):
+                baselines._append_row(out, rows[1], rows)
+            self.assertEqual(out.read_bytes(), before)

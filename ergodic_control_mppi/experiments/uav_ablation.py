@@ -119,10 +119,12 @@ ARMS: list[tuple[str, str, Any, dict]] = [
 
     # ------------------------------------------------------------------ MPPI axes
     # Horizon reach is L = reference_speed * T * dt, and at the achieved speed the shipped
-    # T = 350 plans 3.2 m ahead against a 15.6 m hop. T is swept as a proxy for L.
-    ("T_150", "T", 150, {"T": 150}),
+    # T = 150 is the selected profile. The alternatives characterize local sensitivity.
+    ("T_75", "T", 75, {"T": 75}),
+    ("T_100", "T", 100, {"T": 100}),
+    ("T_250", "T", 250, {"T": 250}),
+    ("T_350", "T", 350, {"T": 350}),
     ("T_500", "T", 500, {"T": 500}),
-    ("T_750", "T", 750, {"T": 750}),
     # Rollout count. More samples average more divergent directions into one update, so K
     # trades decisiveness for smoothness.
     ("K_125", "K", 125, {"K": 125}),
@@ -143,7 +145,7 @@ ARMS: list[tuple[str, str, Any, dict]] = [
     # to its previous solution, which is the regime a long dwell lives in.
     ("explore_0", "exploration", 0.0, {"exploration": 0.0}),
     ("lam_max_1e4", "lam_max", 1e4, {"lam_max": 1e4}),
-    # gamma_track, the weight on the cost that makes a rollout follow -grad Phi. Named for
+    # gamma_track, the weight on the cost that makes a rollout follow +grad Phi. Named for
     # the parameter and not for `flow_weight`, the config key it used to have: an arm called
     # `flow_*` in a campaign whose whole point is that the Stein flow was removed reads as a
     # survivor of it. Nothing Stein-era is swept here -- `config.py` raises on every
@@ -167,7 +169,7 @@ ARMS: list[tuple[str, str, Any, dict]] = [
 # diagnostics for hypotheses that have since closed, and the port dropped them rather than
 # spending cells restating dead questions.
 #
-# 22 mechanism arms and 16 MPPI arms against one baseline. The three necessity rows are
+# 22 mechanism arms and 17 MPPI arms against one baseline. The three necessity rows are
 # `memory_off`, `plan_off` and `release_off` -- one per term of Phi that the argument claims
 # is load-bearing -- and the two `ceiling_*` arms are the pre-registered null.
 FINAL_ARMS = tuple(name for name, *_ in ARMS)
@@ -232,10 +234,13 @@ def _apply(config, overrides: dict):
         field = replace(
             field, service_decay=float(np.exp(-delta_t / overrides.pop("service_time")))
         )
+    # Cast: both are array shapes. The ARMS table passes ints, but a caller that parses
+    # levels from text (scripts/mechanism_captures.py) hands over floats, and a float here
+    # reaches jnp.zeros as a shape and fails somewhere far from the cause.
     if "T" in overrides:
-        mppi = replace(mppi, horizon=overrides.pop("T"))
+        mppi = replace(mppi, horizon=int(overrides.pop("T")))
     if "K" in overrides:
-        mppi = replace(mppi, samples=overrides.pop("K"))
+        mppi = replace(mppi, samples=int(overrides.pop("K")))
     if "exploration" in overrides:
         mppi = replace(mppi, exploration=overrides.pop("exploration"))
     # Whatever is left names a FieldParams field directly; an unknown key raises here

@@ -47,6 +47,8 @@ def capture(config_path: str, overrides: dict, seed: int, steps: int, stride: in
     from ergodic_control_mppi.mppi.single import initialize_single, single_step
     from ergodic_control_mppi.simulation import controller_key
 
+    if min(steps, stride, freeze) < 1 or freeze > steps:
+        raise ValueError("require positive steps/stride and 1 <= freeze <= steps")
     config = _apply(load_config(config_path), overrides)
     config = replace(config, run=replace(config.run, steps=steps, seed=seed))
     scenario = _open_scenario(config)
@@ -73,9 +75,12 @@ def capture(config_path: str, overrides: dict, seed: int, steps: int, stride: in
     # The plan the controller would repel from at this step, built exactly as
     # `reference_flow` builds it.
     _, result = jax.jit(single_step)(params, carry)
-    plan = np.asarray(result.surrogate)
+    plan = np.concatenate((np.asarray(carry.state[None, :2]),
+                           np.asarray(result.surrogate[:-1])), axis=0)
     frozen = {
         "plan": plan,
+        "position": np.asarray(carry.state[:2]),
+        "optimal_trajectory": np.asarray(result.optimal_trajectory),
         "memory": np.asarray(carry.memory),
         "service_mass": np.asarray(carry.service_mass),
         "freeze_step": np.asarray(frozen_at),
@@ -131,16 +136,41 @@ def main() -> None:
                         help="Steps between recorded service-mass samples")
     parser.add_argument("--freeze", type=int, default=DEFAULT_FREEZE,
                         help="Step the plan and memory buffer are frozen at")
+    parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args()
 
     arguments.out.mkdir(parents=True, exist_ok=True)
     written = []
     for text in arguments.levels.split(","):
         level = _level(text.strip())
+        from ergodic_control_mppi.config import load_config
+        from ergodic_control_mppi.experiments.uav_ablation import _apply
+        from ergodic_control_mppi.experiments.common import (
+            artifact_digests, ensure_bundle, execution_record, numerical_record,
+        )
+        from ergodic_control_mppi.simulation import select_device
+
+        path = arguments.out / f"{arguments.axis}_{text.strip()}_s{arguments.seed}.npz"
+        digest = ensure_bundle(path, {
+            "controller": numerical_record(_apply(load_config(arguments.config),
+                                      {arguments.axis: level}).controller),
+            "seed": arguments.seed, "steps": arguments.steps, "stride": arguments.stride,
+            "freeze": arguments.freeze,
+            "execution": execution_record("scripts/mechanism_captures.py", str(select_device("auto"))),
+        }, arguments.overwrite)
+        if path.exists():
+            receipt = path.with_suffix(".artifacts.json")
+            if not receipt.exists() or json.loads(receipt.read_text()) != artifact_digests([path]):
+                raise ValueError(f"{path}: capture changed or incomplete")
+            written.append(str(path))
+            continue
         data = capture(arguments.config, {arguments.axis: level}, arguments.seed,
                        arguments.steps, arguments.stride, arguments.freeze)
-        path = arguments.out / f"{arguments.axis}_{text.strip()}_s{arguments.seed}.npz"
-        np.savez_compressed(path, **data)
+        if not np.isfinite(data["positions"]).all():
+            raise ValueError("nonfinite mechanism capture")
+        np.savez_compressed(path, **data, bundle_hash=digest)
+        path.with_suffix(".artifacts.json").write_text(
+            json.dumps(artifact_digests([path]), indent=2) + "\n")
         written.append(str(path))
         print(f"wrote {path}: {len(data['positions'])} steps", flush=True)
     index = arguments.out / f"{arguments.axis}_index.json"

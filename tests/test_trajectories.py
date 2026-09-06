@@ -4,8 +4,15 @@ If these drift apart the figures stop illustrating the reported statistic, which
 one thing this module exists to guarantee.
 """
 import numpy as np
+import tempfile
+import unittest
+from unittest.mock import patch
 
-from ergodic_control_mppi.plotting.trajectories import _ellipse_points, panel_grid
+from ergodic_control_mppi.plotting.trajectories import (
+    _ellipse_points,
+    figure_service_gate,
+    panel_grid,
+)
 
 
 def test_ellipse_is_two_sigma_mahalanobis():
@@ -34,3 +41,24 @@ def test_panel_grid_writes_a_file(tmp_path):
     }
     out = panel_grid([capture, capture], tmp_path / "panels.pdf")
     assert out.exists() and out.stat().st_size > 0
+
+
+class ServiceGateFigureTest(unittest.TestCase):
+    def test_series_uses_deployed_release_ratio(self):
+        captures = [
+            {
+                "positions": np.zeros((2, 2)),
+                "means": np.zeros((1, 2)),
+                "covariances": np.eye(2)[None],
+                "limits": np.array([-1.0, 1.0, -1.0, 1.0]),
+                "release_ratio": np.asarray(value),
+            }
+            for value in (0.0, 1.5, 2.24, 3.0)
+        ]
+        series = (np.arange(2), np.ones((2, 1)), np.zeros((2, 1)))
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "ergodic_control_mppi.plotting.trajectories.service_series",
+            return_value=series,
+        ) as mocked:
+            figure_service_gate(captures, f"{directory}/service.png")
+        self.assertEqual(float(mocked.call_args.args[0]["release_ratio"]), 2.24)

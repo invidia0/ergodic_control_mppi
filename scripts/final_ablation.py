@@ -1,22 +1,9 @@
-"""The final ablation campaign: 38 arms x 6 maps x 3 densities x 6 seeds, one branch.
+"""T150 ablation: 39 alternatives and one profile on six maps and six paired seeds.
 
-Two conclusions in this project were drawn from a single map and both failed when a third
-was added, each measured on map 516, which turned out to be anomalous on both axes. So
-every arm here is measured on six maps spanning three obstacle densities, and the promotion
-gate is a *consistency* gate: same sign on at least 4 of 6 maps, not merely a small pooled
-p-value.
-
-All six maps share one grid shape and one start state, so a single ``run_batch`` call holds
-an entire arm across every map and seed. That is what makes 1 368 cells a six-hour run.
-
-**Fixed lane count is load-bearing.** Batched execution is a different numerical branch than
-sequential, and changing the lane count changes the branch again. Comparing an arm in one
-call against the baseline in another is only valid if a fixed width with different
-companions is bit-identical -- verify with ``--verify-branch`` before spending the night.
-
-    uv run python scripts/final_ablation.py maps      # build the campaign map manifest
-    uv run python scripts/final_ablation.py verify    # the lane-count invariance gate
-    uv run python scripts/final_ablation.py run       # the campaign, resumable
+The K axis and its own profile use batch9; other clutter groups use batch36.
+Open mechanisms use one map and twelve seeds at batch12. Companion invariance must
+be checked at each width before running a comparison. Outputs resume only with a
+matching resolved-input/source/environment manifest.
 """
 
 import argparse
@@ -31,6 +18,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ergodic_control_mppi.experiments.common import (
+    ensure_bundle, execution_record, fingerprint, numerical_record, verified_rows,
+)
 from ergodic_control_mppi.experiments.uav_ablation import (
     _BY_NAME,
     FINAL_ARMS,
@@ -56,6 +46,7 @@ FIELDS = [
     "mode_dwell_median_s", "in_mode_fraction", "occupancy_mse", "fourier_ergodic",
     "collisions", "min_clearance_m", "path_length_m", "wall_seconds",
     "device", "hardware", "execution", "lanes", "jax_version",
+    "config_hash", "bundle_hash",
 ]
 
 MAP_MANIFEST = Path("results/uav/campaign_maps.json")
@@ -248,7 +239,7 @@ def groups(maps: list[dict], seeds: range, arms=FINAL_ARMS):
                    lanes[index:index + width])
 
 
-def identity(lane, steps: int, hardware: str, execution: str) -> tuple:
+def identity(lane, steps: int, hardware: str, execution: str, config_hash: str = "") -> tuple:
     """Resume key for one cell. Branch selectors are part of it, not metadata.
 
     ``obs_num`` is in the key because a map seed is **not** unique across densities: all
@@ -259,7 +250,7 @@ def identity(lane, steps: int, hardware: str, execution: str) -> tuple:
     """
     entry, arm, seed = lane
     return (arm, str(entry["obs_num"]), str(entry["map_seed"]), str(seed), str(steps),
-            hardware, execution)
+            hardware, execution, config_hash)
 
 
 # --------------------------------------------------------------------------- running
@@ -312,6 +303,8 @@ def run_group(label: str, execution: str, lanes: list, cache: dict, arguments) -
     jax.block_until_ready(result.path)
     wall = time.perf_counter() - started
     paths = np.asarray(result.path)
+    if not np.isfinite(paths).all():
+        raise ValueError(f"[{label}] nonfinite trajectory")
     ess = np.asarray(result.ess_fraction)
     temperatures = np.asarray(result.temperature)
     print(f"[{label}] {wall:.0f}s total, {wall / len(lanes):.1f}s per cell", flush=True)
@@ -329,6 +322,8 @@ def run_group(label: str, execution: str, lanes: list, cache: dict, arguments) -
         controller = lane_configs[index].controller
         row.update({
             "arm": arm, "axis": axis, "value": value,
+            "config_hash": arguments.config_hashes[(entry["obs_num"], entry["map_seed"], arm)],
+            "bundle_hash": arguments.bundle_hash,
             "map_seed": entry["map_seed"], "obs_num": entry["obs_num"],
             # Read back from the realised config, not the override dict, so a lane that did
             # not set an axis records what it actually ran with rather than a blank.
@@ -375,14 +370,8 @@ def append_rows(output: Path, rows: list[dict]) -> None:
 
 def completed(output: Path) -> set:
     """Identities already in the archive."""
-    if not output.exists():
-        return set()
-    with output.open(encoding="utf-8", newline="") as stream:
-        return {
-            (r["arm"], r["obs_num"], r["map_seed"], r["seed"], r["steps"], r["hardware"],
-             r["execution"])
-            for r in csv.DictReader(stream)
-        }
+    columns = ("arm", "obs_num", "map_seed", "seed", "steps", "hardware", "execution", "config_hash")
+    return {tuple(row[k] for k in columns) for row in verified_rows(output, columns)}
 
 
 def verify_branch(maps: list[dict], arguments) -> bool:
@@ -399,13 +388,15 @@ def verify_branch(maps: list[dict], arguments) -> bool:
     # differently, so a gate passed at 8 says nothing about 108 -- and 108 is what the
     # comparison rests on.
     width = arguments.verify_lanes or (len(maps) * arguments.seeds)
+    if width < 2:
+        raise ValueError("branch verification requires at least two lanes")
     half = width // 2
     shared = [(entry, "baseline", seed) for seed in range(43, 43 + half)]
     # Two companions that differ in a traced leaf only, so the static signature -- and
     # therefore the lowering -- is the same in both calls. If the shared half still moves,
     # it moved because of its neighbours' *values*, which is exactly what the gate asks.
-    first = shared + [(entry, "gain_30", seed) for seed in range(43, 43 + half)]
-    second = shared + [(entry, "gain_120", seed) for seed in range(43, 43 + half)]
+    first = shared + [(entry, "gain_30", seed) for seed in range(43, 43 + width - half)]
+    second = shared + [(entry, "gain_120", seed) for seed in range(43, 43 + width - half)]
 
     outputs = []
     for label, lanes in (("A", first), ("B", second)):
@@ -426,7 +417,7 @@ def verify_branch(maps: list[dict], arguments) -> bool:
         outputs.append(np.asarray(result.path)[:half])
         print(f"  branch {label}: {len(lanes)} lanes done", flush=True)
 
-    identical = np.array_equal(outputs[0], outputs[1])
+    identical = bool(np.isfinite(outputs).all() and np.array_equal(outputs[0], outputs[1]))
     if identical:
         print("GATE PASS: shared lanes are bit-identical across different companions.")
         print("           One group per arm at a fixed width is valid.")
@@ -436,6 +427,12 @@ def verify_branch(maps: list[dict], arguments) -> bool:
         print(f"           max |delta| = {delta.max():.3e}, "
               f"first differing step = {int(np.argmax(delta.max(axis=(0, 2)) > 0))}")
         print("           Fall back to grouping each axis with its own baseline.")
+    if getattr(arguments, "output", None) is not None:
+        report = {"passed": identical, "width": width, "steps": arguments.steps,
+                  "config": numerical_record(configs[0].controller), "maps": maps,
+                  "execution": execution_record("scripts/final_ablation.py", str(device))}
+        ensure_bundle(arguments.output, report, getattr(arguments, "overwrite", False))
+        arguments.output.write_text(json.dumps(report, indent=2) + "\n")
     return identical
 
 
@@ -460,7 +457,10 @@ def main() -> None:
                              "width from the map manifest, which is what it must match.")
     parser.add_argument("--stop-file", type=Path, default=STOP_FILE,
                         help="Touch this to finish the current group and exit cleanly.")
+    parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args()
+    if min(arguments.steps, arguments.seeds) < 1:
+        parser.error("steps and seeds must be positive")
     seeds = range(arguments.first_seed, arguments.first_seed + arguments.seeds)
 
     if arguments.action == "maps":
@@ -475,6 +475,8 @@ def main() -> None:
 
     maps = load_maps(arguments.maps)
     if arguments.action == "verify":
+        if arguments.output == DEFAULT_OUTPUT:
+            parser.error("verify requires an explicit --output JSON path")
         raise SystemExit(0 if verify_branch(maps, arguments) else 1)
 
     wanted = tuple(filter(None, arguments.arms.split(","))) or FINAL_ARMS
@@ -483,17 +485,42 @@ def main() -> None:
         cells = sum(len(lanes) for _, _, lanes in all_groups)
         print(f"{len(all_groups)} groups, {cells} cells, {len(maps)} maps, "
               f"{len(seeds)} seeds, {arguments.steps} steps")
-        print(f"at 13 s/cell that is {cells * 13 / 3600:.1f} h")
         return
 
-    done = completed(arguments.output)
     cache: dict = {}
+    inputs = {}
+    arguments.config_hashes = {}
+    for _, _, lanes in all_groups:
+        for entry, arm, _ in lanes:
+            key = (entry["obs_num"], entry["map_seed"], arm)
+            if key in arguments.config_hashes:
+                continue
+            base, manifest, arrays = _configs(cache, entry, arguments.config)
+            config = _apply(base, dict(_BY_NAME[arm][2]) if arm != "baseline" else {})
+            record = numerical_record({"controller": config.controller, "arrays": arrays,
+                                       "scoring": manifest, "steps": arguments.steps})
+            arguments.config_hashes[key] = fingerprint(record)
+            inputs[arguments.config_hashes[key]] = record
+    arguments.bundle_hash = ensure_bundle(arguments.output, {
+        "execution": execution_record("scripts/final_ablation.py", str(select_device(arguments.device))),
+        "configurations": inputs, "maps": maps, "seeds": list(seeds),
+        "groups": [(label, execution) for label, execution, _ in all_groups],
+    }, arguments.overwrite)
+    done = completed(arguments.output)
     for label, execution, lanes in all_groups:
         if arguments.stop_file.exists():
             print(f"stop file {arguments.stop_file} present -- exiting cleanly", flush=True)
             break
-        keys = [identity(lane, arguments.steps, arguments.hardware, execution)
-                for lane in lanes]
+        keys = [
+            identity(
+                lane,
+                arguments.steps,
+                arguments.hardware,
+                execution,
+                arguments.config_hashes[(lane[0]["obs_num"], lane[0]["map_seed"], lane[1])],
+            )
+            for lane in lanes
+        ]
         present = [key in done for key in keys]
         if all(present):
             print(f"SKIP [{label}] {len(lanes)} lanes already complete", flush=True)
@@ -504,6 +531,11 @@ def main() -> None:
                 "group must be whole -- delete its rows and re-run the group."
             )
         rows = run_group(label, execution, lanes, cache, arguments)
+        if any(not np.isfinite(float(r["occupancy_mse"])) or
+               not np.isfinite(float(r["fourier_ergodic"])) for r in rows):
+            raise ValueError(f"[{label}] nonfinite coverage output")
+        if any(r["arm"] == "baseline" and int(r["collisions"]) for r in rows):
+            raise ValueError(f"[{label}] adopted profile collided; campaign stopped")
         append_rows(arguments.output, rows)
         done.update(keys)
     print("campaign driver done", flush=True)

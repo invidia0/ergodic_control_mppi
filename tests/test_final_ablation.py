@@ -64,7 +64,7 @@ class ArmTableTest(unittest.TestCase):
             self.assertNotIn(gone, FINAL_ARMS)
 
     def test_campaign_size_matches_the_registered_design(self):
-        self.assertEqual(len(FINAL_ARMS), 38)
+        self.assertEqual(len(FINAL_ARMS), 40)
 
     def test_the_three_necessity_rows_are_present(self):
         """One per term of Phi the mechanism argument claims is load-bearing."""
@@ -121,7 +121,7 @@ class GroupingTest(unittest.TestCase):
 
     def test_total_cell_count(self):
         # 38 arms x 36, plus the 36-cell baseline replicate the K quarantine needs.
-        self.assertEqual(sum(len(lanes) for _, _, lanes in self.groups), 38 * 36 + 36)
+        self.assertEqual(sum(len(lanes) for _, _, lanes in self.groups), 40 * 36 + 36)
 
 
 class IdentityTest(unittest.TestCase):
@@ -195,9 +195,15 @@ class AppendRowsTest(unittest.TestCase):
     def test_group_is_written_whole_and_reread(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "final.csv"
+            from ergodic_control_mppi.experiments.common import ensure_bundle
+            bundle_hash = ensure_bundle(output, {"test": True})
             rows = [self._row(seed=s) for s in range(43, 55)]
+            for row in rows:
+                row.update(bundle_hash=bundle_hash, config_hash="test")
             final_ablation.append_rows(output, rows)
-            final_ablation.append_rows(output, [self._row(arm="plan_3", seed=43)])
+            extra = self._row(arm="plan_3", seed=43)
+            extra.update(bundle_hash=bundle_hash, config_hash="test")
+            final_ablation.append_rows(output, [extra])
             with output.open(encoding="utf-8", newline="") as stream:
                 written = list(csv.DictReader(stream))
             self.assertEqual(len(written), 13)
@@ -390,6 +396,16 @@ class SensitivityMathTest(unittest.TestCase):
         self.assertLess(bands["fourier_ergodic"], 0.5)
         self.assertLess(joint, 0.5)
 
+    def test_bit_identical_arm_has_zero_joint_sensitivity(self):
+        table = self._table({"same": 0.0})
+        table["same"] = {cell: dict(row) for cell, row in table["baseline@108"].items()}
+        bands, joint = self.rf.sensitivity(table, "same")
+        self.assertEqual(joint, 0.0)
+        self.assertTrue(all(value == 0.0 for value in bands.values()))
+
+    def test_holm_does_not_reject_a_nan_pvalue(self):
+        self.assertEqual(self.rf.holm([float("nan"), 0.001]), [False, True])
+
     def test_standardised_effect_matches_hand_calculation(self):
         table = self._table({"shifted": 0.4})
         arm, base, _ = self.rf.paired_final(table, "shifted", "fourier_ergodic", "log")
@@ -476,6 +492,10 @@ class SensitivityMathTest(unittest.TestCase):
         # Why the reference exists at all: paired against itself the baseline is exactly
         # zero on every cell, so under the default reference it cannot be drawn as a column.
         table = self._table({"a": 0.3, "b": -0.3})
+        table["baseline@27"] = {
+            cell: {**row, "lanes": "27"}
+            for cell, row in table["baseline@108"].items()
+        }
         arm, base, _ = self.rf.paired_final(table, "baseline@108", "fourier_ergodic")
         self.assertTrue(np.array_equal(arm, base))
 
@@ -575,26 +595,16 @@ class StepBudgetTest(unittest.TestCase):
             "residual_ms": total - accounted,
         }}
 
-    def _wedges(self, total: float):
+    def test_table_keeps_fused_total_separate_from_stage_sum(self):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "timing.json"
-            report.write_text(json.dumps(self._report(total)), encoding="utf-8")
-            with unittest.mock.patch.object(self.rf, "save",
-                                            lambda figure, path: (figure, Path(path))):
-                figure, _ = self.rf.fig_step_budget(report, Path(directory) / "f.png")
-            import matplotlib.patches
-            return [w.theta2 - w.theta1 for w in figure.axes[0].patches
-                    if isinstance(w, matplotlib.patches.Wedge)]
-
-    def test_negative_residual_draws_no_extra_wedge(self):
-        # Fused cheaper than the sum of its parts: five stages, five wedges, no sixth.
-        angles = self._wedges(4.5)
-        self.assertEqual(len(angles), 5)
-        self.assertTrue(all(a > 0 for a in angles))
-        self.assertAlmostEqual(sum(angles), 360.0, places=3)
-
-    def test_positive_residual_becomes_its_own_wedge(self):
-        # Real unattributed overhead is drawn, not folded into a stage that did not spend it.
-        angles = self._wedges(5.5)
-        self.assertEqual(len(angles), 6)
-        self.assertAlmostEqual(sum(angles), 360.0, places=3)
+            data = self._report(4.5)
+            data["endtoend"] = {"with_memory": {"ms_per_step": 6.2}}
+            report.write_text(json.dumps(data))
+            with unittest.mock.patch.object(self.rf, "save", lambda figure, path: figure):
+                figure = self.rf.fig_step_budget(report, Path(directory) / "f.pdf")
+            values = [cell.get_text().get_text()
+                      for cell in figure.axes[0].tables[0].get_celld().values()]
+            self.assertIn("4.500", values)
+            self.assertIn("6.200", values)
+            self.assertIn("Fused MPPI step", values)

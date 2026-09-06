@@ -422,6 +422,10 @@ def _fmec_velocity(state_xy, coverage, target, ctx, cfg, x_edges, y_edges, *, pi
     return cfg.fmec_gain * np.stack([grad_x[row, column], grad_y[row, column]], axis=1)
 
 
+from ergodic_control_mppi.experiments.common import (
+    ensure_bundle, execution_record, fingerprint, numerical_record, verified_rows,
+)
+
 # ------------------------------------------------------------------------------ config
 
 
@@ -465,8 +469,8 @@ class BaselineConfig:
         # must err in. 4.0 m fails outright at 0/3.
         self.hedac_sensor = 1.0
         # SVES
-        # Matched to our own controller's planning horizon (T = 350) so the
-        # comparison is not won on lookahead. 16 particles over 350 steps costs
+        # Retained SVES horizon, 350; the T150 controller uses a shorter horizon.
+        # 16 particles over 350 steps costs
         # about the same wall time as 8 over 40 -- the rollout is vmapped.
         self.sves_particles = 16
         self.sves_horizon = 350
@@ -525,20 +529,20 @@ class BaselineConfig:
                            "sves_init"),
     }
 
-    def fingerprint_for(self, method: str) -> str:
-        """Hash of only the settings ``method`` reads.
+    def fingerprint_for(self, method: str, config, arrays, scoring: dict) -> str:
+        """Hash method-specific control inputs and the shared resolved world and scorer.
 
-        A whole-config hash is too coarse: retuning ``hedac_sensor`` would mark every SMC
-        row stale and re-fly 96 cells that could not possibly have changed. That is not
-        hypothetical -- it happened once already, between stamping the surviving rows and
-        settling the last parameter.
+        A horizon change affects ours only. Geometry, dynamics, target, initial state,
+        scoring and requested length affect every method that consumes them.
         """
-        import hashlib
-
-        settings = self.as_dict()
-        keys = self.DEPENDS_ON.get(method, tuple(k for k in settings if k != "steps"))
-        payload = json.dumps({k: settings[k] for k in keys}, sort_keys=True, default=str)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+        if method not in self.DEPENDS_ON:
+            raise ValueError(f"unknown method {method!r}")
+        params = config.controller
+        shared = {"model": params.model, "gmm": params.gmm, "workspace": params.workspace,
+                  "arrays": arrays, "scoring": scoring, "steps": self.steps}
+        controller = (params if method == "ours" else
+                      {k: getattr(self, k) for k in self.DEPENDS_ON[method]})
+        return fingerprint({"shared": shared, "controller": controller})
 
     def fingerprint(self) -> str:
         """Short hash of every setting, stamped on each row.
@@ -872,7 +876,7 @@ def _open_arrays(scenario: Scenario, resolution: float = 0.15) -> dict:
 
 
 def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
-             maps_path: Path, output: Path | None = None) -> list[dict]:
+             maps_path: Path, output: Path | None = None, *, overwrite: bool = False) -> list[dict]:
     """Fly every (method, map, seed) cell of one tier and score it like a campaign row.
 
     Rows are appended to ``output`` as they finish, not collected and written at the
@@ -892,25 +896,6 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
     # whole reason the column exists.
     device = str(jax.devices()[0])
     rows: list[dict] = []
-    done: set[tuple[str, str, int]] = set()
-    fingerprints = {m: cfg.fingerprint_for(m) for m in METHODS}
-    if output is not None and output.exists():
-        stale = 0
-        with output.open(encoding="utf-8", newline="") as stream:
-            for existing in csv.DictReader(stream):
-                # Only a row flown under *these* settings is kept. Rows from other settings
-                # are dropped rather than carried forward, so the output file is always the
-                # product of a single harness: keeping them would leave two rows for the
-                # same cell and let load order decide which one the paper reports.
-                if existing.get("config_hash") == fingerprints.get(existing["method"]):
-                    rows.append(existing)
-                    done.add((existing["method"], existing["map"], int(existing["seed"])))
-                else:
-                    stale += 1
-        print(f"resuming: {len(done)} cells match their method's settings"
-              + (f", {stale} rows from other settings dropped and re-flown" if stale else ""),
-              flush=True)
-
     if tier == "open":
         config = load_config(config_path)
         scenario = _open_scenario(config)
@@ -926,6 +911,27 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
             cells.append((scenario.name, entry["obs_num"], config, scenario, arrays,
                           manifest))
 
+    fingerprints = {(method, name): cfg.fingerprint_for(method, config, arrays, manifest)
+                    for name, _, config, _, arrays, manifest in cells for method in METHODS}
+    record = {
+        "execution": execution_record("ergodic_control_mppi/experiments/baselines.py", device),
+        "tier": tier, "steps": cfg.steps, "seeds": list(seeds),
+        "settings": cfg.as_dict(),
+        "cells": [{"name": name, "controller": numerical_record(config.controller),
+                   "arrays": numerical_record(arrays), "scoring": manifest,
+                   "method_hashes": {m: fingerprints[m, name] for m in METHODS}}
+                  for name, _, config, _, arrays, manifest in cells],
+    }
+    bundle_hash = ensure_bundle(output, record, overwrite) if output is not None else fingerprint(record)
+    columns = ("method", "map", "seed", "steps", "config_hash")
+    rows = verified_rows(output, columns) if output is not None else []
+    for row in rows:
+        if (row["config_hash"] != fingerprints.get((row["method"], row["map"]))
+                or int(row["steps"]) != cfg.steps):
+            raise ValueError(f"{output}: incompatible method inputs; use a fresh path or --overwrite")
+    done = {(r["method"], r["map"], int(r["seed"]), int(r["steps"]), r["config_hash"])
+            for r in rows}
+
     for name, obs_num, config, scenario, arrays, manifest in cells:
         occupancy = None if tier == "open" else np.asarray(arrays["occupancy"]).astype(bool)
         origin = tuple(map(float, np.asarray(arrays["grid_origin"])))
@@ -933,7 +939,7 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
         state0 = np.asarray(arrays["initial_state"], dtype=np.float64)
         for method in methods:
             for seed in seeds:
-                if (method, name, seed) in done:
+                if (method, name, seed, cfg.steps, fingerprints[method, name]) in done:
                     continue
                 started = time.perf_counter()
                 path = run_method(method, scenario, seed_state(state0, scenario, seed),
@@ -957,8 +963,15 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
                     # given an obstacle term they do not publish.
                     "added_avoidance": int(tier == "clutter"
                                            and method not in NATIVE_OBSTACLES),
-                    "config_hash": fingerprints[method],
+                    "config_hash": fingerprints[method, name],
+                    "bundle_hash": bundle_hash,
+                    "effective_horizon": (config.controller.mppi.horizon if method == "ours"
+                                          else cfg.sves_horizon if method == "sves" else 0),
                 })
+                if not np.isfinite(path).all():
+                    raise ValueError(f"{method}/{name}/{seed}: nonfinite trajectory")
+                if method == "ours" and int(row["collisions"]):
+                    raise ValueError(f"ours/{name}/{seed}: collision; stopped")
                 rows.append(row)
                 if output is not None:
                     _append_row(output, row, rows)
@@ -968,11 +981,11 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
 
 
 def _append_row(output: Path, row: dict, rows: list[dict]) -> None:
-    """Append one scored cell, rewriting the header if a new column has appeared.
+    """Append one scored cell, refusing a changed header.
 
     `score_run` can return a different key set for a method that reports something the
     others do not, and a plain append would then silently misalign the columns. Cheap
-    insurance: when the field set grows, the whole file is rewritten once.
+    a changed field set requires a fresh output or explicit overwrite.
     """
     fields = sorted({k for existing in rows for k in existing})
     header_ok = False
@@ -981,7 +994,9 @@ def _append_row(output: Path, row: dict, rows: list[dict]) -> None:
             header = next(csv.reader(stream), [])
         header_ok = header == fields
     output.parent.mkdir(parents=True, exist_ok=True)
-    if not header_ok:
+    if output.exists() and not header_ok:
+        raise ValueError(f"{output}: stale header; use a fresh path or --overwrite")
+    if not output.exists():
         with output.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
@@ -1005,7 +1020,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("results/uav/baselines.csv"))
     parser.add_argument("--check-only", action="store_true",
                         help="run the open-field fidelity gate and exit")
+    parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args()
+    if arguments.steps < 1:
+        parser.error("steps must be positive")
 
     cfg = BaselineConfig(steps=arguments.steps)
     methods = [m.strip() for m in arguments.methods.split(",")]
@@ -1022,6 +1040,14 @@ def main() -> None:
 
     from ergodic_control_mppi.config import load_config
 
+    import jax
+
+    fidelity_path = arguments.output.with_suffix(".fidelity.json")
+    fidelity_hash = ensure_bundle(fidelity_path, {
+        "config": numerical_record(load_config(arguments.config).controller),
+        "settings": cfg.as_dict(), "methods": methods, "tier": arguments.tier,
+        "execution": execution_record("ergodic_control_mppi/experiments/baselines.py", str(jax.devices()[0])),
+    }, arguments.overwrite)
     config = load_config(arguments.config)
     scenario = _open_scenario(config)
     state0 = _open_arrays(scenario)["initial_state"]
@@ -1038,10 +1064,12 @@ def main() -> None:
     # converge-then-degrade behaviour that two of the baselines show and `score_run` cannot
     # see, since it keeps only the final value. Running ours through the same measurement on
     # the same field is the only way that comparison is like-for-like.
-    checks = [fidelity_check(m, scenario, state0, cfg=cfg, seeds=FIDELITY_SEEDS)
-              for m in methods]
+    checks = (json.loads(fidelity_path.read_text()) if fidelity_path.exists() else
+              [fidelity_check(m, scenario, state0, cfg=cfg, seeds=FIDELITY_SEEDS)
+               for m in methods])
     for check in checks:
         check["device"] = device
+        check["bundle_hash"] = fidelity_hash
     for check in checks:
         print(f"fidelity {check['method']:6s} "
               f"{'PASS' if check['passed'] else 'FAIL'}  "
@@ -1050,21 +1078,16 @@ def main() -> None:
               f"{' (degrades)' if check['degrades_after_convergence'] else ''}  "
               f"{check['distance_m']:.0f} m  {check['note']}", flush=True)
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
-    (arguments.output.parent / "baseline_fidelity.json").write_text(
+    arguments.output.with_suffix(".fidelity.json").write_text(
         json.dumps(checks, indent=2), encoding="utf-8")
     if arguments.check_only:
         return
 
-    # A method that did not reproduce is dropped rather than reported as beaten. Ours is
-    # exempt: the gate exists to certify *reimplementations* of other people's work, and
-    # excluding our own controller from its own comparison on it would be incoherent.
-    failed = {c["method"] for c in checks if not c["passed"] and c["method"] != "ours"}
-    if failed:
-        print(f"excluded, did not reproduce: {', '.join(sorted(failed))}")
-    kept = [m for m in methods if m not in failed]
+    if any(not c["passed"] for c in checks):
+        print("Fidelity failures are retained and must be reported; no method is excluded.")
 
-    rows = run_tier(arguments.tier, kept, seeds, cfg, arguments.config, arguments.maps,
-                    output=arguments.output)
+    rows = run_tier(arguments.tier, methods, seeds, cfg, arguments.config, arguments.maps,
+                    output=arguments.output, overwrite=arguments.overwrite)
     print(f"wrote {arguments.output} ({len(rows)} rows)")
 
 

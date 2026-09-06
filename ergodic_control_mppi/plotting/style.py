@@ -114,14 +114,14 @@ TRAIL_CMAP = LinearSegmentedColormap.from_list(
     "trail", ["#D5DAE0", "#73808C", "#101820"]
 )
 
-# Figure widths in inches, measured off the class rather than guessed: IEEEtran conference
-# reports \columnwidth = 252pt = 3.5in and \textwidth = 516pt = 7.167in. Rendering at
+# Figure widths in inches, measured off the class rather than guessed: IEEEtran journal
+# reports \columnwidth = 252pt and \textwidth = 516pt (72.27 TeX points/inch). Rendering at
 # exactly those widths makes `\includegraphics[width=\linewidth]` a no-op, which is what
 # keeps the numbers below honest -- a figure drawn narrower is scaled up on the page and
 # every point size in it grows by the same factor.
 FIGSIZES = {
-    "column": (3.5, 2.4),
-    "double": (7.167, 2.6),
+    "column": (252 / 72.27, 2.4),
+    "double": (516 / 72.27, 2.6),
     "poster": (9.2, 5.4),
 }
 

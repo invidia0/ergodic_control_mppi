@@ -22,10 +22,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import binomtest, wilcoxon
 
+from ergodic_control_mppi.experiments.common import verified_rows
 from ergodic_control_mppi.experiments.analyze import bootstrap_ci
 from ergodic_control_mppi.plotting.style import (
     ACCENT,
     DIVERGING_CMAP,
+    FIGSIZES,
     NEUTRAL,
     OUTSIDE_TICKS,
     PRIMARY,
@@ -44,6 +46,7 @@ ARM_LABELS = {
     "gain_60": r"$k_{\mathcal{M}}{=}60$",
     "tau_3": r"$\tau_{\mathcal{M}}{=}3$",
     "tau_11": r"$\tau_{\mathcal{M}}{=}11$",
+    **{f"T_{t}": f"$T{{=}}{t}$" for t in (75, 100, 250, 350)},
     "T_150": "$T{=}150$",
     "T_500": "$T{=}500$",
     "T_750": "$T{=}750$",
@@ -184,11 +187,19 @@ def load_final(path: Path) -> dict[str, dict[tuple, dict[str, str]]]:
     width belongs in the key. Resolve an arm's own baseline with :func:`baseline_for`.
     """
     table: dict[str, dict[tuple, dict[str, str]]] = defaultdict(dict)
-    with path.open(encoding="utf-8", newline="") as stream:
-        for row in csv.DictReader(stream):
-            cell = (int(row["obs_num"]), int(row["map_seed"]), int(row["seed"]))
-            arm = row["arm"]
-            table[f"{arm}@{row['lanes']}" if arm == BASELINE else arm][cell] = row
+    rows = verified_rows(path, ("arm", "obs_num", "map_seed", "seed", "lanes"), legacy=True)
+    contexts = {(r.get("steps"), r.get("hardware"), r.get("device"), r.get("jax_version")) for r in rows}
+    if len(contexts) > 1:
+        raise ValueError(f"{path}: mixed execution configurations")
+    hashes = defaultdict(set)
+    for row in rows:
+        cell = (int(row["obs_num"]), int(row["map_seed"]), int(row["seed"]))
+        arm = row["arm"]
+        key = f"{arm}@{row['lanes']}" if arm == BASELINE else arm
+        hashes[(key, cell[:2])].add(row.get("config_hash", ""))
+        if len(hashes[(key, cell[:2])]) > 1:
+            raise ValueError(f"{path}: mixed configurations for {key}/{cell[:2]}")
+        table[key][cell] = row
     return table
 
 
@@ -562,484 +573,97 @@ def fig_dot_matrix(table, output: Path, metric: str = "occupancy_mse") -> Path:
         return path
 
 
-def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse",
-                       reference: str | None = None, dots_per_row: int = 4,
-                       consistency: bool = True) -> Path:
-    """The nine-map campaign in one figure: dots, per-map consistency, sensitivity.
+def paired_effect_summary(table, metric: str = "occupancy_mse", *, replicates: int = 10000,
+                          seed: int = 20260906) -> dict:
+    """Resample maps and paired seeds jointly across all arms, retaining matched widths.
 
-    Three panels on one categorical x axis of arms, blocked by axis and ordered by joint
-    sensitivity so "which parameter matters most" is a consequence of the sort:
-
-    **Top -- one dot per run.** One per (map, seed), above the line if that run beat the
-    reference on the same cell, below otherwise. Height is how often; colour is by how much
-    (log2 ratio, positive = the arm won). Each stack is sorted **whole** and filled
-    row-major at ``dots_per_row`` dots per row, so a column reads outward from the line as
-    best run to worst, the colour ramp is monotone, and rows times the row width is the run
-    count. An earlier version blocked the stacks by map to keep a one-map win from reading
-    like an all-map win; it restarted the ramp once per map and cost more than it bought,
-    and the strip below carries that distinction properly.
-
-    **Middle -- the consistency strip.** One mark per (arm, map), grouped by density,
-    coloured by that map's median effect **divided by its own standard error**. A promotable
-    arm is a row of one colour; the map-agreement gate is legible rather than asserted. Five
-    coarse bins, not the dots' eleven: eight medians of twelve seeds do not support finer
-    gradation, and at this cell size finer bins would not survive print.
-
-    The two panels share a palette but **not a scale**, which is the one thing a reader can
-    get wrong here: the dots are an effect size in log2, the strip is a signal-to-noise
-    ratio in sigmas. Because most arms are worse on the pooled median while most per-map
-    effects sit inside their own error bars, the dots run red-heavy and the strip runs
-    cream-heavy, and the mismatch is systematic rather than occasional. Hence the divider
-    between them and the two separately captioned legends: strip cream means "not resolved",
-    the absence of an answer, not a midpoint on the dots' scale.
-
-    **Bottom -- the sensitivity panel.** Stacked squared paired effect per outcome, with a
-    tick at the correlation-corrected joint value. See :func:`sensitivity`. Zero-gap bars
-    rather than a filled area: x is categorical, and a slope between two unrelated arms
-    would assert an interpolation that does not exist.
-
-    ``reference`` selects what every dot is paired against. The default is the shipped
-    profile, which is the contrast the campaign was designed around but which cannot draw
-    the profile itself: baseline minus baseline is zero on all 108 cells. Pass ``TYPICAL``
-    (after :func:`add_typical_reference`) to pair against the per-cell median arm instead,
-    which puts the baseline in as a column alongside its alternatives. The panels are
-    otherwise identical -- only the origin moves.
+    Returns:
+        Pooled and per-map medians with percentile hierarchical bootstrap intervals.
+        Only the sampled maps support between-map inference; six maps are not a
+        large-map asymptotic justification.
     """
-    from matplotlib.colors import BoundaryNorm, ListedColormap
-
-    # Under the default reference each arm pairs against the baseline at its own lane count,
-    # so no baseline is drawable. Under a neutral reference the shipped profile is a column
-    # like any other, on the width used by most arms.
-    shipped = f"{BASELINE}@{_main_width(table)}"
-    baselines = {a for a in table if a.startswith(BASELINE + "@")}
-    hidden = {reference, TYPICAL} | (
-        baselines if reference is None else baselines - {shipped}
-    )
-    arms = [a for a in table if a not in hidden]
-    effects, tours, axis_of, value_of = {}, {}, {}, {}
-    per_map, bands, joints = {}, {}, {}
+    arms = [a for a in table if not a.startswith(BASELINE) and a != TYPICAL]
+    if not arms or replicates < 1:
+        raise ValueError("paired effects need arms and positive bootstrap replicates")
+    cells = sorted(table[arms[0]])
+    maps = sorted({c[:2] for c in cells})
+    seeds = sorted({c[2] for c in cells})
+    expected = [(d, m, s) for d, m in maps for s in seeds]
+    if cells != expected:
+        raise ValueError("incomplete map/seed grid")
+    effects = []
     for arm in arms:
-        arm_values, base_values, cells = paired_final(table, arm, metric,
-                                                      reference=reference)
-        effects[arm] = (np.log2(base_values / arm_values), cells)
-        rows = list(table[arm].values())
-        axis_of[arm] = "Shipped profile" if arm == shipped else rows[0].get("axis") or arm
-        try:
-            value_of[arm] = float(rows[0].get("value") or 0.0)
-        except ValueError:
-            value_of[arm] = 0.0
-        tours[arm] = sum(int(float(r["all_modes_reached"])) + float(r["mode_cycles"])
-                         for r in rows)
-        per_map[arm] = per_map_effects(table, arm, metric, reference=reference)
-        bands[arm], joints[arm] = sensitivity(table, arm, reference)
+        reference = baseline_for(table, arm)
+        if sorted(table[arm]) != cells or sorted(table[reference]) != cells:
+            raise ValueError(f"incomplete matched cells for {arm}")
+        a, b, _ = paired_final(table, arm, metric)
+        if not np.isfinite([a, b]).all() or np.any(a <= 0) or np.any(b <= 0):
+            raise ValueError(f"{arm}: paired log effects need finite positive metrics")
+        effects.append(np.log2(b / a).reshape(len(maps), len(seeds)))
+    effects = np.asarray(effects)
+    rng = np.random.default_rng(seed)
+    draw_maps = rng.integers(len(maps), size=(replicates, len(maps), 1))
+    draw_seeds = rng.integers(len(seeds), size=(replicates, len(maps), len(seeds)))
+    boot = np.median(effects[:, draw_maps, draw_seeds], axis=(-2, -1))
+    intervals = np.percentile(boot, [2.5, 97.5], axis=1).T
+    return {"metric": metric, "analysis_seed": seed, "replicates": replicates,
+            "maps": maps, "seeds": seeds,
+            "bundle_hashes": sorted({r.get("bundle_hash", "legacy")
+                                      for a in arms for r in table[a].values()}),
+            "arms": [{"arm": a, "axis": next(iter(table[a].values()))["axis"],
+                      "median": float(np.median(effects[i])),
+                      "map_medians": np.median(effects[i], axis=1).tolist(),
+                      "interval": intervals[i].tolist()}
+                     for i, a in enumerate(arms)]}
 
-    by_axis: dict[str, list[str]] = defaultdict(list)
-    for arm in arms:
-        by_axis[axis_of[arm]].append(arm)
-    # Ranked by the *joint* sensitivity of an axis's strongest arm: a multi-outcome
-    # statement, unlike the prototype's spread of medians in a single metric.
-    order = sorted(by_axis, key=lambda a: -max(joints[x] for x in by_axis[a]))
-    # The shipped profile is a column only under a neutral reference, and then it is the one
-    # column the reader is looking for. Sensitivity ranking would bury it: it is closest to
-    # the median arm precisely because most knobs do nothing, which is the finding, not a
-    # reason to hide it. Pin it leftmost instead.
-    if shipped in arms:
-        order.insert(0, order.pop(order.index(axis_of[shipped])))
-    columns = [(axis, arm) for axis in order
-               for arm in sorted(by_axis[axis], key=lambda a: value_of[a])]
 
-    maps = sorted({key for arm in arms for key in per_map[arm]})
-    runs = max(len(v[0]) for v in effects.values())
-    cmap = ListedColormap(DOT_COLOURS)
-    norm = BoundaryNorm(DOT_EDGES, cmap.N)
-    # Binned in units of the per-map median's own standard error, so "coloured" means
-    # "resolved above this map's seed noise" rather than "exceeded a number someone picked".
-    #
-    # The first edge is at 2 sigma, not 1. At 1 sigma a pure null colours 32% of its cells,
-    # so a knob that does nothing would render as a patchy 3-of-9 pattern that reads as
-    # structure; at 2 sigma that falls to 4.6%, i.e. well under one cell of the nine. The
-    # strip's whole job is to stop noise being read as consistency, so its threshold has to
-    # be one a null actually fails.
-    strip_colours = ListedColormap(STRIP_COLOURS)
-    strip_norm = BoundaryNorm([-1e3, -3.5, -2.0, 2.0, 3.5, 1e3], strip_colours.N)
+def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse") -> Path:
+    """Draw two aligned paired-effects panels on the shared journal gray surface."""
+    from matplotlib.colors import to_rgb
 
-    with plt.rc_context(paper_style("double")):
-        # Type scale for a 6.9in canvas. Points are absolute, so these are the sizes that
-        # actually reach the page: 4.4pt is the floor IEEE figure text stays legible at.
-        # One factor over the whole set, so the internal hierarchy is unchanged and only the
-        # scale moves. The old 4.7pt arm labels were the smallest type in the paper by some
-        # margin -- the class's own scriptsize is 7pt -- and they carry maths, which needs
-        # more size than prose at the same nominal point.
-        tiny, small, mid, lead = 6.3, 7.0, 7.7, 8.4
-        # 6.9in is this project's full-width `figure*` size -- every other double-column
-        # figure in the repo uses it. Sized for inclusion at 1:1, not scaled down by LaTeX:
-        # matplotlib text is in absolute points, so drawing at 13in and letting
-        # \includegraphics shrink it to 6.9 would have taken 6pt labels down to 3.2pt.
-        #
-        # `consistency=False` drops the middle panel and the canvas height it occupied, so
-        # the two surviving panels keep their absolute size rather than stretching to fill.
-        # The sensitivity panel is read for rank order and for whether a bar clears the
-        # 3-sigma floor, not for its absolute height, so it can be squeezed harder than the
-        # dot grid above it. Tightened hspace pulls it up against the dots, which also makes
-        # the shared x axis easier to read across the two panels.
-        # Sized so the dot panel is the same number of inches in both variants, rather
-        # than by a canvas height picked per variant. The axis-header block above the dots
-        # costs a fixed height in points whatever the canvas is, so a shorter canvas does
-        # not shrink the headers -- it shrinks the *data* range underneath them. At a hand
-        # -set 4.4in the two-panel figure drew its dots 14% tighter than the three-panel one
-        # (6.8 against 7.9 px per run) while the markers kept their size in points, and the
-        # rows crowded into each other. Deriving the height is what makes the comment above
-        # true.
-        strip_heights, strip_figure = (3.0, 0.60, 1.45), 6.0
-        dots_inches = strip_figure * strip_heights[0] / sum(strip_heights)
-        heights = list(strip_heights) if consistency else [3.0, 0.95]
-        figure_height = (strip_figure if consistency
-                         else dots_inches * sum(heights) / heights[0])
-        figure, panels = plt.subplots(
-            len(heights), 1, figsize=(7.167, figure_height), sharex=True,
-            gridspec_kw={"height_ratios": heights, "hspace": 0.085 if consistency else 0.04},
-        )
-        top, bottom = panels[0], panels[-1]
-        strip = panels[1] if consistency else None
-        # Applied here rather than at the end: both the dots and the strip size their markers
-        # in points from their own realised geometry, so the panel boxes have to be final
-        # before either draws. The margins are larger fractions than at 13in because the text
-        # inside them did not shrink with the canvas.
-        # Margins converted from the 5.2in layout by height, not copied: they hold text, and
-        # text is absolute points, so a shorter canvas needs a *larger* fraction to leave the
-        # arm labels and the keys the same room they had.
-        grew = 5.2 / figure.get_figheight()
-        figure.subplots_adjust(left=0.080, right=0.995,
-                               top=1.0 - 0.072 * grew, bottom=0.120 * grew)
-        figure.patch.set_facecolor("white")
-        for axes in panels:
-            axes.set_facecolor("white")
-            axes.grid(False)
-            for side in ("top", "right", "left", "bottom"):
-                axes.spines[side].set_visible(False)
-            axes.tick_params(length=0, which="both")
-            axes.minorticks_off()
-
-        # ---- the shipped column, called out behind everything else
-        #
-        # A warm off-white. It has to clear the `#d9d9d9` neutral in *both* panels or the
-        # shipped column's own unresolved cells vanish into their own highlight -- the one
-        # column a reader goes looking for. A cool grey was tried and sat too close to it.
-        # Both the band and the axis separators are cut off at the top of the dots rather
-        # than run to the axes ceiling. Above the dots the panel holds nothing but the group
-        # headers, and rules crossing a row of text read as a table the figure does not have
-        # -- they also pushed the ink up against the keys. Cut, the empty band is white and
-        # the whole block can sit lower.
-
-        # ---- top: one dot per run, one sort per column
-        #
-        # One sort, not nine map-blocked ones. The blocked version was meant to keep a
-        # one-map win from reading like a nine-map win, but each block sorts separately, so
-        # the colour ramp restarted nine times going up a column -- a deep blue dot could
-        # land at y=30 purely because its map's block fell low in the concatenation. Colour
-        # *is* the effect size, so that made the panel's main channel unreadable vertically.
-        # Sorted whole, a column reads top-to-bottom as best run to worst. Per-map structure
-        # is the strip's job below, where it is nine explicit cells instead of nine stretches
-        # of dots nobody can count.
-        #
-        # `dots_per_row` spends the column's horizontal slack: a column is 18.8 pt wide and a
-        # dot is 2.65, while vertically 108 slots share 0.95 pt each, so the dots overlap
-        # ~2.8x and render as a ribbon. Filling row-major at width 4 cuts the stack to 27
-        # rows and buys ~3.8 pt of pitch in both directions. Row-major keeps the ramp
-        # monotone (each row is four adjacent ranks) and keeps height proportional to count.
-        limit = int(np.ceil(runs / dots_per_row))
-        rules_top = limit + 0.9
-        if shipped in arms:
-            slot = next(i for i, (_, a) in enumerate(columns) if a == shipped)
-            top.add_patch(plt.Rectangle((slot - 0.5, -limit - 6.0), 1.0,
-                                        rules_top + limit + 6.0,
-                                        facecolor="#f9f4ea", edgecolor="none", zorder=0))
-            for axes in panels[1:]:
-                axes.axvspan(slot - 0.5, slot + 0.5, color="#f9f4ea", zorder=0)
-        span = 0.62 if dots_per_row > 1 else 0.0
-        # Dot size read off the realised panel rather than hard-coded: the pitch depends on
-        # the figure width, the column count and the fill width all at once, and a constant
-        # that looked right at 13in drew overlapping blobs at 6.9. Take whichever of the two
-        # pitches is tighter -- horizontally the sub-slot inside a column, vertically one row.
-        box = top.get_window_extent()
-        points = 72.0 / figure.dpi
-        column_pt = box.width * points / len(columns)
-        row_pt = box.height * points / (2 * limit + 15.0)
-        slot_pt = span * column_pt / max(dots_per_row - 1, 1) if dots_per_row > 1 else column_pt
-        size = (0.82 * min(slot_pt, row_pt)) ** 2
-        for index, (_, arm) in enumerate(columns):
-            values, _cells = effects[arm]
-            up = np.sort(values[values > 0])
-            down = np.sort(values[values <= 0])[::-1]
-            for stack, sign in ((up, 1), (down, -1)):
-                if not stack.size:
-                    continue
-                row, column = np.divmod(np.arange(stack.size), dots_per_row)
-                offset = (column - (dots_per_row - 1) / 2) * span / max(dots_per_row - 1, 1)
-                top.scatter(index + offset, sign * (row + 1),
-                            c=stack, cmap=cmap, norm=norm, s=size, linewidths=0, zorder=3)
-            if tours[arm] == 0:
-                top.scatter([index], [-limit - 4.0], s=size, color="#4d4d4d",
-                            linewidths=0, zorder=3)
-        top.axhline(0.0, color="#cfcfcf", linewidth=0.8, zorder=2)
-        top.set_ylim(-limit - 6.0, limit + 9.5)  # provisional; finalised after the headers
-        # Ticks stay labelled in runs whatever the fill width -- the reader counts flights,
-        # not rows -- so the position is the run count divided by the row width.
-        ticks = list(range(-runs, runs + 1, 24))
-        top.set_yticks([t / dots_per_row for t in ticks])
-        top.set_yticklabels([str(abs(t)) for t in ticks], fontsize=small, color="black")
-        # One string, not three placed at fixed data positions: rotated 90 it already reads
-        # bottom-to-top in the right order, and three separate texts collide as soon as the
-        # type grows, since their spacing is in data units and their length is in points.
-        # x in data, y in axes fraction: the ceiling is refitted below to whatever the
-        # group headers need, which moves data y=0 off the panel's middle and slides the
-        # label down into the sensitivity panel's own label.
-        from matplotlib.transforms import blended_transform_factory
-
-        top.text(-3.3, 0.5, "< WORSENED   RUNS   IMPROVED >", rotation=90,
-                 ha="center", va="center", fontsize=tiny, color="black",
-                 transform=blended_transform_factory(top.transData, top.transAxes))
-        top.text(-1.0, -limit - 4.0, "No tour", ha="right", va="center",
-                 fontsize=tiny, color="black")
-
-        if strip is not None:
-            # ---- middle: per-map consistency, one mark per map, densities blocked
-            #
-            # Rectangles in data units rather than points-sized markers. A circle has to stay
-            # round, so its diameter is bounded by the *shorter* of the row pitch and the column
-            # pitch and the panel cannot be made flatter than eight round rows. A rectangle takes
-            # the cell it is given, so the panel's height is free to shrink; the gap left around
-            # each cell is what keeps the baseline column's highlight visible underneath.
-            for index, (_, arm) in enumerate(columns):
-                strip.bar(
-                    np.full(len(maps), index), 0.80, width=0.82,
-                    bottom=np.arange(len(maps)) - 0.40,
-                    color=[strip_colours(strip_norm(per_map[arm].get(key, 0.0))) for key in maps],
-                    linewidth=0, zorder=3)
-            strip.set_ylim(-0.55, len(maps) - 0.45)
-            # Labelled by density, not by map: which of the three fields at a density a cell
-            # belongs to is not a question the figure is asked, and eight tiny `25p/516` labels
-            # cost more legibility than they buy. The per-map breakdown stays in final_report.md.
-            groups = defaultdict(list)
-            for row, (obs, _) in enumerate(maps):
-                groups[obs].append(row)
-            # Named rather than numbered: a pillar count makes the reader convert a number into a
-            # notion of clutter, which is the only thing the row grouping is for. The counts
-            # themselves belong in the caption. The axis still says "by map" -- a group label
-            # spans two or three map rows, it is not one row per density.
-            names = ("Low", "Med.", "High")
-            counts = sorted(groups)
-            strip.set_yticks([float(np.mean(rows)) for rows in groups.values()])
-            strip.set_yticklabels(
-                [names[i] if len(counts) == len(names) else f"{obs}p"
-                 for i, obs in enumerate(counts)], fontsize=small, color="black")
-            # Names the factor the three group labels belong to. Turned on its side and set to
-            # their left rather than stacked above them: the panel is now only ~0.6 of a unit
-            # tall, so a two-line horizontal label had to overhang the top edge, and this column
-            # of margin is free anyway. Sits between the group labels and the axis title at -3.3.
-            strip.text(-2.5, (len(maps) - 1) / 2, "Obstacle density", rotation=90, ha="center",
-                       va="center", fontsize=tiny, color="black")
-            # Read off where the density actually changes, not every third row: the campaign is
-            # 3 / 2 / 3 after 25p/525 was dropped as a duplicate, and a fixed stride would rule
-            # the wrong rows and split a density group in half.
-            for row in range(1, len(maps)):
-                if maps[row][0] != maps[row - 1][0]:
-                    strip.axhline(row - 0.5, color="#9a9a9a", linewidth=0.5)
-            strip.text(-3.3, (len(maps) - 1) / 2, "CONSISTENCY BY MAP", rotation=90, ha="center",
-                       va="center", fontsize=small, color="black")
-
-        # ---- bottom: stacked sensitivity, joint tick on top
-        #
-        # `memory_off` runs to ~44 sigma while the next arm sits near 12, so a shared axis has
-        # to choose which it serves. Scaling to the tallest column is strictly honest and was
-        # tried: it costs the other 44 columns 3.3x of their height, drops `T_750` to a
-        # quarter of the panel and turns everything past `h=4.0` into 1-2% slivers, which
-        # destroys the 45-way ranking that is the panel's main job. So the ceiling comes from
-        # the *second*-largest column, and the one stack above it is squeezed to fit under a
-        # hatched cap -- its five bands stay readable, its true total is printed, and the
-        # hatch says the height is not to scale.
-        totals = {arm: sum(bands[arm].values()) for _, arm in columns}
-        ranked = sorted(totals.values(), reverse=True)
-        ceiling = (ranked[1] if len(ranked) > 1 else ranked[0]) * 1.18 or 1.0
-        for index, (_, arm) in enumerate(columns):
-            scale = ceiling * 0.93 / totals[arm] if totals[arm] > ceiling else 1.0
-            base = 0.0
-            for (name, _, _), colour in zip(OUTCOMES, BAND_COLOURS):
-                height = bands[arm][name] * scale
-                bottom.bar(index, height, bottom=base, width=1.0, color=colour,
-                           linewidth=0, zorder=2)
-                base += height
-            if scale < 1.0:
-                bottom.bar(index, ceiling * 0.07, bottom=ceiling * 0.93, width=1.0,
-                           facecolor="none", edgecolor="#9a9a9a", hatch="////",
-                           linewidth=0.4, zorder=2)
-            if totals[arm] > ceiling:
-                # Inside the hatch, not inside the stack: the top band is dark in two of the
-                # three palettes and the label vanished into it.
-                bottom.text(index, ceiling * 0.965, f"{totals[arm]:.0f}", ha="center",
-                            va="center", fontsize=tiny, color="#1a1a1a", zorder=5)
-        bottom.set_ylim(0, ceiling)
-        # Step chosen so the shorter panel never draws more labels than it has room for:
-        # a fixed 3-sigma step crowds into an unreadable smear once the ceiling is high.
-        step = max(3, int(ceiling) // 5 // 3 * 3 or 3)
-        bottom.set_yticks(range(0, int(ceiling) + 1, step))
-        bottom.tick_params(axis="y", right=False)
-        bottom.tick_params(axis="y", labelsize=small, colors="black", length=2)
-        bottom.text(-3.3, bottom.get_ylim()[1] / 2, "SENSITIVITY", rotation=90,
-                    ha="center", va="center", fontsize=small, color="black")
-
-        # ---- shared x, axis blocks
-        for axes in panels:
-            for axis in order[1:]:
-                first = min(i for i, (a, _) in enumerate(columns) if a == axis)
-                if axes is top:
-                    axes.vlines(first - 0.5, -limit - 6.0, rules_top,
-                                color="#e8e8e8", linewidth=0.7, zorder=1)
-                else:
-                    axes.axvline(first - 0.5, color="#e8e8e8", linewidth=0.7, zorder=1)
-        # One row, every axis. Stacking each header onto two lines is what makes this fit:
-        # the constraint is the widest *line*, not the phrase, so "Obstacle / penalty" clears
-        # a one-arm block where "obstacle penalty" never could. The baseline's pseudo-axis is
-        # skipped -- its single arm label already reads "Baseline".
-        #
-        # Where two lines are still not enough -- three of these axes hold a single arm --
-        # the label is turned on its side rather than left to run over its neighbours.
-        # Decided by measuring the drawn text against the block, not by a hand-kept list,
-        # because the widths depend on the figure size and on which arms an axis holds.
-        renderer = figure.canvas.get_renderer()
-        headers, upright = [], []
-        for axis in (a for a in order if a != axis_of.get(shipped)):
-            members = [i for i, (a, _) in enumerate(columns) if a == axis]
-            label = AXIS_LABELS.get(axis, axis.replace("_", " "))
-            text = top.text(float(np.mean(members)), limit + HEADER_GAP, label, ha="center",
-                            va="bottom", fontsize=small, color="black", linespacing=1.15)
-            edges = top.transData.transform(
-                [(min(members) - 0.5, 0.0), (max(members) + 0.5, 0.0)])
-            headers.append(text)
-            if text.get_window_extent(renderer=renderer).width > edges[1][0] - edges[0][0]:
-                text.set_text(label.replace("\n", " "))
-                text.set_rotation(90)
-                text.set_fontsize(tiny)
-            else:
-                upright.append(text)
-        # Centre the sideways labels on the upright band rather than standing them on its
-        # baseline: bottom-anchored, a rotated label spends its whole length upward and every
-        # point of that is headroom stolen from the dots. Centred, it spends half.
-        if upright:
-            band = upright[0].get_window_extent(renderer=renderer)
-            middle = top.transData.inverted().transform((0.0, (band.y0 + band.y1) / 2))[1]
-            for text in headers:
-                if text.get_rotation():
-                    text.set_va("center")
-                    text.set_position((text.get_position()[0], middle))
-        # Then fit the ceiling to whatever the tallest header actually needs, and keep the
-        # sideways ones off the dots. Iterated, because the labels are placed in data units
-        # and moving the limit moves them.
-        floor = limit + HEADER_GAP
-        for _ in range(3):
-            # Centred on the upright band, a sideways label spends half its length downward,
-            # and the longest of them reach into the top row of dots. Lift any that do, one
-            # by one: they are different lengths, so a shared offset either leaves the long
-            # ones overlapping or pushes the short ones needlessly far up.
-            for text in headers:
-                if not text.get_rotation():
-                    continue
-                # `bottom` is the sensitivity axes in this scope, hence the long name.
-                label_bottom = top.transData.inverted().transform(
-                    (0.0, text.get_window_extent(renderer=renderer).y0))[1]
-                if label_bottom < floor:
-                    at_x, at_y = text.get_position()
-                    text.set_position((at_x, at_y + (floor - label_bottom)))
-            tallest = max(t.get_window_extent(renderer=renderer).y1 for t in headers)
-            top.set_ylim(-limit - 6.0,
-                         top.transData.inverted().transform((0.0, tallest))[1] + 1.0)
-        bottom.set_xticks(range(len(columns)))
-        bottom.set_xticklabels(["Baseline" if a == shipped else arm_label(a)
-                                for _, a in columns], rotation=90,
-                               fontsize=tiny, color="black")
-        # With a neutral reference the shipped profile is just another column, and the one
-        # thing the reader is looking for is which column it is.
-        for label, (_, arm) in zip(bottom.get_xticklabels(), columns):
-            if arm == shipped:
-                label.set_color("#1a1a1a")
-                label.set_fontweight("bold")
-        bottom.set_xlim(-0.7, len(columns) - 0.3)
-
-        # ---- legends, side by side so the two scales are contrasted rather than conflated
-        #
-        # The panels share a palette but not a scale: the dots are an effect size in log2,
-        # the strip is a signal-to-noise ratio in sigmas. Read as one scale, a red-heavy
-        # column promises red cells below it -- and because most arms are worse on the pooled
-        # median while most per-map effects sit inside their own error bars, that promise
-        # fails systematically. Two captioned keys, adjacent, are the cheapest way to say
-        # "these measure different things"; the divider below reinforces it.
-        def _swatches(left, width, top_y, colours, ticks, caption):
-            for slot, colour in enumerate(colours):
-                figure.patches.append(plt.Rectangle(
-                    (left + slot * width / len(colours), top_y),
-                    width / len(colours), 0.018, transform=figure.transFigure,
-                    facecolor=colour, edgecolor="white", linewidth=0.5, clip_on=False))
-            for fraction, label in ticks:
-                figure.text(left + fraction * width, top_y - 0.004, label, ha="center",
-                            va="top", fontsize=tiny, color="black")
-            figure.text(left + width / 2, top_y + 0.023, caption, ha="center", va="bottom",
-                        fontsize=small, color="black")
-
-        def _key_row(right, top_y, height, colours, labels):
-            """Swatch-plus-label key laid out right to left, blocks sized like `_swatches`.
-
-            Drawn by hand rather than with `figure.legend`, whose handle box is sized from the
-            font and came out visibly smaller than the two ramps beside it.
-
-            Label widths are **measured**, not estimated from the character count. The old
-            estimate charged every glyph the same 0.45 em, and the block it sized also
-            carried the swatch, whose width scales with the figure's aspect ratio -- so on
-            the two-panel variant (shorter canvas, same font) the swatch shrank while the
-            text did not, every block under-provisioned, and "Occupancy MSE" ran into the
-            swatch beside it.
-            """
-            block = height * figure.get_figheight() / figure.get_figwidth()
-            gap, pad = 0.010, 0.005
-            figure.canvas.draw()
-            renderer = figure.canvas.get_renderer()
-            texts = [figure.text(0.0, top_y + height / 2, text, ha="left", va="center",
-                                 fontsize=tiny, color="black") for text in labels]
-            widths = [
-                block + pad + item.get_window_extent(renderer=renderer).width
-                / figure.bbox.width
-                for item in texts
-            ]
-            x = right - sum(widths) - gap * (len(labels) - 1)
-            for colour, item, span in zip(colours, texts, widths):
-                figure.patches.append(plt.Rectangle(
-                    (x, top_y), block, height, transform=figure.transFigure,
-                    facecolor=colour, edgecolor="none", clip_on=False))
-                item.set_position((x + block + pad, top_y + height / 2))
-                x += span + gap
-
-        # One baseline for all three keys, and it is the thing that sets the top margin: the
-        # tick captions hang ~0.016 below it and the axis headers start at `top`, so the two
-        # numbers move together or a gap opens between them.
-        keys_y = 1.0 - 0.055 * grew
-        _swatches(0.082, 0.200, keys_y, DOT_COLOURS,
-                  ((0.0, r"4$\times$ worse"), (0.5, "No change"), (1.0, r"4$\times$ better")),
-                  r"Per run, $\log_2$ ratio")
-        # Middle swatch is "not resolved", not "no change": a cream cell is the absence of an
-        # answer at twelve seeds, not a measured zero.
-        if strip is not None:
-            _swatches(0.330, 0.110, keys_y,
-                      [strip_colours(i) for i in range(strip_colours.N)],
-                      ((0.1, "Worse"), (0.5, "Not resolved"), (0.9, "Better")),
-                      r"Per map, effect $/\ \sigma$")
-        # No standfirst here: what the panels measure and what they are paired against goes
-        # in the LaTeX caption, where it can be read at body-text size instead of 5.9pt.
-        # Third key on the same baseline as the other two rather than under the arm labels:
-        # the bottom strip it used to occupy is now panel height instead.
-        _key_row(0.995, keys_y, 0.018, BAND_COLOURS, [label for _, _, label in OUTCOMES])
-
+    summary = paired_effect_summary(table, metric)
+    mppi_axes = {"T", "K", "alpha", "exploration", "lam_max", "track_weight",
+                 "reference_speed", "penalty_scale", "boundary_scale"}
+    groups = [[r for r in summary["arms"] if (r["axis"] in mppi_axes) == is_mppi]
+              for is_mppi in (False, True)]
+    colours = {10: "#0078FF", 15: "#00C98A", 20: "#9B7BFF", 0: "#0078FF"}
+    markers = {10: "o", 15: "s", 20: "^", 0: "o"}
+    extent = max(abs(x) for r in summary["arms"] for x in (*r["interval"], *r["map_medians"]))
+    extent = max(0.25, extent * 1.08)
+    with plt.rc_context({**paper_style("double"), **OUTSIDE_TICKS}):
+        figure, axes = plt.subplots(1, 2, figsize=(FIGSIZES["double"][0], 4.5), sharex=True)
+        height = max(map(len, groups))
+        for ax, rows, title in zip(axes, groups, ("(a) Mechanisms", "(b) MPPI settings")):
+            for y, row in enumerate(rows):
+                lo, hi = row["interval"]
+                ax.hlines(y, lo, hi, color="#30343B", linewidth=0.65, zorder=3)
+                for offset, ((density, _), value) in enumerate(zip(summary["maps"], row["map_medians"])):
+                    colour = colours[density]
+                    pale = 0.4 * np.asarray(to_rgb(colour)) + 0.6
+                    ax.scatter(value, y + (offset - (len(summary["maps"]) - 1) / 2) * 0.075,
+                               s=11, marker=markers[density], facecolor=pale,
+                               edgecolor=colour, linewidth=0.45, zorder=4)
+                ax.plot(row["median"], y, "D", color="#252931", markersize=3, zorder=5)
+                if y and row["axis"] != rows[y-1]["axis"]:
+                    ax.axhline(y-0.5, color="#C5C7CB", linewidth=0.45)
+            ax.set_yticks(range(len(rows)), [arm_label(r["arm"]) for r in rows])
+            ax.set_ylim(height - 0.4, -0.8)
+            ax.set_xlim(-extent, extent)
+            ax.grid(False)
+            ax.xaxis.grid(True, color="#EDEEF0", linewidth=0.6)
+            ax.axvline(0, color="#30343B", linewidth=0.8)
+            ax.set_title(title, loc="left")
+            ax.tick_params(axis="y", length=0)
+            ax.set_xlabel(r"$\log_2$(profile MSE / alternative MSE)")
+        for density in sorted({m[0] for m in summary["maps"]}):
+            axes[0].scatter([], [], marker=markers[density], color=colours[density],
+                            s=12, label=f"{density} pillars")
+        figure.legend(loc="upper center", bbox_to_anchor=(0.54, 1.015), ncol=3, frameon=False)
+        figure.subplots_adjust(left=0.16, right=0.99, bottom=0.11, top=0.91, wspace=0.58)
         path = save(figure, output)
         plt.close(figure)
-        return path
+    output.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return path
 
 
 def fig_paired_arms(table, output: Path, metric: str = "occupancy_mse") -> Path:
@@ -1184,73 +808,32 @@ STEP_COLOURS = {
 
 
 def fig_step_budget(report: Path, output: Path) -> Path:
-    """Where one control step's milliseconds go, as a donut over the measured stages.
+    """Render measured stages and synchronized whole-loop timing as separate table rows."""
+    from ergodic_control_mppi.plotting.style import SURFACE
 
-    Reads the JSON written by ``ergodic_control_mppi.experiments.timing``. That module
-    times each stage jitted on its own with an explicit ``block_until_ready()`` and
-    reports the difference against the jitted whole step as ``residual`` rather than
-    absorbing it -- which is the only honest way to attribute cost inside a single fused
-    XLA program, and the reason this figure needs a branch.
-
-    The residual is **signed**: XLA routinely fuses stages more cheaply together than
-    apart, and a pie cannot draw a negative wedge. So the wedges are always normalised to
-    the stages' own sum and the fused total is printed separately in the centre. A positive
-    residual gets its own wedge (real overhead the stages miss); a negative one has no
-    wedge, because there is no part of the step it corresponds to.
-    """
-    data = json.loads(Path(report).read_text(encoding="utf-8"))["stages"]
-    stages = {name: data["stages"][name]["ms_median"] for name, _, _ in STEP_STAGES}
-    total, residual = data["total_ms"], data["residual_ms"]
-    if residual > 0:
-        stages["_residual"] = residual
-        wedges = list(STEP_STAGES) + [("_residual", "Fusion + launch",
-                                       "unattributed to any stage")]
-    else:
-        wedges = list(STEP_STAGES)
-
-    order = sorted(wedges, key=lambda w: -stages[w[0]])
-    values = [stages[name] for name, _, _ in order]
-    # One qualitative colour per wedge -- a same-hue ramp made same-sized slices hard to
-    # tell apart at a glance -- taken per stage rather than per rank, see STEP_COLOURS.
-    colours = [STEP_COLOURS[name] for name, _, _ in order]
-
-    with plt.rc_context(rc=paper_style("column")):
-        figure, axis = plt.subplots(figsize=(4.06, 2.31))
-        axis.set_facecolor("white")
-        figure.patch.set_facecolor("white")
-        axis.grid(False)
-        axis.set_axis_off()
-        share = 100.0 * np.asarray(values) / sum(values)
-        # A ring smaller than the axes, with the labels pushed well past its edge:
-        # the labels are two lines each, so at the default distance the lower line
-        # of a label sitting near the vertical runs into the wedge behind it.
-        radius = 0.78
-        axis.pie(
-            values, colors=colours, startangle=90, counterclock=False,
-            wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 0.8},
-            labels=[f"{label}\n{ms:.2f} ms ({pct:.0f}%)"
-                    for (_, label, _), ms, pct in zip(order, values, share)],
-            labeldistance=1.30, textprops={"fontsize": 7.5, "color": "#23272F"},
-            radius=radius,
-        )
-        # The ring is square but the canvas is not, and `pie` leaves the axes at the data
-        # limits its labels need. Pin the vertical extent to the ring instead: with equal
-        # aspect the horizontal range then follows the box, which is where the labels go.
-        # Asymmetric, because only the upper half carries a label above the ring --
-        # a symmetric range pads the bottom with a sixth of the figure in blank paper.
-        axis.set_ylim(-0.88, 1.14)
-        # Centre carries the one number the reader needs -- the fused step.
-        axis.text(0, 0, f"{total:.2f} ms", ha="center", va="center",
-                  fontsize=11.0, fontweight="bold", color="#23272F")
-        shape = data["shape"]
-        figure.text(0.5, 0.995, "Step computation time breakdown",
-                    ha="center", va="top", fontsize=9.0, fontweight="bold",
-                    color="#23272F")
-        figure.text(0.5, 0.90,
-                    f"$K{{=}}{shape['K']}$, $T{{=}}{shape['T']}$, "
-                    f"$P{{=}}{shape['P']}$ on GPU",
-                    ha="center", va="top", fontsize=7.0, color="#5A6472")
-        figure.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.03)
+    report_data = json.loads(Path(report).read_text(encoding="utf-8"))
+    data = report_data["stages"]
+    rows = [[label, f"{data['stages'][name]['ms_median']:.3f}"]
+            for name, label, _ in STEP_STAGES]
+    rows.append(["Fused MPPI step", f"{data['total_ms']:.3f}"])
+    for label, values in report_data.get("endtoend", {}).items():
+        if isinstance(values, dict) and "ms_per_step" in values:
+            rows.append([f"Whole loop: {label.replace('_', ' ')}", f"{values['ms_per_step']:.3f}"])
+    with plt.rc_context(paper_style("column")):
+        figure, ax = plt.subplots(figsize=(FIGSIZES["column"][0], 0.28 * (len(rows) + 2)))
+        ax.set_axis_off()
+        table = ax.table(cellText=rows, colLabels=["Measurement", "ms / step"],
+                         colWidths=[0.77, 0.23], cellLoc="left", loc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.5)
+        table.scale(1, 1.25)
+        for (row, column), cell in table.get_celld().items():
+            cell.set_facecolor(SURFACE)
+            cell.set_edgecolor("#A9ABB0")
+            cell.set_linewidth(0.35)
+            if row == 0:
+                cell.set_text_props(weight="bold")
+        figure.tight_layout(pad=0.3)
         path = save(figure, output)
         plt.close(figure)
     return path
@@ -1273,9 +856,14 @@ def load_baselines(*paths: Path) -> dict:
         path = Path(path)
         if not path.exists():
             continue
-        with path.open(encoding="utf-8", newline="") as stream:
-            for row in csv.DictReader(stream):
-                table[row["tier"]][row["method"]][(row["map"], int(row["seed"]))] = row
+        for row in verified_rows(path, ("tier", "method", "map", "seed"), legacy=True):
+            key = (row["map"], int(row["seed"]))
+            target = table[row["tier"]][row["method"]]
+            if key in target:
+                raise ValueError(f"duplicate baseline identity: {row['tier']}/{row['method']}/{key}")
+            if target and {r.get("bundle_hash", "") for r in target.values()} != {row.get("bundle_hash", "")}:
+                raise ValueError(f"mixed baseline bundles for {row['tier']}/{row['method']}")
+            target[key] = row
     return {tier: dict(methods) for tier, methods in table.items()}
 
 
@@ -1285,7 +873,7 @@ def load_baselines(*paths: Path) -> dict:
 #
 # Four steps for five keys, which is deliberate: ours draws no visible mark in any of the
 # three panels -- the violin panels plot the baselines only, and in the safety panel its bar
-# is 0% -- so SVES can take the blue and the four visible violins are the four hues. Should
+# is 0% -- so HEDAC can take the blue and the four visible violins are the four hues. Should
 # ours ever post a nonzero collision rate, give it its own step then.
 #
 # Validated against the panel (#E2E3E6): lightness band, chroma floor, adjacent-pair CVD
@@ -1369,7 +957,7 @@ def fig_baselines_violins(table: dict, directory: Path, metric: str = "fourier_e
             effects = _paired_effects(table, tier, metric)
             if not effects:
                 continue
-            figure, axes = plt.subplots(figsize=(3.5, 1.85))
+            figure, axes = plt.subplots(figsize=(FIGSIZES["column"][0], 1.85))
             _violin(axes, [e for _, e in effects],
                     [VIOLIN_COLOURS[m] for m, _ in effects],
                     [BASELINE_LABELS[m] for m, _ in effects])
@@ -1400,7 +988,7 @@ def fig_baselines_violins(table: dict, directory: Path, metric: str = "fourier_e
                               / len(runs))
                 labels.append(BASELINE_LABELS[method])
                 colours.append(VIOLIN_COLOURS[method])
-            figure, axes = plt.subplots(figsize=(3.5, 1.75))
+            figure, axes = plt.subplots(figsize=(FIGSIZES["column"][0], 1.75))
             positions = range(len(struck))
             axes.bar(positions, struck, width=0.66, linewidth=0, color=colours, zorder=3)
             for slot, (value, method) in enumerate(zip(struck, methods)):
@@ -1644,11 +1232,11 @@ def main() -> None:
         self_check()
         return
 
-    table = load_arms(args.ablation)
-    written = [
-        fig_paired_arms(table, args.output / "fig_paired_arms.png"),
-        fig_effect_forest(table, args.output / "fig_effect_forest.png"),
-    ]
+    written = []
+    if args.ablation.exists():
+        table = load_arms(args.ablation)
+        written.extend([fig_paired_arms(table, args.output / "fig_paired_arms.png"),
+                        fig_effect_forest(table, args.output / "fig_effect_forest.png")])
     if args.sweep_ablation.exists():
         sweep = load_arms(args.sweep_ablation)
         arms = sorted(set(sweep) - {BASELINE})
@@ -1661,20 +1249,6 @@ def main() -> None:
         final = load_final(args.final)
         written.append(
             fig_final_ablation(final, args.output / "fig_final_ablation.png")
-        )
-        # The same campaign re-referenced to the median arm, so the shipped profile is drawn
-        # as a column instead of being the invisible origin. Same data, different yardstick.
-        typical = add_typical_reference(final)
-        written.append(
-            fig_final_ablation(typical, args.output / "fig_final_ablation_typical.png",
-                               reference=TYPICAL)
-        )
-        # Two panels for a paper that has room for one figure, not three: the per-map strip
-        # is the panel whose content already exists as a column in final_report.md.
-        written.append(
-            fig_final_ablation(typical,
-                               args.output / "fig_final_ablation_typical_nostrip.png",
-                               reference=TYPICAL, consistency=False)
         )
     baselines = load_baselines(*args.baselines)
     if baselines:

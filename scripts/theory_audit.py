@@ -28,6 +28,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ergodic_control_mppi.experiments.common import (
+    artifact_digests, ensure_bundle, execution_record, fingerprint, numerical_record, verified_rows,
+)
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.experiments.theory_audit import (
     RESIDUAL_FIELDS,
@@ -62,7 +65,8 @@ FIELDS = [
     "c_realized", "outside_fraction", "max_excursion_m", "max_speed",
     "projected_fraction", "inside_obstacle_fraction",
     "wall_seconds", "device", "hardware", "execution", "lanes", "jax_version",
-    "inits", "init_x", "init_y",
+    "inits", "init_x", "init_y", "start_index", "config_hash", "bundle_hash",
+    "tv_rows", "tv_columns",
 ]
 
 
@@ -77,7 +81,7 @@ def coverage_terms(
     The bound is the *lens* bound, not the sup bound. Writing ``mu = rho* - p*`` for the
     signed difference and expanding the ball integral as a convolution of indicators,
 
-        int_Omega mu(B(z,r))^2 dz = iint |B(x,r) cap B(y,r)| dmu(x) dmu(y)
+        int_Omega mu(B(z,r))^2 dz = iint |Omega cap B(x,r) cap B(y,r)| dmu(x) dmu(y)
                                   <= pi_d r^d |mu|(Omega)^2 = 4 pi_d r^d TV^2,
 
     since the lens kernel is a positive-definite convolution of indicators and the integrand
@@ -140,7 +144,7 @@ def coverage_terms(
     }
     terms = {"ball_ergodic": ball, "tv": total_variation, "l1": l1, "kl": kl,
              "kl_tail_share": kl_tail / kl if kl > 0 else float("nan"),
-             "reachable_area": area,
+             "reachable_area": area, "tv_rows": target.shape[0], "tv_columns": target.shape[1],
              # The withdrawn sup bound, kept as the comparator for the lens tightening.
              "bound_sup": area * MAX_RADIUS * total_variation ** 2, **bounds}
     # The L1 and TV forms are one inequality in two notations. Keep both columns -- the
@@ -177,12 +181,15 @@ def score_cell(entry: dict, seed: int, path: np.ndarray, residuals: np.ndarray,
         "map_seed": entry["map_seed"], "obs_num": entry["obs_num"], "seed": seed,
         "steps": arguments.steps, "stride": arguments.stride,
         "samples": int(residuals.shape[0]),
+        "start_index": getattr(arguments, "start_index", None),
+        "config_hash": arguments.config_hashes[(entry["obs_num"], entry["map_seed"], seed)],
+        "bundle_hash": arguments.bundle_hash,
         "wall_seconds": round(wall, 3), "device": device, "inits": arguments.inits,
         # Recomputed rather than threaded through: it is a pure function of the arguments
         # already here, and recording the actual start is what makes the init groups
         # recoverable from the CSV alone.
         **dict(zip(("init_x", "init_y"),
-                   (float(v) for v in dispersed_initial_state(arrays, entry, seed, arguments)[:2]))),
+                   (float(v) for v in dispersed_initial_state(arrays, entry, seed, arguments, config)[:2]))),
         "hardware": arguments.hardware, "execution": f"batch{arguments.lanes}",
         "lanes": arguments.lanes, "jax_version": jax.__version__,
     }
@@ -196,6 +203,13 @@ def score_cell(entry: dict, seed: int, path: np.ndarray, residuals: np.ndarray,
 
     row.update(coverage_terms(path[:, :2], arrays, limits_x, limits_y))
     row.update(invariance_terms(path, limits_x, limits_y))
+    from ergodic_control_mppi.deploy.grid import clearance_along
+
+    clearance = clearance_along(np.asarray(arrays["occupancy"]),
+                                tuple(np.asarray(arrays["grid_origin"])),
+                                float(arrays["grid_resolution"]), path[:, :2])
+    if np.any(clearance < 0.30) or row["outside_fraction"] > 0:
+        raise ValueError("adopted profile collided or left the workspace; audit stopped")
     # Thm. 2 asserts a constant c = L_ker/alpha_m exists with TV <= c sqrt(eps_track). We do
     # not estimate its two factors separately -- that needs kernel-TV estimates in a 6+2P
     # dimensional space, where the estimator would dominate. We report the value the
@@ -223,14 +237,9 @@ def load_maps(path: Path) -> list[dict]:
 
 def completed(output: Path) -> set:
     """Identities already in the archive. The lane width is part of the key, not metadata."""
-    if not output.exists():
-        return set()
-    with output.open(encoding="utf-8", newline="") as stream:
-        return {
-            (r["map_seed"], r["obs_num"], r["seed"], r["steps"], r["stride"],
-             r["hardware"], r["execution"], r.get("inits", "1"))
-            for r in csv.DictReader(stream)
-        }
+    columns = ("map_seed", "obs_num", "seed", "steps", "stride", "hardware", "execution",
+               "inits", "start_index", "config_hash")
+    return {tuple(r[k] for k in columns) for r in verified_rows(output, columns)}
 
 
 def append_rows(output: Path, rows: list[dict]) -> None:
@@ -252,7 +261,7 @@ def append_rows(output: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def dispersed_initial_state(arrays, entry, seed: int, arguments) -> np.ndarray:
+def dispersed_initial_state(arrays, entry, seed: int, arguments, config) -> np.ndarray:
     """Pick this lane's start. With ``--inits 1`` (default) every lane keeps the archived one.
 
     Thm. 1 claims convergence "for every initial reduced state", but a campaign that starts
@@ -263,16 +272,24 @@ def dispersed_initial_state(arrays, entry, seed: int, arguments) -> np.ndarray:
     every group already collected.
     """
     state = np.asarray(arrays["initial_state"], dtype=np.float64).copy()
+    start_index = getattr(arguments, "start_index", None)
+    if arguments.inits < 1 or (start_index is not None and not 0 <= start_index < arguments.inits):
+        raise ValueError("start-index must satisfy 0 <= start-index < inits, with inits >= 1")
     if arguments.inits <= 1:
         return state
-    group = seed * arguments.inits // max(arguments.seeds, 1)
+    group = (seed * arguments.inits // max(arguments.seeds, 1)
+             if start_index is None else start_index)
     mask = np.asarray(arrays["reachable_mask"], dtype=bool)
-    origin = np.asarray(arrays["grid_origin"], dtype=np.float64)
+    x_limits = np.asarray(config.controller.workspace.x_limits, dtype=np.float64)
+    y_limits = np.asarray(config.controller.workspace.y_limits, dtype=np.float64)
+    origin = np.array([x_limits[0], y_limits[0]])
     # Cell centres of the free space, ordered, then sampled deterministically per group so a
     # rerun reproduces the same starts.
     rows, columns = np.nonzero(mask)
-    span_x, span_y = mask.shape[1], mask.shape[0]
-    extent = np.array([40.0 / span_x, 20.0 / span_y])
+    extent = np.array([np.diff(x_limits)[0] / mask.shape[1],
+                       np.diff(y_limits)[0] / mask.shape[0]])
+    if len(rows) < arguments.inits:
+        raise ValueError("fewer free cells than requested initial positions")
     centres = origin + (np.stack([columns, rows], axis=1) + 0.5) * extent
     picker = np.random.default_rng(abs(hash((int(entry["map_seed"]), int(entry["obs_num"])))) % 2**32)
     choice = picker.permutation(len(centres))[group % len(centres)]
@@ -280,45 +297,82 @@ def dispersed_initial_state(arrays, entry, seed: int, arguments) -> np.ndarray:
     return state
 
 
-def run(arguments) -> None:
-    """Fly every cell at one lane width and append the audit rows."""
+def audit_inputs(arguments, kind: str):
+    """Resolve every lane, check provenance and require an intact CSV/path pair on resume."""
     maps = load_maps(arguments.maps)
-    seeds = range(arguments.seeds)
-    lanes = [(entry, seed) for entry in maps for seed in seeds]
+    lanes = [(entry, seed) for entry in maps for seed in range(arguments.seeds)]
+    if not lanes:
+        raise ValueError("audit requires maps and seeds")
     arguments.lanes = len(lanes)
-    done = completed(arguments.output)
-    key_of = lambda entry, seed: (  # noqa: E731 - one expression, used once
-        str(entry["map_seed"]), str(entry["obs_num"]), str(seed), str(arguments.steps),
-        str(arguments.stride), arguments.hardware, f"batch{len(lanes)}", str(arguments.inits)
-    )
-    if all(key_of(entry, seed) in done for entry, seed in lanes):
-        print(f"all {len(lanes)} cells already in {arguments.output}")
-        return
-    if any(key_of(entry, seed) in done for entry, seed in lanes):
-        raise SystemExit(
-            f"{arguments.output} holds some but not all of this width's cells. A partial "
-            "group cannot be topped up at the same width without changing the branch; "
-            "delete those rows and rerun the group."
-        )
-    if STOP_FILE.exists():
-        raise SystemExit(f"{STOP_FILE} exists; refusing to start")
-
     device = select_device(arguments.device)
-    cache: dict = {}
+    cache = {}
     configs, arrays_per_lane = [], []
-    for entry, _ in lanes:
-        cache_key = (entry["obs_num"], entry["map_seed"])
-        if cache_key not in cache:
-            cache[cache_key] = _grid_config(Path(entry["run_dir"]), arguments.config)
-        config, _, arrays = cache[cache_key]
+    records = {}
+    arguments.config_hashes = {}
+    for entry, seed in lanes:
+        key = (entry["obs_num"], entry["map_seed"])
+        if key not in cache:
+            cache[key] = _grid_config(Path(entry["run_dir"]), arguments.config)
+        config, manifest, arrays = cache[key]
         configs.append(config)
         arrays_per_lane.append(arrays)
+        record = numerical_record({
+            "controller": config.controller, "arrays": arrays, "scoring": manifest,
+            "initial_state": dispersed_initial_state(arrays, entry, seed, arguments, config),
+            "steps": arguments.steps, "stride": arguments.stride, "inits": arguments.inits,
+            "start_index": getattr(arguments, "start_index", None), "kind": kind,
+        })
+        digest = fingerprint(record)
+        arguments.config_hashes[(*key, seed)] = digest
+        records[digest] = record
+    arguments.bundle_hash = ensure_bundle(arguments.output, {
+        "configurations": records, "maps": maps, "seeds": list(range(arguments.seeds)),
+        "width": len(lanes), "kind": kind,
+        "execution": execution_record("scripts/theory_audit.py", str(device)),
+    }, getattr(arguments, "overwrite", False))
+    done = completed(arguments.output)
+    expected = {
+        (str(e["map_seed"]), str(e["obs_num"]), str(seed), str(arguments.steps),
+         str(arguments.stride), arguments.hardware, f"batch{len(lanes)}", str(arguments.inits),
+         "" if getattr(arguments, "start_index", None) is None else str(arguments.start_index),
+         arguments.config_hashes[(e["obs_num"], e["map_seed"], seed)]) for e, seed in lanes
+    }
+    path_file = arguments.output.with_name(arguments.output.stem + "_paths.npz")
+    if done:
+        if done != expected or not path_file.exists():
+            raise ValueError("partial or incompatible audit CSV/path pair; use --overwrite or a fresh path")
+        receipt = arguments.output.with_suffix(".artifacts.json")
+        if not receipt.exists() or json.loads(receipt.read_text()) != artifact_digests([arguments.output, path_file]):
+            raise ValueError("audit artifacts are incomplete or changed")
+        with np.load(path_file, allow_pickle=False) as bundle:
+            if str(bundle["bundle_hash"]) != arguments.bundle_hash:
+                raise ValueError("audit paths belong to a different bundle")
+            actual = list(zip(bundle["obs_num"], bundle["map_seed"], bundle["seed"]))
+            if actual != [(e["obs_num"], e["map_seed"], seed) for e, seed in lanes]:
+                raise ValueError("audit path lane identities do not match CSV")
+            if bundle["positions"].shape != (len(lanes), arguments.steps, 2):
+                raise ValueError("audit path shape does not match requested run")
+        print(f"all {len(lanes)} verified cells already in {arguments.output}")
+        return None
+    if path_file.exists():
+        raise ValueError("orphan audit paths; use --overwrite or a fresh path")
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    return lanes, device, configs, arrays_per_lane
 
+
+def run(arguments) -> None:
+    """Fly every cell at one lane width and append the audit rows."""
+    if STOP_FILE.exists():
+        raise SystemExit(f"{STOP_FILE} exists; refusing to start")
+    prepared = audit_inputs(arguments, "run")
+    if prepared is None:
+        return
+    lanes, device, configs, arrays_per_lane = prepared
     stacked = stack_params([jax.device_put(c.controller, device) for c in configs])
     keys = jnp.stack([controller_key(seed) for _, seed in lanes])
     initial = jnp.asarray(
         np.stack([
-            dispersed_initial_state(arrays_per_lane[index], entry, seed, arguments)
+            dispersed_initial_state(arrays_per_lane[index], entry, seed, arguments, configs[index])
             for index, (entry, seed) in enumerate(lanes)
         ]),
         dtype=jnp.float32,
@@ -337,6 +391,8 @@ def run(arguments) -> None:
     jax.block_until_ready(paths)
     wall = time.perf_counter() - started
     paths = np.asarray(paths)
+    if not np.isfinite(paths).all():
+        raise ValueError("nonfinite audit trajectory")
     residuals = np.asarray(residuals)
     print(f"[audit] {wall:.0f}s total, {wall / len(lanes):.1f}s per cell", flush=True)
 
@@ -356,12 +412,16 @@ def run(arguments) -> None:
         map_seed=np.array([e["map_seed"] for e, _ in lanes]),
         obs_num=np.array([e["obs_num"] for e, _ in lanes]),
         seed=np.array([s for _, s in lanes]),
-        steps=arguments.steps,
+        steps=arguments.steps, bundle_hash=arguments.bundle_hash,
+        config_hash=np.array([arguments.config_hashes[(e["obs_num"], e["map_seed"], seed)]
+                              for e, seed in lanes]),
     )
     print(f"[audit] wrote {path_file} "
           f"({path_file.stat().st_size / 1e6:.0f} MB, {paths.shape[1]} steps/lane)", flush=True)
 
     append_rows(arguments.output, rows)
+    arguments.output.with_suffix(".artifacts.json").write_text(
+        json.dumps(artifact_digests([arguments.output, path_file]), indent=2) + "\n")
     summarize(rows)
 
 
@@ -386,24 +446,14 @@ def ideal(arguments) -> None:
     A value near zero supports the clause; a value near the flown controller's says perfect
     tracking would *still* miss, and the corollary is idealizing away nothing.
     """
-    maps = load_maps(arguments.maps)
-    lanes = [(entry, seed) for entry in maps for seed in range(arguments.seeds)]
-    arguments.lanes = len(lanes)
-    device = select_device(arguments.device)
-    cache: dict = {}
-    configs, arrays_per_lane = [], []
-    for entry, _ in lanes:
-        key = (entry["obs_num"], entry["map_seed"])
-        if key not in cache:
-            cache[key] = _grid_config(Path(entry["run_dir"]), arguments.config)
-        config, _, arrays = cache[key]
-        configs.append(config)
-        arrays_per_lane.append(arrays)
-
+    prepared = audit_inputs(arguments, "ideal")
+    if prepared is None:
+        return
+    lanes, device, configs, arrays_per_lane = prepared
     stacked = stack_params([jax.device_put(c.controller, device) for c in configs])
     keys = jnp.stack([controller_key(seed) for _, seed in lanes])
     initial = jnp.asarray(
-        np.stack([dispersed_initial_state(arrays_per_lane[i], e, s, arguments)
+        np.stack([dispersed_initial_state(arrays_per_lane[i], e, s, arguments, configs[i])
                   for i, (e, s) in enumerate(lanes)]), dtype=jnp.float32
     )
     controls = jnp.zeros((configs[0].controller.mppi.horizon, 3), dtype=jnp.float32)
@@ -417,6 +467,8 @@ def ideal(arguments) -> None:
     jax.block_until_ready(paths)
     wall = time.perf_counter() - started
     paths = np.asarray(paths)
+    if not np.isfinite(paths).all():
+        raise ValueError("nonfinite audit trajectory")
     print(f"[ideal] {wall:.0f}s total, {wall / len(lanes):.1f}s per cell", flush=True)
 
     rows = []
@@ -429,7 +481,12 @@ def ideal(arguments) -> None:
                "wall_seconds": round(wall / len(lanes), 3), "device": device.platform,
                "inits": arguments.inits, "hardware": arguments.hardware,
                "execution": f"batch{len(lanes)}", "lanes": len(lanes),
-               "jax_version": jax.__version__}
+               "jax_version": jax.__version__,
+               "start_index": getattr(arguments, "start_index", None),
+               "config_hash": arguments.config_hashes[(entry["obs_num"], entry["map_seed"], seed)],
+               "bundle_hash": arguments.bundle_hash,
+               **dict(zip(("init_x", "init_y"), map(float,
+                   dispersed_initial_state(arrays_per_lane[index], entry, seed, arguments, config)[:2])))}
         row.update({name: float("nan") for name in RESIDUAL_FIELDS})
         # eps_track is zero wherever the projection is inactive, which is the definition of
         # this kernel. Where the field points out of the admissible set the two cannot both
@@ -465,8 +522,13 @@ def ideal(arguments) -> None:
         map_seed=np.array([e["map_seed"] for e, _ in lanes]),
         obs_num=np.array([e["obs_num"] for e, _ in lanes]),
         seed=np.array([s for _, s in lanes]), steps=arguments.steps,
+        bundle_hash=arguments.bundle_hash,
+        config_hash=np.array([arguments.config_hashes[(e["obs_num"], e["map_seed"], seed)]
+                              for e, seed in lanes]),
     )
     append_rows(arguments.output, rows)
+    arguments.output.with_suffix(".artifacts.json").write_text(
+        json.dumps(artifact_digests([arguments.output, path_file]), indent=2) + "\n")
     print("\n--- ideal-flow coverage (median over cells) " + "-" * 26)
     print(f"{'density':>8} {'n':>4} {'TV vs p*':>10} {'E_K':>10} {'outside':>9} "
           f"{'proj frac':>10} {'eps_track':>10} {'in obst':>10}")
@@ -522,12 +584,47 @@ def sweep(arguments) -> None:
     The triangle inequality then brackets the quantity the theorems name:
     ``|TV(rho_K, p*) - TV(rho*, p*)| <= TV(rho_K, rho*)``, the last estimated by split-half.
     """
-    bundle = np.load(arguments.paths)
+    bundle = np.load(arguments.paths, allow_pickle=False)
+    source_csv = arguments.paths.with_name(arguments.paths.stem.removesuffix("_paths") + ".csv")
+    receipt = source_csv.with_suffix(".artifacts.json")
+    if not receipt.exists() or json.loads(receipt.read_text()) != artifact_digests([source_csv, arguments.paths]):
+        raise ValueError("sweep source artifacts are incomplete or changed")
+    source_rows = verified_rows(source_csv, ("obs_num", "map_seed", "seed"))
+    if not source_rows or "bundle_hash" not in bundle or {r["bundle_hash"] for r in source_rows} != {str(bundle["bundle_hash"])}:
+        raise ValueError("sweep requires a verified matching CSV/path bundle")
+    source_manifest = json.loads(source_csv.with_suffix(".manifest.json").read_text())
+    for row in source_rows:
+        recorded = source_manifest["inputs"]["configurations"][row["config_hash"]]
+        entry = next(e for e in load_maps(arguments.maps)
+                     if str(e["map_seed"]) == row["map_seed"] and str(e["obs_num"]) == row["obs_num"])
+        config, _, arrays = _grid_config(Path(entry["run_dir"]), arguments.config)
+        if recorded["controller"] != numerical_record(config.controller) or recorded["arrays"] != numerical_record(arrays):
+            raise ValueError("sweep config/maps differ from the path-producing inputs")
+    out = arguments.output
+    split_out = out.with_name(out.stem + "_split.csv")
+    artifact_receipt = out.with_suffix(".artifacts.json")
+    record = {"source_bundle": str(bundle["bundle_hash"]),
+              "source_paths": fingerprint(dict(bundle)),
+              "execution": execution_record("scripts/theory_audit.py", "offline")}
+    overwrite = getattr(arguments, "overwrite", False)
+    bundle_hash = ensure_bundle(out, record, overwrite)
+    if ensure_bundle(split_out, record, overwrite) != bundle_hash:
+        raise AssertionError("split output bundle differs from primary output")
+    if overwrite:
+        artifact_receipt.unlink(missing_ok=True)
+    existing = (out.exists(), split_out.exists(), artifact_receipt.exists())
+    if any(existing):
+        if all(existing) and json.loads(artifact_receipt.read_text()) == artifact_digests([out, split_out]):
+            verified_rows(out, ("obs_num", "map_seed", "seed", "factor", "k"))
+            verified_rows(split_out, ("obs_num", "map_seed", "seed_a", "seed_b", "factor", "k"))
+            print(f"[sweep] verified existing {out} and {split_out}")
+            return
+        raise ValueError("sweep outputs are incomplete or changed; use --overwrite")
     positions = bundle["positions"]
     map_seed, obs_num, seed = bundle["map_seed"], bundle["obs_num"], bundle["seed"]
     k_max = positions.shape[1]
     ladder = [k for k in (5000, 10000, 20000, 40000, 100000, 200000, 400000) if k <= k_max]
-    if ladder[-1] != k_max:
+    if not ladder or ladder[-1] != k_max:
         ladder.append(k_max)
     factors = [f for f in (1, 2, 4, 5, 8, 10, 16) if f <= 80]
     rng = np.random.default_rng(0)
@@ -565,7 +662,7 @@ def sweep(arguments) -> None:
                     "map_seed": key[0], "obs_num": key[1], "seed": int(seed[index]),
                     "factor": factor, "grid": tgt.shape[0], "cells": cells, "k": k,
                     "tv": _tv(positions[index, :k], tgt, msk, limits_x, limits_y),
-                    "tv_null_iid": float(null),
+                    "tv_null_iid": float(null), "bundle_hash": bundle_hash,
                 })
 
     # Split-half: seed pairs on one map, same K and resolution. Both sample the same
@@ -589,21 +686,23 @@ def sweep(arguments) -> None:
                 for a in range(len(grids)):
                     for b in range(a + 1, len(grids)):
                         halves.append({
-                            "map_seed": key[0], "obs_num": key[1], "factor": factor,
+                            "map_seed": key[0], "obs_num": key[1],
+                            "seed_a": int(seed[members[a]]), "seed_b": int(seed[members[b]]),
+                            "factor": factor,
                             "grid": tgt.shape[0], "cells": int(msk.sum()), "k": k,
                             "tv_split": float(0.5 * np.abs(grids[a] - grids[b]).sum()),
+                            "bundle_hash": bundle_hash,
                         })
 
-    out = arguments.output
     with out.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    split_out = out.with_name(out.stem + "_split.csv")
     with split_out.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, list(halves[0]))
         writer.writeheader()
         writer.writerows(halves)
+    artifact_receipt.write_text(json.dumps(artifact_digests([out, split_out]), indent=2) + "\n")
     print(f"[sweep] wrote {out} ({len(rows)} rows) and {split_out} ({len(halves)} rows)")
 
 
@@ -697,7 +796,14 @@ def main() -> None:
                         help="distinct free-space start states to partition the seeds over")
     parser.add_argument("--paths", type=Path, default=None,
                         help="sweep: the *_paths.npz written by run")
+    parser.add_argument("--start-index", type=int, default=None,
+                        help="use one of --inits deterministic starts for every seed")
+    parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args()
+    if min(arguments.steps, arguments.seeds, arguments.stride, arguments.inits) < 1:
+        parser.error("steps, seeds, stride and inits must be positive")
+    if arguments.start_index is not None and not 0 <= arguments.start_index < arguments.inits:
+        parser.error("start-index must satisfy 0 <= start-index < inits")
     if arguments.command == "assumptions":
         assumptions(arguments)
     elif arguments.command == "ideal":

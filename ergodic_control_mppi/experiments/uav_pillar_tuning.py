@@ -61,7 +61,7 @@ SWEEP_ARMS = (
     "service_20", "service_90",
     "transit_1", "transit_8",
     "floor_1.0",
-    "T_150", "T_500", "T_750",
+    "T_75", "T_100", "T_250", "T_350", "T_500",
     "K_125", "K_500",
     "gamma_1500", "gamma_6000",
     "refspeed_2.5", "refspeed_3.0",
