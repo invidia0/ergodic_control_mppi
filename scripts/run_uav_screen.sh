@@ -30,15 +30,15 @@ MAP_FILL="${MAP_FILL:-0.02}"
 # other arm changes exactly one axis so a win is attributable.
 declare -A ARMS=(
     [baseline]=""
-    [speed_1p0]="stein.reference_speed=1.0"
-    [speed_1p5]="stein.reference_speed=1.5"
-    [speed_2p0]="stein.reference_speed=2.0"
+    [speed_1p0]="reference.reference_speed=1.0"
+    [speed_1p5]="reference.reference_speed=1.5"
+    [speed_2p0]="reference.reference_speed=2.0"
     [accel_4]="model.double_integrator.max_accel_lin_abs=4.0"
     [accel_8]="model.double_integrator.max_accel_lin_abs=8.0"
     [horizon_100]="mppi.T=100"
     [horizon_200]="mppi.T=200"
     [samples_512]="mppi.K=512"
-    [memory_5]="stein.memory_time=5.0"
+    [memory_5]="reference.memory_time=5.0"
 )
 
 echo "=== uav screen start $(date -u +%FT%TZ) ==="

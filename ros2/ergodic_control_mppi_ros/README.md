@@ -291,9 +291,9 @@ pairs it, and writes the report. It is resumable: an existing `run_id` directory
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `refusing to arm: ... blocked or disconnected` | Inflation closed the free space | Lower `map_fill`, or sweep `map_seed` |
-| `latching hover, no commands will be published` | Startup p99 over `deadline_ms` | Reduce `mppi.T` / `mppi.K` / `stein.memory_time`, or use a GPU |
-| `guard engaged: commanded speed over limit` continuously | `stein.reference_speed` above `max_speed` | Lower it to ≤ 2.0 (`configs/uav_profile.yaml` already does) |
-| `guard engaged: safety path enters a blocked cell` often | Planner cutting corners it cannot brake out of | Raise `clearance`, or lower `stein.reference_speed` |
+| `latching hover, no commands will be published` | Startup p99 over `deadline_ms` | Reduce `mppi.T` / `mppi.K` / `reference.memory_time`, or use a GPU |
+| `guard engaged: commanded speed over limit` continuously | `reference.reference_speed` above `max_speed` | Lower it to ≤ 2.0 (`configs/uav_profile.yaml` already does) |
+| `guard engaged: safety path enters a blocked cell` often | Planner cutting corners it cannot brake out of | Raise `clearance`, or lower `reference.reference_speed` |
 | Launch never exits | Recorder never reached `steps` | Check the controller armed; without a grid it publishes nothing |
 
 ## Replay

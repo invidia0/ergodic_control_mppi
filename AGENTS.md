@@ -3,7 +3,8 @@
 ## Purpose and supported paths
 
 This repository implements flow-matching MPPI for single-robot ergodic
-coverage with one shared JAX numerical core and one closed-loop orchestrator:
+coverage against a potential-gradient reference field, with one shared JAX
+numerical core and one closed-loop orchestrator:
 
 - `ergodic_control_mppi.mppi.single.run_single` for the one controlled robot.
 
@@ -20,8 +21,9 @@ dispatch, state initialization, device placement, and conversion to NumPy.
   keys, and controls are loop state, not parameters.
 - `ergodic_control_mppi/models/double_integrator.py` owns the fixed 6-state,
   3-control dynamics and batch-compatible clamping.
-- `ergodic_control_mppi/mppi/stein.py` owns analytic GMM density/score and RBF
-  Stein interactions.
+- `ergodic_control_mppi/mppi/field.py` owns the analytic GMM score, the KDE
+  repulsion from the fading trail and from the plan, the service gate, and the
+  scalar potential every term of the reference field is the gradient of.
 - `ergodic_control_mppi/mppi/core.py` owns functional sampling, rollouts,
   costs, adaptive bandwidth, importance weighting, and `mppi_step`.
 - `ergodic_control_mppi/mppi/single.py` owns the JAX closed-loop scan.
@@ -86,7 +88,8 @@ in `simulation.py`.
 `configs/` contains YAML only. The fixed model dimensions are not YAML knobs.
 Active controller keys are those validated by `load_config`; do not document
 or silently accept removed keys such as `mppi.dim_x`, `mppi.dim_u`, or
-`stein.weight_pdf`.
+`reference.weight_pdf`. The whole `stein:` section is removed, not renamed:
+`load_config` raises on it and on every key withdrawn with it.
 
 Experiment CSV field names are public contracts. Existing CSVs remain
 readable, runs do not regenerate old numerical results, and destructive
@@ -131,8 +134,10 @@ ssh ars-admin@155.185.245.31 "bash -s" < scripts/poll_pillar_tuning.sh
 
 - Preserve active YAML semantics, array shapes, CPU fallback, and experiment
   CSV schemas except for explicitly removed inactive fields.
-- Preserve the implemented Stein/MPPI objective. Do not retune it or claim a
-  theoretical audit against an unavailable paper.
+- Preserve the implemented reference-field/MPPI objective. Do not retune it or
+  claim a theoretical audit against an unavailable paper. The Stein operator it
+  replaced is withdrawn: `config.py` raises on every key of it, and the code
+  lives on the `stein-archive` branch rather than in this tree.
 - Correct adaptive-temperature control-cost coupling, BO error headers, and
   equivalent analytic derivatives.
 - Do not add legacy import shims, a performance benchmark, or a latency gate.
