@@ -113,6 +113,8 @@ def main():
     parser.add_argument("action", choices=("plan", "run"))
     parser.add_argument("--bundle", type=Path, default=Path("results/uav/T150"))
     parser.add_argument("--wait-for-pid", type=int)
+    parser.add_argument("--ignore-pid", type=int, nargs="+", default=(),
+                        help="GPU PIDs to run alongside instead of waiting for")
     args = parser.parse_args()
     bundle = args.bundle.resolve()
     if yaml.safe_load((bundle / "config.yaml").read_text())["mppi"]["T"] != 150:
@@ -144,7 +146,8 @@ def main():
                     "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
                 busy = [line for line in query.stdout.splitlines()
                         if len(line.split(",")) == 2 and line.split(",")[1].strip().isdigit()
-                        and int(line.split(",")[1]) > 1000]
+                        and int(line.split(",")[1]) > 1000
+                        and int(line.split(",")[0]) not in args.ignore_pid]
                 if not busy:
                     break
                 print(f"waiting for other GPU compute processes: {busy}", flush=True)
@@ -153,7 +156,11 @@ def main():
                 time.sleep(30)
             receipt = log_dir / f"{name}.json"
             record = {"host": socket.gethostname(), "source": source, "command": command,
-                      "config": str(bundle / "config.yaml"), "started": time.time()}
+                      "config": str(bundle / "config.yaml"), "started": time.time(),
+                      # A stage that ran beside another job's GPU process did not have the
+                      # device to itself. Timing read off such a stage is not a clean
+                      # measurement, so the exemption is part of the stage's provenance.
+                      "ignored_gpu_pids": list(args.ignore_pid)}
             if receipt.exists():
                 previous = json.loads(receipt.read_text())
                 if previous.get("source") == source and previous.get("command") == command and previous.get("status") == "complete":
