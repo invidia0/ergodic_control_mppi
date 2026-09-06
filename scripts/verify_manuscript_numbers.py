@@ -23,11 +23,42 @@ spec = importlib.util.spec_from_file_location('fr', 'scripts/final_report.py')
 fr = importlib.util.module_from_spec(spec); sys.modules['fr'] = fr; spec.loader.exec_module(fr)
 rf = sys.modules['report_figures']
 
-ok = bad = 0
+MANUSCRIPT = Path('69f1b707cd917a58478ed643/main.tex')
+#: The manuscript is in the tree now, so a claim can be bound to the text that makes it
+#: rather than only to the data. Numbers are typeset several ways, so a claim counts as
+#: found if any rendering of it occurs: bare, with a thousands separator, or as a LaTeX
+#: scientific literal. Absence is reported, never fatal -- a value can legitimately reach
+#: the page through a generated table -- but an unfound claim is not verifying any prose.
+_TEXT = MANUSCRIPT.read_text(encoding='utf-8') if MANUSCRIPT.is_file() else None
+
+
+def _renderings(value: float) -> list[str]:
+    """Every spelling of ``value`` this manuscript plausibly uses."""
+    out = []
+    for text in (f"{value:g}", f"{value:,g}", f"{abs(value):g}"):
+        out.append(text)
+        if text.startswith('0.'):
+            out.append(text[1:])          # .55 as well as 0.55
+    if value and abs(value) < 1e-3:
+        exponent = int(np.floor(np.log10(abs(value))))
+        mantissa = value / 10 ** exponent
+        out += [f"{mantissa:.2f}", f"{mantissa:.3g}"]
+    return out
+
+
+def in_manuscript(claimed: float) -> bool:
+    return _TEXT is not None and any(r in _TEXT for r in _renderings(claimed))
+
+
+ok = bad = missing = 0
 def check(label, claimed, actual, tol=0.005):
-    global ok, bad
+    global ok, bad, missing
     good = abs(claimed - actual) <= tol * max(1.0, abs(actual))
-    print(f"  {'OK ' if good else 'BAD'} {label:<46} claimed {claimed:<12} actual {actual:.4g}")
+    found = in_manuscript(claimed)
+    missing += not found
+    mark = 'OK ' if good else 'BAD'
+    print(f"  {mark} {label:<46} claimed {claimed:<12} actual {actual:.4g}"
+          f"{'' if found else '   [not found in main.tex]'}")
     ok, bad = ok + good, bad + (not good)
 
 t = rf.load_final(Path('results/uav/ablation_final.csv'))
@@ -107,6 +138,8 @@ for tier, path, claims in (
         check("open ours tours", 6, np.median([float(r['mode_cycles']) for r in d['ours'].values()]), 0)
         check("open sves tours", 7.5, np.median([float(r['mode_cycles']) for r in d['sves'].values()]), 0)
 
-print(f"\n{ok} verified, {bad} WRONG")
+print(f"\n{ok} verified, {bad} WRONG, {missing} not located in the manuscript text")
+if _TEXT is None:
+    print(f"NOTE: {MANUSCRIPT} is absent, so no claim was bound to the prose")
 if bad:
     raise SystemExit(f"{bad} of {ok + bad} manuscript numbers do not match the data")
