@@ -39,6 +39,7 @@ from ergodic_control_mppi.experiments.theory_audit import (
     residual_batch,
 )
 from ergodic_control_mppi.experiments.uav_pillar_tuning import PREFLIGHT_STEPS, _grid_config
+from ergodic_control_mppi.metrics.discrepancy import grid_target, walk
 from ergodic_control_mppi.metrics.ergodicity import (
     compute_ball_ergodic_metric,
     compute_team_occupancy_grid,
@@ -567,6 +568,42 @@ def _tv(positions: np.ndarray, target: np.ndarray, mask: np.ndarray,
     return float(0.5 * np.abs(visited / visited.sum() - desired / desired.sum()).sum())
 
 
+def verified_paths(arguments, kind: str):
+    """Load a ``*_paths.npz`` and prove it came from the CSV and inputs sitting beside it.
+
+    Every offline consumer of the recorded trajectories has to answer the same question --
+    are these positions the ones this CSV, this manifest and these maps describe? -- so the
+    check lives here rather than once per subcommand.
+
+    Args:
+        arguments: Parsed command line; uses ``paths``, ``maps`` and ``config``.
+        kind: Subcommand name, used only in the error messages.
+
+    Returns:
+        The opened ``npz`` bundle.
+
+    Raises:
+        ValueError: If the receipt, the CSV, the manifest or the configs disagree.
+    """
+    bundle = np.load(arguments.paths, allow_pickle=False)
+    source_csv = arguments.paths.with_name(arguments.paths.stem.removesuffix("_paths") + ".csv")
+    receipt = source_csv.with_suffix(".artifacts.json")
+    if not receipt.exists() or json.loads(receipt.read_text()) != artifact_digests([source_csv, arguments.paths]):
+        raise ValueError(f"{kind} source artifacts are incomplete or changed")
+    source_rows = verified_rows(source_csv, ("obs_num", "map_seed", "seed"))
+    if not source_rows or "bundle_hash" not in bundle or {r["bundle_hash"] for r in source_rows} != {str(bundle["bundle_hash"])}:
+        raise ValueError(f"{kind} requires a verified matching CSV/path bundle")
+    source_manifest = json.loads(source_csv.with_suffix(".manifest.json").read_text())
+    for row in source_rows:
+        recorded = source_manifest["inputs"]["configurations"][row["config_hash"]]
+        entry = next(e for e in load_maps(arguments.maps)
+                     if str(e["map_seed"]) == row["map_seed"] and str(e["obs_num"]) == row["obs_num"])
+        config, _, arrays = _grid_config(Path(entry["run_dir"]), arguments.config)
+        if recorded["controller"] != numerical_record(config.controller) or recorded["arrays"] != numerical_record(arrays):
+            raise ValueError(f"{kind} config/maps differ from the path-producing inputs")
+    return bundle
+
+
 def sweep(arguments) -> None:
     """Map the TV estimator's bias over (grid resolution, K), and bracket the true value.
 
@@ -584,22 +621,7 @@ def sweep(arguments) -> None:
     The triangle inequality then brackets the quantity the theorems name:
     ``|TV(rho_K, p*) - TV(rho*, p*)| <= TV(rho_K, rho*)``, the last estimated by split-half.
     """
-    bundle = np.load(arguments.paths, allow_pickle=False)
-    source_csv = arguments.paths.with_name(arguments.paths.stem.removesuffix("_paths") + ".csv")
-    receipt = source_csv.with_suffix(".artifacts.json")
-    if not receipt.exists() or json.loads(receipt.read_text()) != artifact_digests([source_csv, arguments.paths]):
-        raise ValueError("sweep source artifacts are incomplete or changed")
-    source_rows = verified_rows(source_csv, ("obs_num", "map_seed", "seed"))
-    if not source_rows or "bundle_hash" not in bundle or {r["bundle_hash"] for r in source_rows} != {str(bundle["bundle_hash"])}:
-        raise ValueError("sweep requires a verified matching CSV/path bundle")
-    source_manifest = json.loads(source_csv.with_suffix(".manifest.json").read_text())
-    for row in source_rows:
-        recorded = source_manifest["inputs"]["configurations"][row["config_hash"]]
-        entry = next(e for e in load_maps(arguments.maps)
-                     if str(e["map_seed"]) == row["map_seed"] and str(e["obs_num"]) == row["obs_num"])
-        config, _, arrays = _grid_config(Path(entry["run_dir"]), arguments.config)
-        if recorded["controller"] != numerical_record(config.controller) or recorded["arrays"] != numerical_record(arrays):
-            raise ValueError("sweep config/maps differ from the path-producing inputs")
+    bundle = verified_paths(arguments, "sweep")
     out = arguments.output
     split_out = out.with_name(out.stem + "_split.csv")
     artifact_receipt = out.with_suffix(".artifacts.json")
@@ -709,6 +731,179 @@ def sweep(arguments) -> None:
 # --------------------------------------------------------------------------- reporting
 
 
+DISCREPANCY_FIELDS = [
+    "map_seed", "obs_num", "seed", "steps", "stride", "samples", "bandwidth",
+    "error_final", "bound_final", "trivial", "looseness", "beats_trivial", "prefix_holds",
+    "radius_squared", "weighted_gap", "gap_median", "gap_p95",
+    "gap_reach_median", "constraint_share_median",
+    "step_radius", "grid_rows", "grid_columns", "support_cells", "reachable_fraction",
+    "wall_seconds", "hardware", "execution",
+    "config_hash", "bundle_hash",
+]
+
+
+def discrepancy(arguments) -> None:
+    """Score the discrepancy bound on recorded trajectories, offline and without a controller.
+
+    This is the viability check for a discrepancy-descent theory: ``E_n``, the witness gap
+    ``delta_n`` and the accumulated bound are all functions of an executed path, so they can
+    be measured on the shipped controller before anything is rewritten to descend them. The
+    three questions it answers are the ones a claimed bound has to survive -- does it hold on
+    every prefix, does it beat the bound any two probability measures already satisfy, and is
+    it loose by a usable factor rather than an unusable one.
+
+    **What is certified.** The target is the discrete measure the rest of this audit's
+    metrics use: ``target_grid`` restricted to ``reachable_mask`` -- the flood-fill
+    *reachable component* from the arming position (`deploy/grid.py` ``metric_reachable_mask``),
+    not merely the cells outside every obstacle -- and renormalized. Every target integral
+    is then a finite weighted sum over that support, and the witness minimum is an
+    enumeration over it, so the reported numbers are exact for the declared target up to
+    floating-point arithmetic. Nothing here is a quadrature estimate and no grid correction
+    enters the certified series; the metric grid does not approximate the minimization, it
+    defines the target. A claim about the *continuous* truncated mixture would need a proven
+    discretization-error bound, which this audit does not make.
+
+    The path is read at ``--stride``, so ``rho_n`` is the empirical measure of the audited
+    samples and ``delta_n`` is the gap at an audited step, matching how the bound is stated.
+    """
+    bundle = verified_paths(arguments, "discrepancy")
+    out = arguments.output
+    record = {"source_bundle": str(bundle["bundle_hash"]),
+              "source_paths": fingerprint(dict(bundle)),
+              "stride": arguments.stride, "bandwidth": arguments.bandwidth,
+              "execution": execution_record("scripts/theory_audit.py", "offline")}
+    overwrite = getattr(arguments, "overwrite", False)
+    bundle_hash = ensure_bundle(out, record, overwrite)
+    series_file = out.with_name(out.stem + "_series.npz")
+    receipt = out.with_suffix(".artifacts.json")
+    if overwrite:
+        receipt.unlink(missing_ok=True)
+        series_file.unlink(missing_ok=True)
+    if out.exists() and receipt.exists() and series_file.exists():
+        if json.loads(receipt.read_text()) == artifact_digests([out, series_file]):
+            verified_rows(out, ("obs_num", "map_seed", "seed"))
+            print(f"[discrepancy] verified existing {out}")
+            return
+        raise ValueError("discrepancy outputs are incomplete or changed; use --overwrite")
+
+    positions = bundle["positions"]
+    map_seed, obs_num, seed = bundle["map_seed"], bundle["obs_num"], bundle["seed"]
+    cache: dict = {}
+    for entry in load_maps(arguments.maps):
+        config, _, arrays = _grid_config(Path(entry["run_dir"]), arguments.config)
+        limits_x = tuple(float(v) for v in config.controller.workspace.x_limits)
+        limits_y = tuple(float(v) for v in config.controller.workspace.y_limits)
+        density = np.asarray(arrays["target_grid"], dtype=np.float64)
+        admissible = np.asarray(arrays["reachable_mask"], dtype=bool)
+        support, weights = grid_target(density, admissible, limits_x, limits_y)
+        cache[(int(entry["map_seed"]), int(entry["obs_num"]))] = {
+            "support": support, "weights": weights,
+            "bandwidth": (arguments.bandwidth if arguments.bandwidth is not None
+                          else float(config.controller.field.fine_bandwidth)),
+            "shape": density.shape, "reachable": float(admissible.mean()),
+            "arrays": arrays, "limits_x": limits_x, "limits_y": limits_y,
+        }
+
+    source_csv = arguments.paths.with_name(arguments.paths.stem.removesuffix("_paths") + ".csv")
+    source = {(r["map_seed"], r["obs_num"], r["seed"]): r
+              for r in verified_rows(source_csv, ("obs_num", "map_seed", "seed"))}
+    print(f"[discrepancy] {len(positions)} lanes at stride {arguments.stride}", flush=True)
+    rows, series = [], {}
+    for index in range(len(positions)):
+        started = time.perf_counter()
+        terms = cache[(int(map_seed[index]), int(obs_num[index]))]
+        audited = np.asarray(positions[index][:: arguments.stride], dtype=np.float64)
+        reach = float(np.max(np.linalg.norm(np.diff(audited, axis=0), axis=1)))
+        result = walk(audited, terms["support"], terms["weights"], terms["bandwidth"],
+                      step_radius=reach)
+        gap, reach_gap = result["gap"][:-1], result["gap_reach"][:-1]
+        share = np.divide(gap - reach_gap, gap, out=np.full_like(gap, np.nan), where=gap > 0)
+        key = (str(map_seed[index]), str(obs_num[index]), str(seed[index]))
+        rows.append({
+            "map_seed": int(map_seed[index]), "obs_num": int(obs_num[index]),
+            "seed": int(seed[index]), "steps": positions.shape[1], "stride": arguments.stride,
+            "samples": len(audited), "bandwidth": terms["bandwidth"],
+            "error_final": result["error"][-1], "bound_final": result["bound"][-1],
+            "trivial": result["trivial"],
+            "looseness": result["bound"][-1] / result["error"][-1],
+            "beats_trivial": bool(result["bound"][-1] < result["trivial"]),
+            "prefix_holds": bool(np.all(result["error"] <= result["bound"] + 1e-9)),
+            "radius_squared": result["radius_squared"],
+            "weighted_gap": result["weighted_gap"],
+            "gap_median": float(np.median(gap)), "gap_p95": float(np.percentile(gap, 95)),
+            "gap_reach_median": float(np.median(reach_gap)),
+            "constraint_share_median": float(np.nanmedian(share)),
+            "step_radius": reach, "grid_rows": terms["shape"][0],
+            "grid_columns": terms["shape"][1], "support_cells": len(terms["weights"]),
+            "reachable_fraction": terms["reachable"],
+            "wall_seconds": time.perf_counter() - started,
+            "hardware": arguments.hardware, "execution": "offline",
+            "config_hash": source[key]["config_hash"], "bundle_hash": bundle_hash,
+        })
+        # `n` and `trivial` travel with the series so the figures replot from the shipped
+        # audit output alone, without a driver that rebuilds the target from a config.
+        for name in ("n", "error", "gap", "gap_reach", "bound"):
+            series[f"{name}_{'_'.join(key)}"] = result[name].astype(np.float32)
+        series[f"trivial_{'_'.join(key)}"] = np.float32(result["trivial"])
+
+    np.savez_compressed(series_file, **series)
+    with out.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DISCREPANCY_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    receipt.write_text(json.dumps(artifact_digests([out, series_file]), indent=2) + "\n")
+
+    looseness = np.array([r["looseness"] for r in rows])
+    print(f"[discrepancy] wrote {out} ({len(rows)} cells)")
+    print(f"  pathwise inequality holds : {sum(r['prefix_holds'] for r in rows)}/{len(rows)}")
+    print(f"  beats the trivial bound   : {sum(r['beats_trivial'] for r in rows)}/{len(rows)}")
+    print(f"  looseness  median {np.median(looseness):.3g}  max {looseness.max():.3g}")
+    # A Euclidean-disc proxy for the one-step reachable set, so this is directional only:
+    # the true double-integrator set depends on velocity, acceleration limits and clamping.
+    print(f"  median reach-proxy share of the gap "
+          f"{np.median([r['constraint_share_median'] for r in rows]):.3f}  (diagnostic)")
+    if arguments.figures is not None:
+        for path in discrepancy_figures(arguments.figures, rows, series, cache, positions,
+                                        arguments.stride):
+            print(f"  wrote {path}")
+
+
+def discrepancy_figures(output: Path, rows, series, cache, positions, stride) -> list[Path]:
+    """Render the two audit figures for the first lane, from the audit's own arrays.
+
+    The shipped path for these figures: everything drawn comes from what the audit just
+    computed and saved, so a reviewer replots them from the bundle rather than from a
+    one-off script that rebuilds the target its own way.
+    """
+    from ergodic_control_mppi.plotting import style
+    from ergodic_control_mppi.plotting.discrepancy import bound_figure, mechanism_figure
+
+    output.mkdir(parents=True, exist_ok=True)
+    row = rows[0]
+    key = "_".join((str(row["map_seed"]), str(row["obs_num"]), str(row["seed"])))
+    terms = cache[(row["map_seed"], row["obs_num"])]
+    arrays = terms["arrays"]
+    path = np.asarray(positions[0][::stride], dtype=np.float64)
+
+    occupancy = np.asarray(arrays["occupancy"], dtype=bool)
+    origin = np.asarray(arrays["grid_origin"], dtype=np.float64)
+    resolution = float(arrays["grid_resolution"])
+    extent = (origin[0], origin[0] + occupancy.shape[1] * resolution,
+              origin[1], origin[1] + occupancy.shape[0] * resolution)
+    figure = mechanism_figure(
+        path, terms["support"], terms["weights"], terms["bandwidth"],
+        np.asarray(arrays["target_grid"], dtype=np.float64),
+        np.asarray(arrays["reachable_mask"], dtype=bool),
+        occupancy, extent, terms["limits_x"], terms["limits_y"], row["step_radius"],
+    )
+    written = [style.save(figure, output / "herding_mechanism.png")]
+    lane = {name: np.asarray(series[f"{name}_{key}"], dtype=np.float64)
+            for name in ("n", "error", "gap", "gap_reach", "bound")}
+    lane["trivial"] = float(series[f"trivial_{key}"])
+    written.append(style.save(bound_figure(lane), output / "herding_bound.png"))
+    return written
+
+
 def summarize(rows: list[dict]) -> None:
     """Print the error budget by obstacle density, which is how the paper reports it."""
     def stat(subset, name):
@@ -783,7 +978,8 @@ def assumptions(arguments) -> None:
 def main() -> None:
     """Command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("run", "assumptions", "sweep", "ideal"))
+    parser.add_argument("command",
+                        choices=("run", "assumptions", "sweep", "ideal", "discrepancy"))
     parser.add_argument("--maps", type=Path, default=MAP_MANIFEST)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--config", default="configs/uav_profile.yaml")
@@ -798,6 +994,10 @@ def main() -> None:
                         help="sweep: the *_paths.npz written by run")
     parser.add_argument("--start-index", type=int, default=None,
                         help="use one of --inits deterministic starts for every seed")
+    parser.add_argument("--figures", type=Path, default=None,
+                        help="discrepancy: render the audit figures into this directory")
+    parser.add_argument("--bandwidth", type=float, default=None,
+                        help="discrepancy: kernel h; defaults to the profile's fine_bandwidth")
     parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args()
     if min(arguments.steps, arguments.seeds, arguments.stride, arguments.inits) < 1:
@@ -810,6 +1010,12 @@ def main() -> None:
         if arguments.output == DEFAULT_OUTPUT:
             arguments.output = Path("results/uav/theory_audit_ideal.csv")
         ideal(arguments)
+    elif arguments.command == "discrepancy":
+        if arguments.paths is None:
+            raise SystemExit("discrepancy needs --paths pointing at a *_paths.npz from run")
+        if arguments.output == DEFAULT_OUTPUT:
+            arguments.output = Path("results/uav/discrepancy_audit.csv")
+        discrepancy(arguments)
     elif arguments.command == "sweep":
         if arguments.paths is None:
             raise SystemExit("sweep needs --paths pointing at a *_paths.npz from run")
