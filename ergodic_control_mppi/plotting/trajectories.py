@@ -54,8 +54,13 @@ def _draw_panel(axes, positions, means, covariances, occupancy=None, origin=None
     from matplotlib.collections import LineCollection
 
     segments = np.stack([path[:-1], path[1:]], axis=1)
+    # `rasterized` applies only to vector output, where it is the difference between a 20 000
+    # -segment path stored as 20 000 path operators and one image. Four panels of it came to
+    # 1.8 MB of PDF, 70% of the manuscript's weight in two figures. Text, axes and the mode
+    # rings stay vector, so nothing that has to be read at print resolution is resampled.
     collection = LineCollection(segments, cmap=style.SEQUENTIAL_CMAP, linewidths=0.5,
-                                array=np.linspace(0.0, 1.0, len(segments)), zorder=2)
+                                array=np.linspace(0.0, 1.0, len(segments)), zorder=2,
+                                rasterized=True)
     axes.add_collection(collection)
 
     for mean, covariance in zip(np.asarray(means), np.asarray(covariances)):
@@ -229,6 +234,10 @@ def figure_plan_gain(captures, path: str | Path, columns: int = 2):
             # Percentile clip, not min/max: log p* diverges downward far from every mode,
             # so a raw range spends the whole colour scale on empty corners.
             low, high = np.percentile(phi, (2.0, 100.0))
+            # Left vector deliberately. Rasterizing it via `set_rasterization_zorder(1)`
+            # works, but measured it made the figure *larger* -- 685 kB to 783 kB -- because
+            # a 300 dpi bitmap of a full panel costs more than 24 filled contour polygons.
+            # The executed path is the opposite case and is rasterized in `_draw_panel`.
             shading = axes.contourf(grid_x, grid_y, np.clip(phi, low, high), levels=24,
                                     cmap=style.DENSITY_CMAP, alpha=0.55, zorder=0)
             _draw_panel(axes, capture["positions"], capture["means"],
