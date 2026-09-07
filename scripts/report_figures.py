@@ -954,7 +954,77 @@ def fig_ablation_effect_map(table, output: Path, groups=EFFECT_MAP_GROUPS,
         bar.set_label(r"paired median $\log_2$(ablation / shipped),  positive = worse",
                       fontsize=5.5)
         bar.ax.tick_params(labelsize=5)
-        axes.set_title("No ablated condition improves on the shipped profile", pad=14)
+        axes.set_title("No ablated condition clears the promotion gate", pad=14)
+        figure.tight_layout()
+    return save(figure, output)
+
+
+#: ``axis -> (label, shipped value, log x)``. The shipped values are the deployed profile's,
+#: the same ones ``experiments/uav_ablation.py`` sweeps around; each appears in its panel at
+#: effect zero, because the profile is what every arm is paired against.
+RESPONSE_AXES = (
+    ("T", r"horizon $T$", 150.0, False),
+    ("fine_bandwidth", r"lengthscale $h$", 0.94, True),
+    # $k_M$ rather than the manuscript's $k_{\mathcal M}$: mathtext has no \mathcal in the
+    # sans-serif fontsets, and the caption names the symbol anyway.
+    ("memory_gain", r"memory gain $k_M$", 60.0, False),
+    ("plan_gain", r"plan gain $g$", 6.0, False),
+)
+
+#: The two coverage outcomes the curves carry. Both are "lower is better", so both are
+#: plotted as positive-is-worse like the effect map, and where they disagree is the point.
+RESPONSE_METRICS = (("occupancy MSE", "occupancy_mse", PRIMARY, "o", "-"),
+                    ("Fourier error", "fourier_ergodic", ACCENT, "s", "--"))
+
+
+def fig_response_curves(table, output: Path, axes_spec=RESPONSE_AXES,
+                        metrics=RESPONSE_METRICS) -> Path:
+    """Paired effect against parameter value, for the axes that are genuinely ordered.
+
+    The effect map treats every condition as a category. Four of the axes are not
+    categorical -- horizon, lengthscale and the two field gains are swept over ordered
+    levels -- and for those the shape of the response says more than the ranking does. The
+    shipped value sits at zero in each panel by construction.
+    """
+    panels_wanted = len(axes_spec)
+    with plt.rc_context(nature_style("double", height_mm=48.0)):
+        figure, panels = plt.subplots(1, panels_wanted, sharey=True)
+        for panel, (axis, label, shipped, log_x) in zip(panels, axes_spec):
+            members = [a for a in table if not a.startswith(BASELINE)
+                       and list(table[a].values())[0].get("axis") == axis]
+            for name, field, colour, marker, dashes in metrics:
+                points = [(shipped, 0.0, 0.0, 0.0)]
+                for arm in members:
+                    value = float(list(table[arm].values())[0]["value"])
+                    arm_values, base_values, cells = paired_final(table, arm, field)
+                    effects = np.log2(arm_values / base_values)
+                    low, high = hierarchical_interval(
+                        effects, [(c[0], c[1]) for c in cells], repeats=1500)
+                    points.append((value, float(np.median(effects)), low, high))
+                points.sort()
+                xs = np.array([p[0] for p in points])
+                ys = np.array([p[1] for p in points])
+                lows = np.array([p[1] - p[2] for p in points])
+                highs = np.array([p[3] - p[1] for p in points])
+                panel.errorbar(xs, ys, yerr=np.vstack([lows, highs]), color=colour,
+                               marker=marker, markersize=3.0, linewidth=0.8,
+                               linestyle=dashes, capsize=1.5, elinewidth=0.5,
+                               label=name if axis == axes_spec[0][0] else None)
+            panel.axhline(0.0, color="#555555", linewidth=0.5, zorder=1)
+            panel.plot([shipped], [0.0], marker="*", markersize=6.0, color="#111111",
+                       zorder=6, linestyle="none")
+            if log_x:
+                panel.set_xscale("log")
+                levels = sorted({shipped} | {float(list(table[a].values())[0]["value"])
+                                             for a in members})
+                panel.set_xticks(levels)
+                panel.set_xticklabels([f"{v:g}" for v in levels])
+                panel.minorticks_off()
+            panel.set_xlabel(label)
+            panel.tick_params(labelsize=5)
+        panels[0].set_ylabel(r"paired median $\log_2$(level / shipped)" "\n" "positive = worse")
+        panels[0].legend(loc="upper left", fontsize=5, handlelength=1.8)
+        figure.suptitle("Response around the deployed profile (star)", y=1.00)
         figure.tight_layout()
     return save(figure, output)
 

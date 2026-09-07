@@ -247,7 +247,9 @@ def nature_style(width: str = "double", height_mm: float = 60.0) -> dict[str, An
     return {
         "font.family": "sans-serif",
         "font.sans-serif": NATURE_SANS,
-        "mathtext.fontset": "dejavusans",
+        # stixsans, not dejavusans: the sans-serif requirement applies to the maths too, and
+        # DejaVu's mathtext has no \mathcal, which the field-gain symbols need.
+        "mathtext.fontset": "stixsans",
         "text.usetex": False,
         "figure.facecolor": "#FFFFFF",
         "axes.facecolor": "#FFFFFF",
