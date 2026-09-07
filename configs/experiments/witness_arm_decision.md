@@ -111,32 +111,84 @@ Per cell it runs −80.0%, −18.7%, −12.1%, +44.4%, +56.6%, +162.3%: a factor
 coverage metrics are a wash (`occupancy_mse` −1.0%, `tv` +0.8%, both split 3/3) and the
 multiscale ball metric -- the one the paper leans on -- improves on 6/6.
 
+## Attempt 2 at 36 cells: both contested criteria settled
+
+Six cells could not say whether the obstacle excess was real or whether the Fourier
+regression meant anything, so the same arm was rerun on the full clutter tier -- 6 maps x 6
+seeds, 20,000 steps, paired -- with a Wilcoxon signed-rank test per metric and Holm across
+the family. Medians and cells-better counts say which way a difference points; only the
+test says whether it is there.
+
+| | field | witness | change | cells better | p (Holm) | |
+|---|---|---|---|---|---|---|
+| `error_final` (`E_N`) | 0.00387 | 0.00194 | **−50.0%** | **35/36** | 2.9e−10 | significant |
+| `weighted_gap` | 0.02026 | 0.01384 | −31.7% | 32/36 | 3.2e−09 | significant |
+| `ball_ergodic` | 1.702 | 1.217 | **−28.5%** | 27/36 | 0.0115 | significant |
+| `occupancy_mse` | 8.42e−08 | 8.53e−08 | +1.2% | 13/36 | 0.451 | not significant |
+| `tv` | 0.4449 | 0.4487 | +0.9% | 15/36 | 0.166 | not significant |
+| `fourier_ergodic` | 0.00751 | 0.00973 | +29.6% | 17/36 | 0.115 | **not significant** |
+| `obstacle_fraction` | 0.0072 | 0.0158 | **+119%** | 5/36 | 9.4e−08 | **significant** |
+| `jerk_rms` | 143.5 | 161.6 | +12.7% | **0/36** | 2.9e−11 | significant |
+| step [ms, 1 lane] | 1.82 | 1.79 | −1.5% | — | — | — |
+
+**The obstacle regression is real.** The six-cell reading -- that the excess was the size of
+the field arm's own seed spread and might be noise -- does not survive: at 36 cells it is
+`p = 9.4e-08`, the median more than doubles, and only 5 of 36 cells go the other way. That
+was the hard feasibility criterion and it genuinely fails. The jerk regression is real too,
+and unanimous: 0 of 36 cells improve.
+
+**The coverage regression is not real.** `fourier_ergodic` fails the frozen 5% threshold on
+its median and then fails to reject at `p = 0.115`, with 17 of 36 cells going each way. The
+other two shipped coverage metrics are flat and non-significant. So one of the two gate
+failures was an artifact of putting a median threshold on a noisy statistic, and the other
+was not.
+
+**The coverage win is real and large.** `E_N` halves on 35 of 36 cells at `p = 2.9e-10`, the
+accumulated gap falls 32%, and the multiscale ball metric -- the one the paper leans on --
+improves on 27 of 36 at `p = 0.0115` after correction. The arm is also *faster* than the
+one it replaces (−1.5% at one lane, −11.4% batched).
+
+`results/uav/witness_figures/witness_controller.png` shows why on three maps: the witness
+arm's occupancy at scale `h` reproduces the target's three lobes visibly more evenly, while
+the field arm's is patchy and over-concentrated, and the witness field it built ends nearly
+flat -- the objective driven toward zero. The same figure shows the cost: its path crowds
+the pillars where the field arm's sweeps around them.
+
 ## What this establishes
 
-The accumulator was the right diagnosis of attempt 1: the same objective, given the measure
-the theory actually names, reverses a 72% loss into a 48% gain on `E_N` and a 34% gain on
-the ball metric, unanimously across cells, at no cost in step time. **Witness descent
-works.**
+Two things, and they point opposite ways.
 
-What is not established is that it is deployable. It fails a hard feasibility criterion, and
-six cells cannot separate that failure from the baseline's own seed noise. Under the frozen
-rule that is a stop, and the default holds: the field controller stays the proposed method,
-the terminology migration stays unperformed, and the discrepancy machinery stays what Phase
-0 made it -- an a posteriori, controller-agnostic finite-trajectory certificate on the
-paper's own target, holding on 36/36 lanes with a median looseness of 5.48.
+**Witness descent works as a coverage objective.** Given the measure the theory actually
+names -- the uniform running mean, not a fading window -- the same swap that lost 72% of
+`E_N` in attempt 1 gains 50% of it in attempt 2, significantly, on the full clutter tier,
+at no cost in step time. That is no longer a hint; it is a measured result on 36 paired
+cells.
 
-## What a third attempt would need
+**The arm is not deployable as built.** It doubles the share of samples in cells the
+reachable mask excludes and it is jerkier on every single cell. Both are significant, and
+obstacle contact is the criterion that was written down as an immediate stop precisely
+because a coverage gain bought with clearance is not a gain.
 
-Not more design -- more evidence, and one shortcut closed:
+Under the frozen rule this is a stop, and the default holds: the field controller stays the
+proposed method, the terminology migration stays unperformed, and the discrepancy machinery
+stays what Phase 0 made it -- an a posteriori, controller-agnostic finite-trajectory
+certificate on the paper's own target, holding on 36/36 lanes with a median looseness
+of 5.48.
 
-1. **A larger paired sample.** The gate turns on two quantities that six cells cannot
-   resolve: the obstacle excess (within baseline seed spread) and `fourier_ergodic`
-   (3/3 split, twenty-fold range). Six maps x six seeds under the campaign's own promotion
-   rule would settle both, and that is the Phase 2 harness rather than new code.
-2. **Restrict the controller's `m_pi` to the reachable component**, the last shortcut the
-   prototype still carries. It is the same defect class Phase 0 fixed in the audit, it is
-   cheap now that `grid_target` exists, and it can only reduce attraction toward pillars --
-   even though the map-by-map evidence above says it is not the cause of the excess.
-3. **A velocity gauge.** The witness cost carries none, which shows in +11.9% jerk and a
-   higher peak speed. The field arm's tracking cost is `0.5||d - dt*flow||^2`; the witness
-   analogue would keep the quadratic and replace only the direction.
+## What a deployable version would need
+
+Not more evidence now -- the evidence is in. Two things the current cost simply does not
+contain, both of which are redesign rather than tuning:
+
+1. **A velocity gauge.** The witness cost has none. `_flow_tracking_cost` is
+   `0.5||d - dt*flow||^2`; dropping it dropped the quadratic along with the direction, which
+   is what the +12.7% jerk and the higher peak speed are. The witness analogue keeps the
+   quadratic and replaces only the direction with the witness descent direction.
+2. **An obstacle-aware target in the controller.** The prototype's `m_pi` is the continuous
+   mixture, so mass inside pillars still pulls. Restricting it to the reachable component --
+   the same defect class Phase 0 fixed in the audit, and cheap now that `grid_target`
+   exists -- is the first thing to try against the clearance regression, though the
+   six-cell map ordering gave it no support and it should not be assumed sufficient.
+
+Both change what is being descended, so either would need its own frozen gate and its own
+36-cell run. That is a project, not a follow-up, and nothing in the paper depends on it.
