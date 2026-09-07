@@ -114,6 +114,25 @@ TRAIL_CMAP = LinearSegmentedColormap.from_list(
     "trail", ["#D5DAE0", "#73808C", "#101820"]
 )
 
+# Deployment render, recast so the result is the salient thing in the scene.
+#
+# The pillars are context and their height is a depth cue, not a measurement, so they get one
+# neutral hue running light at the base to mid-slate at the cap -- enough to read as volumes,
+# not enough to compete. `PILLAR_CMAP` above is the earlier blue-through-green ramp; it is
+# multi-hue for an axis that carries no quantity, which is the case a single hue exists to
+# avoid, and it out-shouted the trail it was drawn behind.
+PILLAR_NEUTRAL_CMAP = LinearSegmentedColormap.from_list(
+    "pillar_neutral", ["#CDD2D9", "#AEB5BF", "#8C95A2"]
+)
+
+# The trail is the measurement, and elapsed time along it is what shows the tour structure a
+# coverage controller is judged on. One hue, light (early) to dark (late), so it survives
+# greyscale printing and every form of colour-vision deficiency: against the neutral scene it
+# is the only chroma on the page, and against itself it separates by lightness alone.
+TRAIL_TIME_CMAP = LinearSegmentedColormap.from_list(
+    "trail_time", ["#B9D4E8", "#6A9EC6", "#4E79A7", "#2C4F72", "#16304A"]
+)
+
 # Figure widths in inches, measured off the class rather than guessed: IEEEtran journal
 # reports \columnwidth = 252pt and \textwidth = 516pt (72.27 TeX points/inch). Rendering at
 # exactly those widths makes `\includegraphics[width=\linewidth]` a no-op, which is what

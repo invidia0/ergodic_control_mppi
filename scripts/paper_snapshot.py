@@ -24,38 +24,13 @@ import numpy as np
 
 from ergodic_control_mppi.experiments.uav_pillar_tuning import _grid_config, score_run
 from ergodic_control_mppi.mppi.single import run_batch, stack_params
-from ergodic_control_mppi.plotting.deployment import trajectory_snapshot
+from ergodic_control_mppi.plotting.deployment import trajectory_snapshot, wrap_pdf
 from ergodic_control_mppi.simulation import controller_key, select_device
 
 # Matches the campaign driver: the warm-up steps whose transient is not part of the run.
 PREFLIGHT_STEPS = 200
 REPORTED = ("fourier_ergodic", "occupancy_mse", "all_modes_reached", "mode_cycles",
             "mode_dwell_median_s", "in_mode_fraction", "speed_mps")
-
-
-def _wrap_pdf(png: Path) -> Path:
-    """Put the cropped raster into a PDF page, rather than re-rendering as vector.
-
-    Saving this scene with a ``.pdf`` path does work, and produces a 56 MB file: the pillars
-    and trail are a single scatter of roughly a quarter of a million points, and vector
-    output stores each one as its own path. It is also necessarily uncropped, because
-    `_crop_transparent` measures an alpha channel that a vector page does not have, so the
-    scene would sit in the wide margin the crop exists to remove.
-
-    Nothing is lost by rasterising. The render is already 2748 px on its long edge, which is
-    over 800 dpi across a single column, and the content is a point cloud rather than line
-    art -- there is no geometry a vector container would keep sharper. PDF has no alpha, so
-    the transparent border is flattened onto white, which is what it sits on in the paper.
-    """
-    from PIL import Image
-
-    with Image.open(png) as raster:
-        page = Image.new("RGB", raster.size, "white")
-        page.paste(raster, mask=raster.split()[-1] if raster.mode == "RGBA" else None)
-        output = png.with_suffix(".pdf")
-        # 600 dpi keeps the page a sane physical size; `width=\linewidth` rescales anyway.
-        page.save(output, "PDF", resolution=600.0)
-    return output
 
 
 def main() -> None:
@@ -171,7 +146,7 @@ def main() -> None:
             pillar_style=arguments.pillar_style,
         )
         if arguments.pdf:
-            print(f"           wrote {_wrap_pdf(written)}", flush=True)
+            print(f"           wrote {wrap_pdf(written)}", flush=True)
         scores = "  ".join(f"{k}={float(row[k]):.4g}" for k in REPORTED if k in row)
         print(f"  seed {seed}: {scores}\n           wrote {written}", flush=True)
 

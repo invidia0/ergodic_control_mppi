@@ -325,6 +325,7 @@ def trajectory_snapshot(
     trail_size: float = 1.6,
     vehicle_span: float = 1.5,
     trail_colour: str = "#4a4f59",
+    trail_cmap: str | None = None,
     vehicle_colour: str = "#111111",
     cloud_density: int = 3,
     dpi: int = 600,
@@ -360,8 +361,13 @@ def trajectory_snapshot(
         vehicle_span: Tip-to-tip width of the drawn quadrotor, in metres. An exaggeration
             like ``z_exaggeration``: the real airframe is ~0.55 m across a 40 m workspace
             and would be sub-pixel. State it in the caption.
-        trail_colour: Trail ink. Pure black buried the path in the pillar cloud; a slate
-            grey separates from the ``turbo_r`` columns without going pale.
+        trail_colour: Trail ink, used when ``trail_cmap`` is None. Pure black buried the
+            path in the pillar cloud; a slate grey separates from the ``turbo_r`` columns
+            without going pale.
+        trail_cmap: Optional single-hue ramp shading the trail by elapsed time, oldest at
+            the light end. Only meaningful with ``pillar_style="points"``, where trail and
+            cloud share one depth-sorted scatter; the cylinder renderer strokes the trail
+            in segments and takes ``trail_colour`` alone.
         vehicle_colour: Quadrotor glyph ink. Black reads against both the pale density
             plane and the pillar cloud, which no single hue in the ``turbo_r`` ramp does.
         cloud_density: Samples per cell pitch in each direction for the pillar cloud. 1 is
@@ -497,7 +503,9 @@ def trajectory_snapshot(
             [
                 colour_map((z - altitude) / max(top - altitude, 1e-9))
                 * np.array([1.0, 1.0, 1.0, pillar_alpha]),
-                np.tile(to_rgba(trail_colour), (positions.shape[0], 1)),
+                (_resolve_cmap(trail_cmap)(np.linspace(0.0, 1.0, positions.shape[0]))
+                 if trail_cmap is not None
+                 else np.tile(to_rgba(trail_colour), (positions.shape[0], 1))),
             ]
         )
         axes.scatter(
@@ -540,7 +548,9 @@ def _resolve_cmap(name: str):
 
     # This module's own ramps first: matplotlib would not know them, and registering into
     # its global namespace to look them up would be a side effect on import.
-    local = {"pillar": style.PILLAR_CMAP, "carbon": style.DENSITY_CMAP}
+    local = {"pillar": style.PILLAR_CMAP, "carbon": style.DENSITY_CMAP,
+             "pillar_neutral": style.PILLAR_NEUTRAL_CMAP, "trail": style.TRAIL_CMAP,
+             "trail_time": style.TRAIL_TIME_CMAP}
     if name in local:
         return local[name]
     try:
@@ -672,6 +682,31 @@ def _draw_cylinder_scene(axes, components, base, top, colour_map, alpha,
         draw(*args, order)
     # The caller stacks the vehicle on top of this, and the stack is as deep as the scene.
     return order + 1
+
+
+def wrap_pdf(png: Path) -> Path:
+    """Put the cropped raster into a PDF page, rather than re-rendering as vector.
+
+    Saving this scene with a ``.pdf`` path does work, and produces a 56 MB file: the pillars
+    and trail are a single scatter of roughly a quarter of a million points, and vector
+    output stores each one as its own path. It is also necessarily uncropped, because
+    `_crop_transparent` measures an alpha channel that a vector page does not have, so the
+    scene would sit in the wide margin the crop exists to remove.
+
+    Nothing is lost by rasterising. The render is already 2748 px on its long edge, which is
+    over 800 dpi across a single column, and the content is a point cloud rather than line
+    art -- there is no geometry a vector container would keep sharper. PDF has no alpha, so
+    the transparent border is flattened onto white, which is what it sits on in the paper.
+    """
+    from PIL import Image
+
+    with Image.open(png) as raster:
+        page = Image.new("RGB", raster.size, "white")
+        page.paste(raster, mask=raster.split()[-1] if raster.mode == "RGBA" else None)
+        output = png.with_suffix(".pdf")
+        # 600 dpi keeps the page a sane physical size; `width=\linewidth` rescales anyway.
+        page.save(output, "PDF", resolution=600.0)
+    return output
 
 
 def _crop_transparent(path: Path, pad_fraction: float = 0.02,
