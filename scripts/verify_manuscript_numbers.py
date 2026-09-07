@@ -1,145 +1,177 @@
-"""Check every number asserted in Sec. V of the manuscript against the campaign CSVs.
+"""Check numerical claims in the manuscript against the frozen T=150 bundle.
 
-Sec. V quotes roughly seventy numbers, all typed by hand from these files. Nothing else in
-the repo would notice if one were mistranscribed, or if a re-flown campaign moved one out
-from under the prose -- the manuscript lives in a separate Overleaf checkout, so a test
-cannot reach it. This is the check: the claims are listed explicitly below, and a drift in
-either the data or the typing shows up as a BAD line.
-
-**Update this table in the same commit that changes a number in Sec. V.** A claim here that
-no longer matches the manuscript is worse than no claim, because it reports OK.
-
-One transcription error was caught this way on the first run (SVES open-tier tours given as
-8 where the twelve-seed median is 7.5).
+Run from the repository root:
 
     uv run python scripts/verify_manuscript_numbers.py
 """
-import csv, collections, importlib.util, sys
+
+import collections
+import csv
+import importlib.util
+import json
+import sys
 from pathlib import Path
+
 import numpy as np
-from scipy.stats import wilcoxon
-
-spec = importlib.util.spec_from_file_location('fr', 'scripts/final_report.py')
-fr = importlib.util.module_from_spec(spec); sys.modules['fr'] = fr; spec.loader.exec_module(fr)
-rf = sys.modules['report_figures']
-
-MANUSCRIPT = Path('69f1b707cd917a58478ed643/main.tex')
-#: The manuscript is in the tree now, so a claim can be bound to the text that makes it
-#: rather than only to the data. Numbers are typeset several ways, so a claim counts as
-#: found if any rendering of it occurs: bare, with a thousands separator, or as a LaTeX
-#: scientific literal. Absence is reported, never fatal -- a value can legitimately reach
-#: the page through a generated table -- but an unfound claim is not verifying any prose.
-_TEXT = MANUSCRIPT.read_text(encoding='utf-8') if MANUSCRIPT.is_file() else None
 
 
-def _renderings(value: float) -> list[str]:
-    """Every spelling of ``value`` this manuscript plausibly uses."""
+spec = importlib.util.spec_from_file_location("fr", "scripts/final_report.py")
+fr = importlib.util.module_from_spec(spec)
+sys.modules["fr"] = fr
+spec.loader.exec_module(fr)
+rf = sys.modules["report_figures"]
+
+ROOT = Path("results/uav/T150")
+MANUSCRIPT = Path("69f1b707cd917a58478ed643/main.tex")
+TEXT = MANUSCRIPT.read_text(encoding="utf-8") if MANUSCRIPT.is_file() else None
+
+
+def renderings(value: float) -> list[str]:
+    """Return the numeric spellings used in prose and LaTeX scientific notation."""
     out = []
     for text in (f"{value:g}", f"{value:,g}", f"{abs(value):g}"):
         out.append(text)
-        if text.startswith('0.'):
-            out.append(text[1:])          # .55 as well as 0.55
+        if text.startswith("0."):
+            out.append(text[1:])
     if value and abs(value) < 1e-3:
         exponent = int(np.floor(np.log10(abs(value))))
-        mantissa = value / 10 ** exponent
+        mantissa = value / 10**exponent
         out += [f"{mantissa:.2f}", f"{mantissa:.3g}"]
     return out
 
 
-def in_manuscript(claimed: float) -> bool:
-    return _TEXT is not None and any(r in _TEXT for r in _renderings(claimed))
-
-
 ok = bad = missing = 0
-def check(label, claimed, actual, tol=0.005):
+
+
+def check(label: str, claimed: float, actual: float, tol: float = 0.005) -> None:
+    """Compare one manuscript claim with its value reconstructed from the archive."""
     global ok, bad, missing
     good = abs(claimed - actual) <= tol * max(1.0, abs(actual))
-    found = in_manuscript(claimed)
+    found = TEXT is not None and any(value in TEXT for value in renderings(claimed))
+    ok += good
+    bad += not good
     missing += not found
-    mark = 'OK ' if good else 'BAD'
-    print(f"  {mark} {label:<46} claimed {claimed:<12} actual {actual:.4g}"
-          f"{'' if found else '   [not found in main.tex]'}")
-    ok, bad = ok + good, bad + (not good)
+    print(
+        f"  {'OK ' if good else 'BAD'} {label:<46} claimed {claimed:<12} actual {actual:.4g}"
+        f"{'' if found else '   [not found in main.tex]'}"
+    )
 
-t = rf.load_final(Path('results/uav/ablation_final.csv'))
-recs = {r['arm']: r for r in fr.analyse(t)}
+
 print("--- ablation ---")
-check("arms", 37, len(recs), 0)
-check("axes", 19, len(set(r['axis'] for r in recs.values())), 0)
-check("cells per arm", 36, recs['T_150']['cells'], 0)
-for arm, eff, sens in (("memory_off", -3.16, 15.1), ("plan_off", -0.94, 1.75),
-                       ("ceiling_0", -0.34, 2.93), ("release_off", -0.09, 2.98),
-                       ("transit_1", -0.54, 3.04), ("h_0.47", -0.36, 4.4),
-                       ("h_5.0", -0.24, 6.7), ("alpha_0.9", -1.72, 5.8),
-                       ("T_150", 0.55, 3.28), ("T_500", -0.20, 1.10),
-                       ("T_750", -0.55, 2.48), ("ceiling_0.5", -0.03, 0.61)):
-    check(f"{arm} effect", eff, recs[arm]['median_effect'], 0.02)
-    check(f"{arm} sensitivity", sens, recs[arm]['sensitivity'], 0.02)
-check("holm-significant sub-3sigma", 11,
-      sum(1 for r in recs.values() if r['holm'] and r['sensitivity'] < 3.0), 0)
-check("null verdicts", 20, sum(1 for r in recs.values() if r['verdict'] == 'null'), 0)
-check("promotions", 1, sum(1 for r in recs.values() if r['verdict'] == 'promoted'), 0)
-check("ceiling_0.5 agreement", 4, recs['ceiling_0.5']['agreement'], 0)
-check("h_2.35 open effect", 0.14,
-      {r['arm']: r for r in fr.analyse(rf.load_final(Path('results/uav/ablation_open.csv')))}['h_2.35']['median_effect'], 0.02)
+table = rf.load_final(ROOT / "clutter/ablation.csv")
+records = {record["arm"]: record for record in fr.analyse(table)}
+check("arms", 39, len(records), 0)
+check("axes", 19, len({record["axis"] for record in records.values()}), 0)
+check("cells per arm", 36, records["T_350"]["cells"], 0)
+for arm, effect, sensitivity in (
+    ("memory_off", -2.88, 13.0),
+    ("plan_off", -1.31, None),
+    ("ceiling_0", -0.70, 4.2),
+    ("release_off", -0.12, 2.9),
+    ("transit_1", -1.33, 8.5),
+    ("h_0.47", -0.11, 4.4),
+    ("h_2.35", -0.37, 5.1),
+    ("h_5.0", -0.78, 7.9),
+    ("alpha_0.9", -1.16, 5.0),
+    ("T_350", -0.55, 3.3),
+    ("T_500", -0.75, 4.5),
+    ("T_100", 0.17, None),
+    ("T_75", 0.29, None),
+    ("ceiling_0.5", -0.04, 0.48),
+):
+    check(f"{arm} effect", effect, records[arm]["median_effect"], 0.02)
+    if sensitivity is not None:
+        check(f"{arm} sensitivity", sensitivity, records[arm]["sensitivity"], 0.02)
+check("promotions", 0, sum(r["verdict"] == "promoted" for r in records.values()), 0)
+check(
+    "Holm-significant sub-3sigma",
+    12,
+    sum(r["holm"] and r["sensitivity"] < 3.0 for r in records.values()),
+    0,
+)
+check("null verdicts", 18, sum(r["verdict"] == "null" for r in records.values()), 0)
+open_records = {
+    record["arm"]: record
+    for record in fr.analyse(rf.load_final(ROOT / "open/ablation.csv"))
+}
+check("open h_2.35 effect", -0.19, open_records["h_2.35"]["median_effect"], 0.02)
+check("open h_2.35 sensitivity", 7.4, open_records["h_2.35"]["sensitivity"], 0.02)
 
-# tours: baseline is 72 rows over two lane widths, so halve it for a 36-cell comparison
-rows = list(csv.DictReader(open('results/uav/ablation_final.csv')))
-by = collections.defaultdict(list)
-for r in rows: by[r['arm']].append(r)
-def tours(a):
-    v = by[a]
-    s = sum(int(float(r['all_modes_reached'])) + float(r['mode_cycles']) for r in v)
-    return s / (len(v) / 36)
-check("ceiling_0 tour collapse factor", 4.0, tours('baseline') / tours('ceiling_0'), 0.10)
-mo = np.array([float(r['mode_cycles']) for r in by['memory_off']])
-bl = np.array([float(r['mode_cycles']) for r in by['baseline'] if r['lanes'] == '36'])
-check("memory_off median tours", 2, np.median(mo), 0)
-check("baseline median tours", 5, np.median(bl), 0)
 
-# T_150 path length and clearance
-for m, claimed in (('path_length_m', 952), ('min_clearance_m', 0.95)):
-    a, b, _ = rf.paired_final(t, 'T_150', m)
-    check(f"T_150 {m}", claimed, np.median(a), 0.01)
-for m, claimed in (('path_length_m', 678), ('min_clearance_m', 0.98)):
-    a, b, _ = rf.paired_final(t, 'T_150', m)
-    check(f"baseline {m}", claimed, np.median(b), 0.01)
+def load_baselines(path: Path) -> dict[str, dict[tuple[str, str], dict[str, str]]]:
+    """Index a baseline CSV by method and paired map/seed cell."""
+    data = collections.defaultdict(dict)
+    with path.open(newline="") as stream:
+        for row in csv.DictReader(stream):
+            data[row["method"]][(row["map"], row["seed"])] = row
+    return data
+
 
 print("--- baselines ---")
-def load(p):
-    d = collections.defaultdict(dict)
-    for r in csv.DictReader(open(p)):
-        d[r['method']][(r['map'], r['seed'])] = r
-    return d
-for tier, path, claims in (
-    ('open', 'results/uav/baselines_open.csv',
-     {'fmec': (2.57, -0.14), 'hedac': (1.39, 1.20), 'sves': (1.08, 0.04), 'smc': (-0.63, 1.37)}),
-    ('clutter', 'results/uav/baselines_clutter.csv',
-     {'fmec': (1.23, -0.52), 'hedac': (0.18, 0.61), 'sves': (0.70, 0.33), 'smc': (-1.24, 1.20)})):
-    d = load(path); ours = d['ours']
-    for m, (ce, co) in claims.items():
-        cells = sorted(set(ours) & set(d[m]))
-        for metric, claimed in (('fourier_ergodic', ce), ('occupancy_mse', co)):
-            a = np.array([float(d[m][c][metric]) for c in cells])
-            b = np.array([float(ours[c][metric]) for c in cells])
-            check(f"{tier} {m} {metric}", claimed, np.median(np.log2(a / b)), 0.02)
-    for m, claimed in (('sves', 36.1), ('smc', 27.8), ('fmec', 13.9), ('hedac', 8.3), ('ours', 0.0)):
-        if tier != 'clutter': continue
-        v = list(d[m].values())
-        check(f"clutter {m} collision %", claimed,
-              100 * sum(1 for r in v if int(r['collisions'])) / len(v), 0.02)
-    if tier == 'clutter':
-        for m, claimed in (('ours', 0.99), ('sves', 0.317), ('smc', 0.313), ('fmec', 0.335), ('hedac', 0.337)):
-            check(f"clutter {m} clearance", claimed,
-                  np.median([float(r['min_clearance_m']) for r in d[m].values()]), 0.02)
-        check("clutter ours path m", 683, np.median([float(r['path_length_m']) for r in d['ours'].values()]), 0.01)
-        check("clutter sves modes", 31, sum(int(float(r['all_modes_reached'])) for r in d['sves'].values()), 0)
+# (Fourier, occupancy MSE, certified E_N) as quoted in Sec. V-C, at T=150.
+for tier, claims in (
+    ("open", {"fmec": (2.53, 0.39, 0.30), "hedac": (0.85, 1.71, -0.05),
+              "sves": (0.70, 0.57, 1.46), "smc": (-1.01, 1.90, 0.79)}),
+    ("clutter", {"fmec": (1.36, 0.04, -0.31), "hedac": (0.12, 1.08, -0.23),
+                 "sves": (0.58, 0.88, 1.46), "smc": (-1.29, 1.72, 0.76)}),
+):
+    data = load_baselines(ROOT / tier / "baselines.csv")
+    ours = data["ours"]
+    for method, (fourier, occupancy, certified) in claims.items():
+        cells = sorted(set(ours) & set(data[method]))
+        for metric, claimed in (("fourier_ergodic", fourier), ("occupancy_mse", occupancy),
+                                ("mmd_final", certified)):
+            baseline = np.array([float(data[method][cell][metric]) for cell in cells])
+            reference = np.array([float(ours[cell][metric]) for cell in cells])
+            check(f"{tier} {method} {metric}", claimed, float(np.median(np.log2(baseline / reference))), 0.02)
+    if tier == "clutter":
+        for method, claimed in (("sves", 36.1), ("smc", 27.8), ("fmec", 13.9), ("hedac", 8.3), ("ours", 0.0)):
+            rows = list(data[method].values())
+            check(f"clutter {method} collision %", claimed, 100 * sum(int(r["collisions"]) > 0 for r in rows) / len(rows), 0.02)
+        check("clutter ours clearance", 0.94, np.median([float(r["min_clearance_m"]) for r in ours.values()]), 0.02)
+        check("clutter ours path m", 953, np.median([float(r["path_length_m"]) for r in ours.values()]), 0.01)
+        check("clutter ours speed", 2.38,
+              np.median([float(r["path_length_m"]) for r in ours.values()]) / 400.0, 0.01)
+        check("clutter fastest baseline path m", 685,
+              max(np.median([float(r["path_length_m"]) for r in data[m].values()])
+                  for m in ("hedac", "sves", "fmec", "smc")), 0.01)
+        check("clutter sves modes", 31, sum(int(float(r["all_modes_reached"])) for r in data["sves"].values()), 0)
+        # The certificate's own validity, counted over every method rather than ours alone.
+        for field, label in (("mmd_prefix_holds", "prefix"), ("mmd_beats_trivial", "nonvacuous")):
+            check(f"all-method certificate {label}", 240,
+                  sum(int(r[field]) for tier_data in (
+                      load_baselines(ROOT / "open/baselines.csv"),
+                      load_baselines(ROOT / "clutter/baselines.csv"))
+                      for rows in tier_data.values() for r in rows.values()), 0)
     else:
-        check("open ours tours", 6, np.median([float(r['mode_cycles']) for r in d['ours'].values()]), 0)
-        check("open sves tours", 7.5, np.median([float(r['mode_cycles']) for r in d['sves'].values()]), 0)
+        check("open ours tours", 6, np.median([float(r["mode_cycles"]) for r in ours.values()]), 0)
+        check("open sves tours", 7.5, np.median([float(r["mode_cycles"]) for r in data["sves"].values()]), 0)
+
+
+print("--- certificate ---")
+with (ROOT / "audit/certificate.csv").open(newline="") as stream:
+    certificate = list(csv.DictReader(stream))
+check("certificate paths", 72, len(certificate), 0)
+check("certificate prefix passes", 72, sum(r["prefix_holds"] == "True" for r in certificate), 0)
+check("certificate nonvacuous", 72, sum(r["beats_trivial"] == "True" for r in certificate), 0)
+check("certificate final discrepancy", 0.00382, np.median([float(r["error_final"]) for r in certificate]), 0.01)
+check("certificate final bound", 0.0212, np.median([float(r["bound_final"]) for r in certificate]), 0.01)
+check("certificate looseness", 5.56, np.median([float(r["looseness"]) for r in certificate]), 0.01)
+
+
+print("--- timing ---")
+timing = json.loads((ROOT / "audit/timing_t150.json").read_text(encoding="utf-8"))
+stages = timing["stages"]
+check("isolated stage sum ms", 1.96, stages["accounted_ms"], 0.01)
+check("isolated/fused gap percent", 10.6, 100 * stages["residual_ms"] / stages["total_ms"], 0.01)
+check("end-to-end step ms", 2.65, timing["endtoend"]["with_memory"]["ms_median"], 0.01)
+check("fused step ms", 2.19, stages["total_ms"], 0.01)
+check("unattributed ms", 0.23, stages["residual_ms"], 0.02)
+check("rollout share percent", 64, 100 * stages["stages"]["rollouts_KT"]["ms_median"] / stages["total_ms"], 0.01)
+for name, claimed in (("rollouts_KT", 1.41), ("memory_P2", 0.22), ("sample_epsilon", 0.15),
+                      ("plan_T2", 0.11), ("attraction_T", 0.08)):
+    check(f"{name} ms", claimed, stages["stages"][name]["ms_median"], 0.01)
 
 print(f"\n{ok} verified, {bad} WRONG, {missing} not located in the manuscript text")
-if _TEXT is None:
-    print(f"NOTE: {MANUSCRIPT} is absent, so no claim was bound to the prose")
 if bad:
     raise SystemExit(f"{bad} of {ok + bad} manuscript numbers do not match the data")
