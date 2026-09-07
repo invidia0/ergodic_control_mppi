@@ -31,6 +31,7 @@ from ergodic_control_mppi.plotting.style import (
     NEUTRAL,
     OUTSIDE_TICKS,
     PRIMARY,
+    nature_style,
     paper_style,
     save,
 )
@@ -805,6 +806,157 @@ STEP_COLOURS = {
     "attraction_T": "#9B7BD4",    # violet
     "_residual": "#B9C0CC",       # grey: unattributed overhead is not a stage
 }
+
+
+#: Rows of the main-text effect map: the conditions that decide a mechanism, grouped by the
+#: family they belong to. The complete 39-condition matrix goes to Extended Data; this is the
+#: subset a reader has to see to follow the argument.
+EFFECT_MAP_GROUPS = (
+    ("Memory", ("memory_off", "tau_11")),
+    ("Plan", ("plan_off",)),
+    ("Transit", ("transit_1",)),
+    ("Bandwidth", ("h_2.35", "h_5.0")),
+    ("Destination", ("ceiling_0", "release_off")),
+    ("Temperature", ("alpha_0.9",)),
+    ("Horizon", ("T_250", "T_350", "T_500")),
+)
+
+#: ``(column label, CSV field, +1 if lower is better)``. The sign turns every column into the
+#: same reading -- positive means the ablation is *worse* than the shipped profile -- so one
+#: diverging scale serves all five and a row can be scanned across.
+EFFECT_MAP_METRICS = (
+    ("Occupancy\nMSE", "occupancy_mse", +1),
+    ("Fourier\nerror", "fourier_ergodic", +1),
+    ("Min\nclearance", "min_clearance_m", -1),
+    # `mode_cycles` would be the natural tour count, but 45 of the 1476 cells are zero and a
+    # log ratio is undefined there; the in-mode time share is the same behaviour, bounded away
+    # from zero on every cell.
+    ("In-mode\nshare", "in_mode_fraction", -1),
+    ("Wall\ntime", "wall_seconds", +1),
+)
+
+
+def hierarchical_interval(effects, maps, repeats: int = 4000, seed: int = 0):
+    """Percentile bootstrap of the median effect, resampling maps then cells within them.
+
+    Cells on one map share its geometry, so resampling all 36 as if independent would
+    understate the spread. Resampling maps first and cells within the drawn maps second
+    treats the map as the unit it is.
+    """
+    rng = np.random.default_rng(seed)
+    by_map: dict = defaultdict(list)
+    for value, name in zip(effects, maps):
+        by_map[name].append(value)
+    keys = list(by_map)
+    pools = [np.asarray(by_map[k], dtype=float) for k in keys]
+    draws = np.empty(repeats)
+    for index in range(repeats):
+        chosen = rng.integers(0, len(pools), size=len(pools))
+        sample = np.concatenate([
+            pools[c][rng.integers(0, len(pools[c]), size=len(pools[c]))] for c in chosen
+        ])
+        draws[index] = np.median(sample)
+    return float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
+
+
+def effect_map_cells(table, arms, metrics=EFFECT_MAP_METRICS):
+    """``(values, excludes_zero, agreement)`` matrices over ``arms`` x ``metrics``.
+
+    ``values`` is the paired median log2(ablation / shipped) with the sign of each
+    metric applied; ``excludes_zero`` marks cells whose hierarchical 95% interval clears
+    zero; ``agreement`` is the share of maps whose effect has the row's sign.
+    """
+    shape = (len(arms), len(metrics))
+    values = np.full(shape, np.nan)
+    excludes = np.zeros(shape, dtype=bool)
+    agreement = np.zeros(shape)
+    for row, arm in enumerate(arms):
+        for column, (_, field, sign) in enumerate(metrics):
+            arm_values, base_values, cells = paired_final(table, arm, field)
+            effects = sign * np.log2(arm_values / base_values)
+            values[row, column] = float(np.median(effects))
+            maps = [(c[0], c[1]) for c in cells]
+            low, high = hierarchical_interval(effects, maps)
+            excludes[row, column] = low > 0.0 or high < 0.0
+            per_map = defaultdict(list)
+            for value, name in zip(effects, maps):
+                per_map[name].append(value)
+            medians = np.array([np.median(v) for v in per_map.values()])
+            same = np.sum(np.sign(medians) == np.sign(values[row, column]))
+            agreement[row, column] = same / max(len(medians), 1)
+    return values, excludes, agreement
+
+
+def fig_ablation_effect_map(table, output: Path, groups=EFFECT_MAP_GROUPS,
+                            metrics=EFFECT_MAP_METRICS, cap: float = 2.5) -> Path:
+    """Draw the ablation as an effect map: conditions down, outcomes across.
+
+    A forest plot ranks arms on one outcome. This shows five at once, which is what turns a
+    leaderboard into a mechanism study: `ceiling_0` costs little occupancy error and a great
+    deal of Fourier error, and the two columns side by side say so immediately.
+
+    Colour is never the only channel, and each mark labels the informative minority rather
+    than the majority: 78% of cells clear zero and 80% agree on all six maps, so outlining
+    those would draw a grid. Instead cells whose interval *includes* zero are hatched --
+    "not distinguishable from the shipped profile" -- cells agreeing on fewer than five maps
+    print that count, and any cell past the colour cap prints its value.
+    """
+    arms = [arm for _, members in groups for arm in members]
+    labels = [ARM_LABELS.get(arm, arm.replace("_", " ")) for arm in arms]
+    values, excludes, agreement = effect_map_cells(table, arms, metrics)
+    height = 16.0 + 5.4 * len(arms) + 3.0 * len(groups)
+
+    with plt.rc_context(nature_style("double", height_mm=min(height, 165.0))):
+        figure, axes = plt.subplots()
+        limit = max(cap, 0.05)
+        image = axes.imshow(np.clip(values, -limit, limit), cmap=DIVERGING_CMAP,
+                            vmin=-limit, vmax=limit, aspect="auto")
+        axes.set_xticks(range(len(metrics)))
+        axes.set_xticklabels([m[0] for m in metrics])
+        axes.xaxis.set_ticks_position("top")
+        axes.set_yticks(range(len(arms)))
+        axes.set_yticklabels(labels)
+        axes.set_xticks(np.arange(len(metrics) + 1) - 0.5, minor=True)
+        axes.set_yticks(np.arange(len(arms) + 1) - 0.5, minor=True)
+        axes.grid(which="minor", color="#FFFFFF", linewidth=0.8)
+        axes.tick_params(which="minor", length=0)
+        axes.tick_params(which="major", length=0)
+
+        maps_total = len(set(cell[:2] for cell in next(iter(table.values()))))
+        for row in range(len(arms)):
+            for column in range(len(metrics)):
+                value = values[row, column]
+                if not excludes[row, column]:
+                    axes.add_patch(plt.Rectangle(
+                        (column - 0.5, row - 0.5), 1, 1, fill=False, hatch="////",
+                        edgecolor="#7A7D83", linewidth=0.0, zorder=4))
+                agreed = int(round(agreement[row, column] * maps_total))
+                if agreed < maps_total - 1:
+                    axes.text(column + 0.40, row + 0.36, f"{agreed}/{maps_total}",
+                              ha="right", va="center", fontsize=4.4, color="#333333",
+                              zorder=6)
+                if abs(value) > limit:
+                    axes.text(column, row, f"{value:+.1f}", ha="center", va="center",
+                              fontsize=5.5, color="#FFFFFF", zorder=6)
+
+        # Group rules and labels, drawn outside the axes so they read as structure.
+        start = 0
+        for name, members in groups:
+            end = start + len(members)
+            if start:
+                axes.axhline(start - 0.5, color="#222222", linewidth=0.7, zorder=7)
+            axes.text(-0.46, (start + end - 1) / 2.0, name,
+                      transform=axes.get_yaxis_transform(), rotation=90,
+                      ha="center", va="center", fontsize=5.5, color="#444444")
+            start = end
+
+        bar = figure.colorbar(image, ax=axes, fraction=0.021, pad=0.015, extend="both")
+        bar.set_label(r"paired median $\log_2$(ablation / shipped),  positive = worse",
+                      fontsize=5.5)
+        bar.ax.tick_params(labelsize=5)
+        axes.set_title("No ablated condition improves on the shipped profile", pad=14)
+        figure.tight_layout()
+    return save(figure, output)
 
 
 def fig_step_budget(report: Path, output: Path) -> Path:

@@ -206,6 +206,83 @@ def paper_style(size: str = "column") -> dict[str, Any]:
     }
 
 
+#: Nature research-figure geometry, in millimetres:
+#: https://research-figure-guide.nature.com/figures/building-and-exporting-figure-panels/
+#: One column is 89 mm, two are 183 mm, and nothing may exceed 170 mm of height because the
+#: legend has to fit on the page beneath it.
+NATURE_WIDTH_MM = {"single": 89.0, "double": 183.0}
+NATURE_MAX_HEIGHT_MM = 170.0
+
+#: Arial and Helvetica are what the guide names. Neither ships on Linux, so the stack falls
+#: through to their metrically exact clones -- Liberation Sans is Arial's, Nimbus Sans is
+#: Helvetica's -- which typeset identically rather than approximately.
+NATURE_SANS = ["Arial", "Helvetica", "Liberation Sans", "Nimbus Sans", "DejaVu Sans"]
+
+
+def nature_style(width: str = "double", height_mm: float = 60.0) -> dict[str, Any]:
+    """rcParams for a figure built to the Nature research-figure specification.
+
+    Separate from :func:`paper_style` rather than replacing it: that one matches the
+    IEEEtran body text in serif on a grey panel, which is right for the manuscript's own
+    format and wrong here. This one is sans-serif at 5--7 pt on white, with text kept as
+    text in the PDF (``fonttype`` 42) because the guide asks for editable layers and
+    forbids outlined type.
+
+    Args:
+        width: ``"single"`` (89 mm) or ``"double"`` (183 mm).
+        height_mm: Figure height; must not exceed :data:`NATURE_MAX_HEIGHT_MM`.
+
+    Returns:
+        rcParams for ``plt.rc_context``.
+
+    Raises:
+        ValueError: If ``width`` is unknown or the height exceeds the page allowance.
+    """
+    if width not in NATURE_WIDTH_MM:
+        raise ValueError(f"width must be one of {sorted(NATURE_WIDTH_MM)}, got {width!r}")
+    if height_mm > NATURE_MAX_HEIGHT_MM:
+        raise ValueError(
+            f"height {height_mm} mm exceeds the {NATURE_MAX_HEIGHT_MM} mm page allowance"
+        )
+    return {
+        "font.family": "sans-serif",
+        "font.sans-serif": NATURE_SANS,
+        "mathtext.fontset": "dejavusans",
+        "text.usetex": False,
+        "figure.facecolor": "#FFFFFF",
+        "axes.facecolor": "#FFFFFF",
+        "axes.edgecolor": "#222222",
+        "axes.linewidth": 0.5,
+        "axes.grid": False,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "xtick.major.size": 2.0,
+        "ytick.major.size": 2.0,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.minor.visible": False,
+        "ytick.minor.visible": False,
+        "lines.linewidth": 0.8,
+        "lines.markersize": 3.0,
+        "legend.frameon": False,
+        "axes.titlesize": 7,
+        "axes.labelsize": 6,
+        "xtick.labelsize": 5,
+        "ytick.labelsize": 5,
+        "legend.fontsize": 5.5,
+        "figure.titlesize": 7,
+        "figure.figsize": (NATURE_WIDTH_MM[width] / 25.4, height_mm / 25.4),
+        # Keep glyphs as text so the exported PDF has editable layers.
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "svg.fonttype": "none",
+        "savefig.facecolor": "#FFFFFF",
+        "savefig.edgecolor": "#FFFFFF",
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    }
+
+
 def save(figure, path: str | Path, dpi: int = 300) -> Path:
     """Write ``figure`` to ``path``, creating parent directories."""
     output = Path(path)
