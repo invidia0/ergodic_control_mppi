@@ -923,7 +923,11 @@ def certificate_columns(positions: np.ndarray, support, weights, bandwidth: floa
     """
     from ergodic_control_mppi.metrics.discrepancy import walk
 
-    audited = np.asarray(positions[::CERTIFICATE_STRIDE], dtype=np.float64)
+    # A descent gap needs a successor, so a path shorter than two strides is thinned less
+    # rather than left unscored: the column set must not depend on the run length. Every
+    # deployed run is 20,000 steps, where this clamps to CERTIFICATE_STRIDE exactly.
+    stride = min(CERTIFICATE_STRIDE, max(1, len(positions) // 2))
+    audited = np.asarray(positions[::stride], dtype=np.float64)
     result = walk(audited, support, weights, bandwidth)
     return {
         "mmd_final": float(result["error"][-1]),
@@ -933,7 +937,7 @@ def certificate_columns(positions: np.ndarray, support, weights, bandwidth: floa
         "mmd_prefix_holds": int(np.all(result["error"] <= result["bound"] + 1e-9)),
         "mmd_beats_trivial": int(result["bound"][-1] < result["trivial"]),
         "mmd_samples": int(len(audited)),
-        "mmd_stride": CERTIFICATE_STRIDE,
+        "mmd_stride": stride,
     }
 
 
