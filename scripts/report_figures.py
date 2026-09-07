@@ -205,8 +205,17 @@ def load_final(path: Path) -> dict[str, dict[tuple, dict[str, str]]]:
 
 
 def baseline_for(table, arm: str) -> str:
-    """The baseline measured at this arm's own lane count -- i.e. on its own branch."""
-    return f"{BASELINE}@{next(iter(table[arm].values()))['lanes']}"
+    """The baseline measured at this arm's own lane count -- i.e. on its own branch.
+
+    A figure names the conditions it wants; an archive predating them does not have to
+    carry them. ``table`` is a defaultdict, so a condition the campaign never ran arrives
+    here as an empty dict and ``next()`` raises a bare ``StopIteration`` with no arm in it,
+    surfacing several frames from the cause. Name the arm instead.
+    """
+    rows = table.get(arm)
+    if not rows:
+        raise KeyError(f"no rows for arm {arm!r}; the archive does not cover this condition")
+    return f"{BASELINE}@{next(iter(rows.values()))['lanes']}"
 
 
 def outcome_values(rows: list[dict[str, str]], name: str, transform: str) -> np.ndarray:
@@ -866,6 +875,14 @@ def effect_map_cells(table, arms, metrics=EFFECT_MAP_METRICS):
     metric applied; ``excludes_zero`` marks cells whose hierarchical 95% interval clears
     zero; ``agreement`` is the share of maps whose effect has the row's sign.
     """
+    # One message naming every uncovered condition, rather than failing on the first and
+    # again on the next after a re-run: the fix for any of these is the same campaign.
+    absent = [arm for arm in arms if not table.get(arm)]
+    if absent:
+        raise KeyError(
+            f"the archive covers none of {absent}; the effect map's conditions come from "
+            "the current arm table, so re-run scripts/final_ablation.py to cover them"
+        )
     shape = (len(arms), len(metrics))
     values = np.full(shape, np.nan)
     excludes = np.zeros(shape, dtype=bool)
@@ -992,6 +1009,12 @@ def fig_response_curves(table, output: Path, axes_spec=RESPONSE_AXES,
         for panel, (axis, label, shipped, log_x) in zip(panels, axes_spec):
             members = [a for a in table if not a.startswith(BASELINE)
                        and list(table[a].values())[0].get("axis") == axis]
+            # An arm whose level *is* the shipped value is a replicate of the profile, not a
+            # level of the sweep: its effect is zero by construction and it draws a second
+            # marker on the origin the shipped point already holds. An archive from before
+            # that level was adopted as the profile contains exactly that arm.
+            members = [a for a in members
+                       if float(list(table[a].values())[0]["value"]) != shipped]
             for name, field, colour, marker, dashes in metrics:
                 points = [(shipped, 0.0, 0.0, 0.0)]
                 for arm in members:
@@ -1030,32 +1053,77 @@ def fig_response_curves(table, output: Path, axes_spec=RESPONSE_AXES,
 
 
 def fig_step_budget(report: Path, output: Path) -> Path:
-    """Render measured stages and synchronized whole-loop timing as separate table rows."""
-    from ergodic_control_mppi.plotting.style import SURFACE
+    """Draw one control step against the 50 Hz deadline, and its measured composition.
+
+    Not a ring. The stages are timed in isolation and do not sum to the fused step -- the
+    shortfall is real and is not distributed across them -- so a part-of-whole form would
+    assert something the measurement does not support. Bars against a common axis carry the
+    same numbers without the claim, and the shortfall gets its own bar rather than being
+    silently absorbed or silently dropped.
+
+    The shortfall bar is offset below the stages rather than sorted among them: it is a
+    residual, not a sixth stage, and sorting it into the ranking would invite reading it as
+    one.
+    """
+    from ergodic_control_mppi.plotting.style import (
+        NEUTRAL, OUTSIDE_TICKS, PRIMARY, SURFACE)
 
     report_data = json.loads(Path(report).read_text(encoding="utf-8"))
     data = report_data["stages"]
-    rows = [[label, f"{data['stages'][name]['ms_median']:.3f}"]
-            for name, label, _ in STEP_STAGES]
-    rows.append(["Fused MPPI step", f"{data['total_ms']:.3f}"])
-    for label, values in report_data.get("endtoend", {}).items():
-        if isinstance(values, dict) and "ms_per_step" in values:
-            rows.append([f"Whole loop: {label.replace('_', ' ')}", f"{values['ms_per_step']:.3f}"])
-    with plt.rc_context(paper_style("column")):
-        figure, ax = plt.subplots(figsize=(FIGSIZES["column"][0], 0.28 * (len(rows) + 2)))
-        ax.set_axis_off()
-        table = ax.table(cellText=rows, colLabels=["Measurement", "ms / step"],
-                         colWidths=[0.77, 0.23], cellLoc="left", loc="center")
-        table.auto_set_font_size(False)
-        table.set_fontsize(7.5)
-        table.scale(1, 1.25)
-        for (row, column), cell in table.get_celld().items():
-            cell.set_facecolor(SURFACE)
-            cell.set_edgecolor("#A9ABB0")
-            cell.set_linewidth(0.35)
-            if row == 0:
-                cell.set_text_props(weight="bold")
-        figure.tight_layout(pad=0.3)
+    shape = data["shape"]
+    fused, accounted = data["total_ms"], data["accounted_ms"]
+    endtoend = report_data["endtoend"]["with_memory"]["ms_per_step"]
+    period_ms = 20.0
+
+    stages = [(label, data["stages"][name]["ms_median"]) for name, label, _ in STEP_STAGES]
+    stages.sort(key=lambda row: row[1])
+    # Position 0 is the residual, then a gap, then the stages ascending.
+    labels = ["Unattributed"] + [row[0] for row in stages]
+    values = [fused - accounted] + [row[1] for row in stages]
+    positions = np.concatenate([[0.0], np.arange(len(stages)) + 1.55])
+
+    with plt.rc_context(paper_style("column") | OUTSIDE_TICKS):
+        figure, (top, bottom) = plt.subplots(
+            2, 1, figsize=(FIGSIZES["column"][0], 2.45),
+            gridspec_kw={"height_ratios": [1, 5], "hspace": 0.55})
+
+        # Deadline panel: the deployed step against the period it has to fit inside.
+        top.barh([0], [period_ms], height=0.62, color=SURFACE, edgecolor="#A9ABB0",
+                 linewidth=0.4, zorder=1)
+        top.barh([0], [endtoend], height=0.62, color=PRIMARY, edgecolor="none", zorder=2)
+        top.set_xlim(0, period_ms)
+        top.set_ylim(-0.5, 0.5)
+        top.set_yticks([])
+        top.grid(False)
+        top.set_facecolor("white")
+        for spine in top.spines.values():
+            spine.set_visible(False)
+        top.set_xticks([0, 5, 10, 15, 20])
+        top.tick_params(axis="x", length=2, pad=1.5)
+        top.set_xlabel("ms within one 20 ms control period (50 Hz)", labelpad=1.5)
+        top.text(endtoend + 0.45, 0,
+                 f"{endtoend:.2f} ms end-to-end, {100 * endtoend / period_ms:.0f}% of budget",
+                 va="center", ha="left", fontsize=7.0, color="#1F2933")
+
+        # Composition panel: measured stages, plus the shortfall as its own bar.
+        colours = [NEUTRAL] + [PRIMARY] * len(stages)
+        bars = bottom.barh(positions, values, height=0.66, color=colours,
+                           edgecolor="none", zorder=2)
+        bars[0].set_hatch("////")
+        bars[0].set_edgecolor("white")
+        for position, value in zip(positions, values):
+            bottom.text(value + 0.035, position, f"{value:.2f}", va="center", ha="left",
+                        fontsize=7.0, color="#1F2933")
+        bottom.set_yticks(positions)
+        bottom.set_yticklabels(labels)
+        bottom.set_ylim(-0.7, positions[-1] + 0.7)
+        bottom.set_xlim(0, max(values) * 1.28)
+        bottom.set_xlabel("ms per step (median of 400)", labelpad=1.5)
+        bottom.tick_params(axis="y", length=0)
+        bottom.set_title(f"$K{{=}}{shape['K']}$, $T{{=}}{shape['T']}$, $P{{=}}{shape['P']}$"
+                         f"  \u2014  fused step {fused:.2f} ms", pad=3.0)
+
+        figure.tight_layout(pad=0.35)
         path = save(figure, output)
         plt.close(figure)
     return path
@@ -1467,17 +1535,22 @@ def main() -> None:
                               arms=arms, per_axis=True)
         )
         written.append(fig_dot_matrix(sweep, args.output / "fig_dot_matrix.png"))
-    if args.final.exists():
-        final = load_final(args.final)
-        written.append(
-            fig_final_ablation(final, args.output / "fig_final_ablation.png")
-        )
     baselines = load_baselines(*args.baselines)
     if baselines:
         written.append(fig_baselines(baselines, args.output / "fig_baselines.png"))
     if args.timing.exists():
         written.append(fig_step_budget(args.timing, args.output / "fig_step_budget.png"))
     written.extend(mechanism_figures(args.captures, args.output))
+    # Last, because it is the block that can refuse. The effect map names its conditions
+    # from the current arm table, so an archive that predates a change to that table fails
+    # here -- and everything above has already been written by the time it does.
+    if args.final.exists():
+        final = load_final(args.final)
+        written.extend([
+            fig_final_ablation(final, args.output / "fig_final_ablation.png"),
+            fig_response_curves(final, args.output / "fig_response_curves.png"),
+            fig_ablation_effect_map(final, args.output / "fig_ablation_effect_map.png"),
+        ])
     for path in written:
         print(f"wrote {path}")
 

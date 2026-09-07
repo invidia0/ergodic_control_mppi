@@ -595,16 +595,29 @@ class StepBudgetTest(unittest.TestCase):
             "residual_ms": total - accounted,
         }}
 
-    def test_table_keeps_fused_total_separate_from_stage_sum(self):
+    def test_the_shortfall_is_drawn_and_not_absorbed_into_the_stages(self):
+        """The five stages keep their measured widths; the gap to the fused step is its own bar.
+
+        This is the property the figure exists to preserve. A part-of-whole form would have
+        to scale the stages up to close the 0.6 ms the isolated timings do not account for,
+        which asserts an attribution the measurement does not make.
+        """
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "timing.json"
-            data = self._report(4.5)
+            data = self._report(5.5)
             data["endtoend"] = {"with_memory": {"ms_per_step": 6.2}}
             report.write_text(json.dumps(data))
             with unittest.mock.patch.object(self.rf, "save", lambda figure, path: figure):
                 figure = self.rf.fig_step_budget(report, Path(directory) / "f.pdf")
-            values = [cell.get_text().get_text()
-                      for cell in figure.axes[0].tables[0].get_celld().values()]
-            self.assertIn("4.500", values)
-            self.assertIn("6.200", values)
-            self.assertIn("Fused MPPI step", values)
+
+            deadline, composition = figure.axes
+            # Bars are added residual-first, then the stages ascending.
+            residual, *stages = [patch.get_width() for patch in composition.patches]
+            self.assertAlmostEqual(0.6, residual)  # 5.5 fused - 4.9 accounted
+            self.assertEqual([0.1, 0.4, 0.6, 0.8, 3.0], sorted(stages))
+            self.assertIn("5.50", composition.get_title())
+
+            # The end-to-end step is a different measurement and is shown against the
+            # period, never mixed into the composition.
+            self.assertAlmostEqual(6.2, min(patch.get_width() for patch in deadline.patches))
+            self.assertIn("6.20", "".join(text.get_text() for text in deadline.texts))
