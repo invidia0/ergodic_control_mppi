@@ -875,6 +875,68 @@ def _open_arrays(scenario: Scenario, resolution: float = 0.15) -> dict:
     }
 
 
+#: Metric-grid shape the finite-trajectory certificate is defined on. Every coverage metric
+#: in the paper compares on this grid, and the certificate has to be the *same* discrete
+#: target for every method or the comparison is not paired. The clutter tier's archived
+#: `target_grid` is already this shape, so for it nothing is resampled.
+CERTIFICATE_BINS = (80, 80)
+
+#: Sub-sampling of the executed path the certificate is applied to, matching
+#: `scripts/theory_audit.py discrepancy --stride`. rho_n is then the empirical measure of
+#: the audited samples and delta_n the gap at an audited step, which is how the bound is
+#: stated.
+CERTIFICATE_STRIDE = 20
+
+
+def _certificate_target(tier: str, arrays: dict, scenario, limits_x, limits_y):
+    """Support points and weights of the discrete target the certificate is stated against.
+
+    The same object for every method on a map: the target density restricted to the
+    reachable component and renormalized (`metrics.discrepancy.grid_target`, which is the
+    `_restrict_to_mask` convention every other metric uses). The open tier synthesises its
+    arrays at a finer resolution than the metric grid, so its density is resampled onto
+    `CERTIFICATE_BINS` -- the certificate's cost is quadratic in the support size, and more
+    importantly a target defined on a different grid is a different target.
+    """
+    from ergodic_control_mppi.metrics.discrepancy import grid_target
+
+    density = np.asarray(arrays["target_grid"], dtype=np.float64)
+    mask = np.asarray(arrays["reachable_mask"], dtype=bool)
+    if density.shape != CERTIFICATE_BINS:
+        density = _resample_target(scenario, CERTIFICATE_BINS)
+        mask = np.ones(CERTIFICATE_BINS, dtype=bool) if tier == "open" else mask
+    return grid_target(density, mask, limits_x, limits_y)
+
+
+def certificate_columns(positions: np.ndarray, support, weights, bandwidth: float) -> dict:
+    """Score one executed path with the finite-trajectory MMD certificate.
+
+    Controller-agnostic by construction -- the bound is an identity plus one inequality and
+    assumes nothing about how the path was produced -- which is exactly what lets the same
+    certificate be applied to every baseline on equal terms.
+
+    `mmd_final` is the quantity methods are compared on. `mmd_bound` and `mmd_trivial` are
+    **not** performance measures: the bound carries a controller-independent noise term, so
+    a better controller yields a looser certificate. They are reported so the certificate's
+    own validity (does the inequality hold, does it beat the trivial comparator) can be
+    counted separately from any method's coverage.
+    """
+    from ergodic_control_mppi.metrics.discrepancy import walk
+
+    audited = np.asarray(positions[::CERTIFICATE_STRIDE], dtype=np.float64)
+    result = walk(audited, support, weights, bandwidth)
+    return {
+        "mmd_final": float(result["error"][-1]),
+        "mmd_bound": float(result["bound"][-1]),
+        "mmd_trivial": float(result["trivial"]),
+        "mmd_weighted_gap": float(result["weighted_gap"]),
+        "mmd_prefix_holds": int(np.all(result["error"] <= result["bound"] + 1e-9)),
+        "mmd_beats_trivial": int(result["bound"][-1] < result["trivial"]),
+        "mmd_samples": int(len(audited)),
+        "mmd_stride": CERTIFICATE_STRIDE,
+    }
+
+
 def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
              maps_path: Path, output: Path | None = None, *, overwrite: bool = False) -> list[dict]:
     """Fly every (method, map, seed) cell of one tier and score it like a campaign row.
@@ -932,8 +994,16 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
     done = {(r["method"], r["map"], int(r["seed"]), int(r["steps"]), r["config_hash"])
             for r in rows}
 
+    paths_directory = (output.with_name(output.stem + "_paths") if output is not None
+                       else None)
     for name, obs_num, config, scenario, arrays, manifest in cells:
         occupancy = None if tier == "open" else np.asarray(arrays["occupancy"]).astype(bool)
+        limits_x = tuple(float(v) for v in config.controller.workspace.x_limits)
+        limits_y = tuple(float(v) for v in config.controller.workspace.y_limits)
+        # One target per map, shared by every method on it: the certificate is only a paired
+        # comparison if all five methods are scored against the identical discrete measure.
+        support, weights = _certificate_target(tier, arrays, scenario, limits_x, limits_y)
+        bandwidth = float(config.controller.field.fine_bandwidth)
         origin = tuple(map(float, np.asarray(arrays["grid_origin"])))
         resolution = float(arrays["grid_resolution"])
         state0 = np.asarray(arrays["initial_state"], dtype=np.float64)
@@ -972,10 +1042,23 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
                     raise ValueError(f"{method}/{name}/{seed}: nonfinite trajectory")
                 if method == "ours" and int(row["collisions"]):
                     raise ValueError(f"ours/{name}/{seed}: collision; stopped")
+                row.update(certificate_columns(path[:, :2], support, weights, bandwidth))
                 rows.append(row)
+                if paths_directory is not None:
+                    # One file per cell rather than one bundle at the end: the tier runs for
+                    # hours and resumes by identity, so a bundle written last would be lost
+                    # on any interruption and would be incomplete after every resume.
+                    paths_directory.mkdir(parents=True, exist_ok=True)
+                    np.savez_compressed(
+                        paths_directory / f"{method}_{name}_s{seed}.npz",
+                        positions=np.asarray(path[:, :2], dtype=np.float32),
+                        method=method, map=name, obs_num=obs_num, seed=seed,
+                        steps=cfg.steps, config_hash=fingerprints[method, name],
+                    )
                 if output is not None:
                     _append_row(output, row, rows)
                 print(f"  [{tier}] {method:6s} {name:12s} s{seed} "
+                      f"E_N={float(row['mmd_final']):.4g} "
                       f"fourier={float(row['fourier_ergodic']):.4g} {wall:.0f}s", flush=True)
     return rows
 

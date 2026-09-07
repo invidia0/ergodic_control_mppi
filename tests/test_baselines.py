@@ -369,3 +369,77 @@ class IncrementalWriteTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stale header"):
                 baselines._append_row(out, rows[1], rows)
             self.assertEqual(out.read_bytes(), before)
+
+
+class CertificateColumnsTest(unittest.TestCase):
+    """The certificate the baselines are compared on. It has to mean the same thing for
+    every method, and it has to be the certificate -- not a re-derivation of it."""
+
+    LIMITS = (0.0, 10.0)
+
+    def _target(self, bins=(20, 20), blocked=False):
+        """A two-lobe target on a square workspace, optionally with a pillar removed."""
+        axis_x = np.linspace(*self.LIMITS, bins[1])
+        axis_y = np.linspace(*self.LIMITS, bins[0])
+        mesh_x, mesh_y = np.meshgrid(axis_x, axis_y)
+        density = (np.exp(-((mesh_x - 3.0) ** 2 + (mesh_y - 3.0) ** 2) / 2.0)
+                   + np.exp(-((mesh_x - 7.0) ** 2 + (mesh_y - 7.0) ** 2) / 2.0))
+        mask = np.ones(bins, dtype=bool)
+        if blocked:
+            mask = (mesh_x - 5.0) ** 2 + (mesh_y - 5.0) ** 2 > 2.0 ** 2
+        return {"target_grid": density, "reachable_mask": mask}
+
+    def test_the_bound_holds_and_beats_the_trivial_comparator(self):
+        from ergodic_control_mppi.metrics.discrepancy import grid_target
+
+        arrays = self._target(blocked=True)
+        support, weights = grid_target(arrays["target_grid"], arrays["reachable_mask"],
+                                       self.LIMITS, self.LIMITS)
+        rng = np.random.default_rng(0)
+        path = np.clip(np.cumsum(rng.normal(0.0, 0.3, size=(4000, 2)), axis=0) + 5.0,
+                       *self.LIMITS)
+        columns = baselines.certificate_columns(path, support, weights, 1.0)
+        self.assertEqual(columns["mmd_prefix_holds"], 1)
+        self.assertEqual(columns["mmd_beats_trivial"], 1)
+        self.assertEqual(columns["mmd_samples"], 4000 // baselines.CERTIFICATE_STRIDE)
+        self.assertLess(columns["mmd_final"], columns["mmd_bound"])
+        self.assertLess(columns["mmd_bound"], columns["mmd_trivial"])
+
+    def test_it_is_the_same_number_the_audit_reports(self):
+        """The baselines must not re-derive the certificate -- a second implementation is
+        a second thing to drift. Same target, same kernel, same stride, same `walk`."""
+        from ergodic_control_mppi.metrics.discrepancy import grid_target, walk
+
+        arrays = self._target(blocked=True)
+        support, weights = grid_target(arrays["target_grid"], arrays["reachable_mask"],
+                                       self.LIMITS, self.LIMITS)
+        rng = np.random.default_rng(1)
+        path = np.clip(np.cumsum(rng.normal(0.0, 0.3, size=(2000, 2)), axis=0) + 5.0,
+                       *self.LIMITS)
+        columns = baselines.certificate_columns(path, support, weights, 1.0)
+        direct = walk(path[::baselines.CERTIFICATE_STRIDE], support, weights, 1.0)
+        self.assertAlmostEqual(columns["mmd_final"], float(direct["error"][-1]), places=12)
+        self.assertAlmostEqual(columns["mmd_bound"], float(direct["bound"][-1]), places=12)
+
+    def test_the_open_tier_target_is_resampled_onto_the_metric_grid(self):
+        """The open tier synthesises arrays at its own resolution; scoring the certificate
+        there would define a different target -- and a support quadratically too large."""
+        fine = self._target(bins=(60, 60))
+        scenario = object()
+        with patch.object(baselines, "_resample_target",
+                          return_value=self._target(bins=baselines.CERTIFICATE_BINS
+                                                    )["target_grid"]) as resample:
+            support, weights = baselines._certificate_target(
+                "open", fine, scenario, self.LIMITS, self.LIMITS)
+        resample.assert_called_once_with(scenario, baselines.CERTIFICATE_BINS)
+        self.assertEqual(len(weights), baselines.CERTIFICATE_BINS[0]
+                         * baselines.CERTIFICATE_BINS[1])
+        self.assertAlmostEqual(float(weights.sum()), 1.0, places=12)
+
+    def test_a_clutter_map_already_on_the_metric_grid_is_untouched(self):
+        arrays = self._target(bins=baselines.CERTIFICATE_BINS, blocked=True)
+        with patch.object(baselines, "_resample_target") as resample:
+            support, weights = baselines._certificate_target(
+                "clutter", arrays, None, self.LIMITS, self.LIMITS)
+        resample.assert_not_called()
+        self.assertEqual(len(weights), int(arrays["reachable_mask"].sum()))
