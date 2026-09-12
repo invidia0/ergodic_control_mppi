@@ -1,33 +1,8 @@
-"""Single-robot comparison against ergodic-coverage baselines, in the open and in clutter.
+"""
+Single-robot comparison against ergodic-coverage baselines, in the open and in clutter.
 
-Separate from :mod:`literature` on purpose. That module scores a *team*
-(``team_ergodic_error``, ``pairwise_overlap``, ``R_pair``) for a different, multi-robot
-paper, and it builds its scenarios through ``make_no_obstacle_scenario``, which hard-codes
-an empty obstacle map. This one scores exactly what the ablation campaign scores, through
-the same :func:`~ergodic_control_mppi.experiments.uav_pillar_tuning.score_run`, so a
-baseline row and an ablation row are the same measurement and can sit in one table.
-
-Two tiers, because the baselines are not all obstacle-aware:
-
-``open``
-    No obstacles. Every method runs at its own published formulation with nothing added,
-    so the coverage law is compared with nobody handicapped. This is the tier that answers
-    "is the coverage better".
-
-``clutter``
-    The campaign's pillar maps. HEDAC additionally gets the Neumann boundaries its own
-    paper specifies. Every baseline also gets the shared penalty of :func:`_avoidance`,
-    identical across methods so none is advantaged by better-tuned avoidance, and the fact
-    is recorded per row so the caption can state it rather than quietly present a helped
-    baseline as the published one. See :data:`NATIVE_OBSTACLES` for why HEDAC needs it
-    despite having its own obstacle handling.
-
-Every method drives the *same* double-integrator through the *same* tracker
-(``literature_methods._tracker_step_np``) at the same speed limit. The comparison is
-between coverage laws, not between vehicle models.
-
-    uv run python -m ergodic_control_mppi.experiments.baselines --tier open
-    uv run python -m ergodic_control_mppi.experiments.baselines --tier clutter
+uv run python -m ergodic_control_mppi.experiments.baselines --tier open
+uv run python -m ergodic_control_mppi.experiments.baselines --tier clutter
 """
 
 from __future__ import annotations
@@ -52,22 +27,7 @@ METHODS = ("ours", "hedac", "sves", "fmec", "smc")
 # Three seeds, decided on the median: one run cannot settle whether a chaotic
 # closed loop reproduces. See `fidelity_check`.
 FIDELITY_SEEDS = (43, 44, 45)
-# Methods that need no added obstacle term. Anything not listed here is given the shared
-# penalty of `_avoidance` in the clutter tier, and the row records it so the caption can say
-# so rather than present a helped baseline as the published one.
-#
-# HEDAC is deliberately *not* listed, even though its Neumann boundaries are genuine
-# published obstacle handling and it still gets them. The formulation assumes a first-order
-# vehicle that exactly follows ``v_max * grad(u)/|grad(u)|``, which by construction never
-# enters an obstacle. Ours is a second-order vehicle at 1.8 m/s, and the potential barrier
-# around a 0.6 m pillar is thinner than its stopping distance, so it does enter -- and
-# inside an obstacle the solve holds ``u = 0`` identically, so ``grad(u)`` is exactly zero,
-# `_unit_field` commands nothing, and the vehicle stops there for the rest of the run. That
-# is a trap with no escape: measured on 25p_516, HEDAC spent 87% of the run embedded in a
-# pillar and travelled 77 m. With the shared term it never penetrates at all (0%, minimum
-# clearance +0.14 m) and travels 332 m. Reporting the trapped number would have handed us a
-# 10x win over the classical clutter baseline that is an artefact of our vehicle choice
-# rather than a property of the method.
+# Methods that score occupancy natively. Others get `_avoidance` in the clutter tier.
 NATIVE_OBSTACLES = {"ours"}
 
 
@@ -75,17 +35,7 @@ NATIVE_OBSTACLES = {"ours"}
 
 
 def _solver_shape(scenario: Scenario, long_side: int) -> tuple[tuple[int, int], float]:
-    """Grid dimensions with *square* cells, plus the cell pitch in metres.
-
-    The deployment workspace is $40\\times20$\\,m. A square ``grid_size`` grid over it puts
-    the cell pitch at $0.5$\\,m in $x$ and $0.25$\\,m in $y$, and three separate pieces of
-    physics silently assume it is isotropic: the five-point Jacobi stencil of
-    :func:`_jacobi_neumann` weights all four neighbours equally, ``np.gradient`` called
-    without a spacing argument returns a derivative per *index* rather than per metre, and
-    the scalar ``sigma`` of the FMEC and HEDAC Gaussian filters is a count of cells. On an
-    anisotropic grid all three are wrong by the aspect ratio, which tilts every field
-    toward the coarse axis. Square cells make them right.
-    """
+    """Grid dimensions with *square* cells, plus the cell pitch in metres."""
     x_min, x_max = scenario.map_x_limits
     y_min, y_max = scenario.map_y_limits
     width, height = float(x_max - x_min), float(y_max - y_min)
@@ -94,30 +44,13 @@ def _solver_shape(scenario: Scenario, long_side: int) -> tuple[tuple[int, int], 
 
 
 def _cell_index(values: np.ndarray, edges: np.ndarray, count: int) -> np.ndarray:
-    """Which grid cell each coordinate falls in.
-
-    One helper because there were two conventions in play: the coverage histogram and FMEC
-    binned by cell, while HEDAC read its gradient at ``(x - x0)/W * (N - 1)``, a *node*
-    mapping half a cell offset from the other. HEDAC was therefore sampling its gradient
-    0.125 m from where its own coverage had been deposited.
-    """
+    """Which grid cell each coordinate falls in."""
     return np.clip(np.searchsorted(edges, values) - 1, 0, count - 1)
 
 
 def _blocked_mask(occupancy: np.ndarray, shape: tuple[int, int], scenario: Scenario,
                   origin=None, resolution: float | None = None) -> np.ndarray:
-    """Resample an occupancy grid onto the solver grid by nearest neighbour.
-
-    Nearest neighbour rather than area averaging: a partially covered cell must come out
-    blocked, not half blocked. A diffusion solve with a fractional obstacle leaks through
-    it, which is exactly the failure the Neumann treatment exists to prevent.
-
-    Sampled by *world coordinate*, not by index ratio. The two are not the same here: the
-    occupancy grid is 267x134 at 0.15 m, so it spans 40.05 x 20.10 m while the workspace is
-    40 x 20. Assuming coincident extents stretches the mask by up to 0.05 m in x and 0.10 m
-    in y, growing toward the far corner, so HEDAC's walls drifted away from the pillar
-    circles that `_pillar_circles` places from the same grid in true coordinates.
-    """
+    """Resample an occupancy grid onto the solver grid by nearest neighbour."""
     if origin is None or resolution is None:
         rows = np.clip((np.arange(shape[0]) + 0.5) * occupancy.shape[0] / shape[0],
                        0, occupancy.shape[0] - 1).astype(int)
@@ -138,29 +71,8 @@ def _blocked_mask(occupancy: np.ndarray, shape: tuple[int, int], scenario: Scena
 
 def _jacobi_neumann(source: np.ndarray, blocked: np.ndarray, gain: float,
                     damping: float, iterations: int, warm=None) -> np.ndarray:
-    """Solve the HEDAC screened-Poisson problem with no-flux obstacle boundaries.
-
-    The canonical HEDAC formulation solves ``alpha * laplacian(u) - u = -q`` subject to
-    ``du/dn = 0`` on the boundary *and on every obstacle*. Discretely, zero flux across a
-    face means the neighbour behind that face contributes the centre cell's own value: the
-    stencil reflects instead of reading into the obstacle. Occupied cells carry no source
-    and hold no potential, so nothing diffuses out of an obstacle either.
-
-    Getting this right is what makes HEDAC a fair baseline in clutter rather than a
-    handicapped one -- with a plain stencil the potential diffuses straight through the
-    pillars and the gradient points into them.
-
-    The *domain* boundary is no-flux for the same reason: the workspace is closed and no
-    heat leaves it. Forcing ``u = 0`` at the edge instead, as a naive Jacobi loop over the
-    interior does, makes the potential rise monotonically toward every wall, so the
-    gradient points out of the domain from everywhere inside it. That version failed the
-    fidelity gate by driving straight into the south wall and pinning there for the
-    remaining 3500 steps.
-
-    ``warm`` continues from the previous step's potential. HEDAC *evolves* its field in
-    time rather than re-solving to steady state at every instant, so carrying it forward is
-    the faithful reading as well as the cheap one: a handful of relaxation sweeps per
-    control step tracks a source that barely moves, where a cold solve needs dozens.
+    """
+    Solve the HEDAC screened-Poisson problem with no-flux obstacle boundaries.
     """
     # The four reflection masks depend only on `blocked`, which is fixed for a whole run,
     # but were being rebuilt inside every sweep: four `np.roll`s of a boolean grid, eight
@@ -185,12 +97,8 @@ def _jacobi_neumann(source: np.ndarray, blocked: np.ndarray, gain: float,
 
 
 def _reflection_masks(blocked: np.ndarray) -> list[np.ndarray]:
-    """Where the five-point stencil must reflect: obstacles, plus the domain edge.
-
-    ``np.roll`` wraps, so the row or column that comes round from the far side is not a
-    real neighbour. Marking it a wall is what makes the *domain* boundary no-flux as well:
-    forcing ``u = 0`` there instead puts a ramp against every wall, which is what once
-    drove HEDAC into the south boundary and pinned it there.
+    """
+    Where the five-point stencil must reflect: obstacles, plus the domain edge.
     """
     masks = []
     for axis, amount in ((0, 1), (0, -1), (1, 1), (1, -1)):
@@ -203,22 +111,8 @@ def _reflection_masks(blocked: np.ndarray) -> list[np.ndarray]:
 
 
 def _unit_field(field: np.ndarray, speed: float) -> np.ndarray:
-    """Rescale a coverage-law field to a commanded speed, keeping its direction.
-
-    HEDAC, SMC and FMEC all produce a *direction*: their magnitudes are gradients of a
-    potential, a spectral mismatch and a log-density ratio respectively, in three unrelated
-    and arbitrarily scaled units, all of which decay toward zero as coverage improves. The
-    published control laws move along that direction at the vehicle's speed -- HEDAC's is
-    literally ``v_max * grad(u)/|grad(u)|``.
-
-    Capping with `_limit_speed` alone is what made the first run of the fidelity gate fail:
-    the raw fields came out at a fraction of a metre per second and fell from there, so
-    every baseline crawled and would have "lost" for a reason that is an artefact of unit
-    choice rather than of the method. Normalising is both faithful and the only way the
-    comparison is about coverage rather than about gain tuning.
-
-    A field that has genuinely collapsed (below ``1e-9``) yields zero rather than a
-    direction amplified out of numerical noise.
+    """
+    Rescale a coverage-law field to a commanded speed, keeping its direction.
     """
     magnitude = np.linalg.norm(field, axis=1, keepdims=True)
     return np.where(magnitude > 1e-9, field / np.maximum(magnitude, 1e-12) * speed, 0.0)
@@ -226,12 +120,7 @@ def _unit_field(field: np.ndarray, speed: float) -> np.ndarray:
 
 def _avoidance(xy: np.ndarray, centres: np.ndarray, radius: np.ndarray,
                clearance: float, gain: float) -> np.ndarray:
-    """Shared repulsion for baselines whose formulation defines none.
-
-    A single inverse-distance push out of the inflated footprint, identical for every
-    method that needs it, so no baseline is advantaged by a better-tuned avoidance term
-    than another. Any row produced with this active is flagged ``added_avoidance``.
-    """
+    """Shared repulsion for baselines whose formulation defines none."""
     if centres.size == 0:
         return np.zeros_like(xy)
     offsets = xy[:, None, :] - centres[None, :, :]
@@ -246,13 +135,7 @@ def _avoidance(xy: np.ndarray, centres: np.ndarray, radius: np.ndarray,
 
 def _pillar_circles(occupancy: np.ndarray, origin, resolution: float
                     ) -> tuple[np.ndarray, np.ndarray]:
-    """Fit one circle per connected component of the occupancy grid.
-
-    The campaign's manifests record the pillar count and a radius *range*, never the
-    individual centres, so the circles the baselines need for their avoidance term have to
-    be recovered from the grid. Labelling is a four-neighbour flood fill over occupied
-    cells; each component's centroid and its furthest cell give the centre and radius.
-    """
+    """Fit one circle per connected component of the occupancy grid."""
     from scipy import ndimage
 
     labels, count = ndimage.label(occupancy)
@@ -280,15 +163,8 @@ def _pillar_circles(occupancy: np.ndarray, origin, resolution: float
 
 def _hedac_velocity(state_xy, coverage, target, blocked, scenario, cfg, shape,
                     warm=None, *, pitch=1.0, x_edges=None, y_edges=None):
-    """HEDAC: follow the gradient of the potential driven by the coverage deficit.
-
-    The coverage is smoothed by the sensor footprint before the deficit is formed, which is
-    part of the formulation and not a numerical nicety: HEDAC's coverage field is the
-    integral of a *sensor function* along the path, not a histogram of visited cells.
-    Depositing into a single cell instead makes the potential a symmetric spike centred on
-    the agent, and the central difference of a symmetric spike at its own centre is zero --
-    the agent sits at the bottom of a well it dug itself and never leaves. That is exactly
-    how this failed the fidelity gate the first time, at 10 m travelled in 80 s.
+    """
+    HEDAC: follow the gradient of the potential driven by the coverage deficit.
     """
     from scipy import ndimage
 
@@ -309,12 +185,7 @@ def _hedac_velocity(state_xy, coverage, target, blocked, scenario, cfg, shape,
 
 
 def _smc_velocity(state_xy, ctx, coefficients, elapsed):
-    """SMC (Mathew & Mezic): descend the Fourier ergodic metric pointwise.
-
-    The first-order feedback law: move along the negative gradient of the ergodic metric
-    with respect to the current position, with the coefficients accumulated over the
-    trajectory so far.
-    """
+    """SMC (Mathew & Mezic): descend the Fourier ergodic metric pointwise."""
     from ergodic_control_mppi.experiments.literature_methods import _basis_and_grad_np
 
     basis, grad = _basis_and_grad_np(state_xy, ctx)
@@ -324,23 +195,8 @@ def _smc_velocity(state_xy, ctx, coefficients, elapsed):
 
 
 def _sves_planner(ctx, model_params, cfg):
-    """Stein Variational Ergodic Search: SVGD over a population of control sequences.
-
-    The method represents the trajectory posterior by particles rather than by a single
-    optimum, and pushes them with Stein variational gradient descent against an ergodic
-    objective. With ``M`` control-sequence particles ``U_i`` over a horizon ``H``,
-
-        phi(U_i) = (1/M) sum_j [ k(U_j, U_i) grad_{U_j} log p(U_j) + grad_{U_j} k(U_j, U_i) ]
-
-    where ``log p(U) = -J_erg(U) / temperature``. The first term drives every particle
-    downhill on the shared objective; the second is the repulsion that keeps the population
-    from collapsing onto one mode, which is the whole point of the method and the reason it
-    explores where a single-trajectory optimiser stalls.
-
-    Implemented receding-horizon: the ergodic cost is evaluated on the *cumulative* Fourier
-    coefficients -- what the vehicle has already covered plus what the horizon would add --
-    so the plan responds to coverage history rather than re-solving from scratch. Returns a
-    jitted closure; building it once per run keeps the compile out of the step loop.
+    """
+    Stein Variational Ergodic Search: SVGD over a population of control sequences.
     """
     import jax
     import jax.numpy as jnp
@@ -391,22 +247,8 @@ def _sves_planner(ctx, model_params, cfg):
 
 
 def _fmec_velocity(state_xy, coverage, target, ctx, cfg, x_edges, y_edges, *, pitch=1.0):
-    """Flow-Matching Ergodic Coverage: follow the transport field from coverage to target.
-
-    FMEC replaces the spectral ergodic objective with a flow: it builds a velocity field
-    that transports the agent's current coverage distribution onto the target and tracks
-    it. The field used here is the Wasserstein gradient flow of ``KL(c || p)``,
-
-        v(x) = grad log p(x) - grad log c(x),
-
-    i.e. the score difference between the target and the kernel-smoothed empirical
-    coverage. This is the transport direction that annihilates the mismatch, it is what
-    "matching the flow between the two densities" reduces to for this pair, and it needs no
-    Fourier truncation -- which is the property the method is published for.
-
-    Both densities are smoothed on the same grid, so the two scores are differenced at
-    equal resolution and the field does not inherit the sampling noise of the coverage
-    histogram.
+    """
+    Flow-Matching Ergodic Coverage: follow the transport field from coverage to target.
     """
     from scipy import ndimage
 
@@ -430,12 +272,7 @@ from ergodic_control_mppi.experiments.common import (
 
 
 class BaselineConfig:
-    """Tunables for every baseline, in one place so the settings are auditable.
-
-    Defaults are the published-formulation settings where a paper states one and the
-    existing `literature_comparison.yaml` values otherwise, so this is not a fresh tuning
-    pass dressed up as a comparison.
-    """
+    """Tunables for every baseline, in one place so the settings are auditable."""
 
     def __init__(self, **overrides):
         self.steps = 20000
@@ -461,8 +298,8 @@ class BaselineConfig:
         self.hedac_iterations = 8
         self.hedac_gradient_gain = 8.0
         # Sensor footprint radius in metres, selected on the open field by the gate's own
-        # criterion (`scripts/baseline_param_sweep.py`, GPU, 8 seeds -- the device the tiers
-        # fly, because a CPU sweep disagreed with the GPU gate on mode counts). 1.0, 2.0 and
+        # criterion (GPU, 8 seeds -- the device the tiers fly, because a CPU sweep disagreed
+        # with the GPU gate on mode counts). 1.0, 2.0 and
         # 3.0 m all reach every mode in 8/8; best metric is 1.97e-4, 2.63e-4 and 8.71e-4, so
         # the rule -- mode reach first, `ergodic_best` as tie-break -- picks 1.0 m. That is
         # the setting where the baseline is *strongest*, which is the direction this choice
@@ -530,10 +367,8 @@ class BaselineConfig:
     }
 
     def fingerprint_for(self, method: str, config, arrays, scoring: dict) -> str:
-        """Hash method-specific control inputs and the shared resolved world and scorer.
-
-        A horizon change affects ours only. Geometry, dynamics, target, initial state,
-        scoring and requested length affect every method that consumes them.
+        """
+        Hash method-specific control inputs and the shared resolved world and scorer.
         """
         if method not in self.DEPENDS_ON:
             raise ValueError(f"unknown method {method!r}")
@@ -545,17 +380,7 @@ class BaselineConfig:
         return fingerprint({"shared": shared, "controller": controller})
 
     def fingerprint(self) -> str:
-        """Short hash of every setting, stamped on each row.
-
-        Resume-by-identity keys on ``(method, map, seed)``, so a row flown under different
-        settings is indistinguishable from a current one and gets skipped. That happened
-        three times in one afternoon -- the solver grid changed, then two parameters changed
-        units -- and each time the stale rows had to be found and deleted by hand, which is
-        a step that will eventually be forgotten. With the fingerprint on the row, resume
-        skips only what genuinely matches and re-flies the rest on its own.
-
-        ``steps`` is excluded: it is a property of the invocation and already recorded.
-        """
+        """Short hash of every setting, stamped on each row."""
         import hashlib
 
         settings = {k: v for k, v in self.as_dict().items() if k != "steps"}
@@ -569,10 +394,8 @@ class BaselineConfig:
 def run_method(method: str, scenario: Scenario, state0: np.ndarray, *, steps: int,
                seed: int, cfg: BaselineConfig, occupancy=None, origin=None,
                resolution: float = 0.15) -> np.ndarray:
-    """Fly one method for ``steps`` and return the executed states, shape ``(steps, 6)``.
-
-    ``occupancy`` is ``None`` for the open tier. In the clutter tier every method sees the
-    obstacles: HEDAC through its Neumann boundaries, the rest through :func:`_avoidance`.
+    """
+    Fly one method for ``steps`` and return the executed states, shape ``(steps, 6)``.
     """
     from ergodic_control_mppi.experiments.literature_methods import _fourier_context
 
@@ -691,20 +514,8 @@ def _run_ours(scenario: Scenario, state0: np.ndarray, *, steps: int, seed: int
 
 
 def _sves_step(planner, rollout, controls, best, states, coefficients, step, cfg):
-    """One SVES control: refresh the particle population, then track the best plan.
-
-    Replanning every step would spend the whole budget in SVGD for no benefit -- the
-    population is warm and the objective moves slowly -- so the particles are updated every
-    ``sves_replan_every`` steps and the best plan is otherwise followed open-loop, which is
-    how a receding-horizon sampler is run in practice.
-
-    The plan is executed as a **waypoint**, not as its first acceleration. The particles
-    parameterise acceleration, and one integration step of it changes the current velocity
-    by at most ``a_max * dt``, so a desired velocity built that way points wherever the
-    vehicle was already going. Normalised to the commanded speed like the gradient laws,
-    that is a straight line: the first version of this flew 708 m without covering
-    anything, at a metric that got *worse*. Steering at a point ``sves_lookahead`` steps
-    down the planned trajectory instead makes the plan actually determine the direction.
+    """
+    One SVES control: refresh the particle population, then track the best plan.
     """
     import jax.numpy as jnp
 
@@ -726,43 +537,7 @@ def _sves_step(planner, rollout, controls, best, states, coefficients, step, cfg
 
 def fidelity_check(method: str, scenario: Scenario, state0: np.ndarray, *,
                    cfg: BaselineConfig, steps: int = 20000, seeds=(43, 44, 45)) -> dict:
-    """Does this implementation actually do ergodic coverage on an open field?
-
-    A reimplementation that silently does not work would show up as a loss for the baseline
-    and a win for us, which is the single most dishonest failure mode available here. The
-    check is deliberately weak and mechanical, so it catches breakage rather than grading
-    quality: on an obstacle-free map with a multi-modal target, a working ergodic
-    controller must (i) end with a lower Fourier ergodic metric over the whole path than it
-    had over the first half, and (ii) not sit still.
-
-    Run at the campaign's own 20 000 steps, not at some shorter convenience horizon. HEDAC
-    is a local gradient law and needs most of that to reach modes 24 m apart; failing it at
-    4 000 steps would have recorded "not reproduced" for a method that was merely still in
-    transit, which is the same dishonesty in the other direction.
-
-    **The criterion is absolute: every mode must be visited.** An earlier version asked
-    only whether the metric improved relative to the method's own first half, and it got
-    both interesting verdicts backwards. It passed FMEC, which sat between $4$ and
-    $6\\times10^{-3}$ for the whole run and never came within $13$\\,m of the third mode --
-    uniformly mediocre scores well on a self-relative test precisely because it never got
-    good. It failed HEDAC, which reached $2.7\\times10^{-4}$ by mid-run, the best of any
-    baseline, and was penalised for degrading afterwards. Coverage of a trimodal target is
-    the thing being reproduced, so mode visitation is what the gate asks about, using the
-    campaign's own ``compute_mode_metrics`` definition rather than a second opinion.
-
-    **Over several seeds, and decided on the median.** These are closed feedback loops on a
-    chaotic system: this project has already established that a one-ULP perturbation is
-    enough to change a run's outcome, and the target grid is built with ``jnp``, so merely
-    running on the GPU instead of the CPU moves it in the last float32 bits. A single-run
-    version of this check duly passed HEDAC on CPU and failed it on GPU with identical code.
-    Seeds vary the *initial state*, shared across methods: three of the four baselines are
-    deterministic laws that ignore a controller seed entirely, so seeding anything else
-    gives three identical runs and a false sense of replication.
-
-    A method that fails is reported as ``not reproduced`` and excluded from the tables
-    rather than presented as a beaten baseline. Degrading after convergence is *not* a
-    failure -- it is a result, and it is reported as one.
-    """
+    """Does this implementation actually do ergodic coverage on an open field?"""
     from ergodic_control_mppi.experiments.literature_methods import (
         _basis_values_np,
         _fourier_context,
@@ -809,18 +584,7 @@ def fidelity_check(method: str, scenario: Scenario, state0: np.ndarray, *,
 
 
 def seed_state(state0: np.ndarray, scenario: Scenario, seed: int) -> np.ndarray:
-    """Per-seed start pose, shared by every method.
-
-    Three of the four baselines are deterministic feedback laws: they consume no random
-    numbers, so flying them twelve times from one start gives twelve identical rows, zero
-    variance, and a paired test against our sampling-based controller that means nothing.
-    The seed therefore has to vary something about the *trial* rather than something inside
-    one method, and the start pose is the natural choice -- every method sees the same
-    twelve starts and the pairing is over a shared quantity.
-
-    Drawn in a band around the archived start rather than anywhere in the workspace, so a
-    seed cannot begin inside a pillar on the cluttered maps.
-    """
+    """Per-seed start pose, shared by every method."""
     rng = np.random.default_rng(seed)
     state = np.asarray(state0, dtype=np.float64).copy()
     x_min, x_max = scenario.map_x_limits
@@ -834,10 +598,8 @@ def seed_state(state0: np.ndarray, scenario: Scenario, seed: int) -> np.ndarray:
 
 
 def _open_scenario(config, span=(-20.0, 20.0, -10.0, 10.0), shape=(120, 240)):
-    """An obstacle-free scenario on the deployment's workspace and target mixture.
-
-    Tier 1 has to isolate the coverage law, so everything except the obstacles is held at
-    the deployment's own settings -- same workspace, same GMM, same vehicle.
+    """
+    An obstacle-free scenario on the deployment's workspace and target mixture.
     """
     from ergodic_control_mppi.experiments.common import build_target_grid
 
@@ -855,13 +617,7 @@ def _open_scenario(config, span=(-20.0, 20.0, -10.0, 10.0), shape=(120, 240)):
 
 
 def _open_arrays(scenario: Scenario, resolution: float = 0.15) -> dict:
-    """Synthetic ``arrays.npz`` contents for an obstacle-free map.
-
-    `score_run` reads its geometry from a campaign map's archive. The open tier has no such
-    archive, so one is synthesised with the same keys: everything free, everything
-    reachable, and the target grid the scenario already carries. Scoring then goes through
-    exactly the same code as the ablation rows.
-    """
+    """Synthetic ``arrays.npz`` contents for an obstacle-free map."""
     x_min, x_max = scenario.map_x_limits
     y_min, y_max = scenario.map_y_limits
     shape = (int((y_max - y_min) / resolution), int((x_max - x_min) / resolution))
@@ -889,14 +645,8 @@ CERTIFICATE_STRIDE = 20
 
 
 def _certificate_target(tier: str, arrays: dict, scenario, limits_x, limits_y):
-    """Support points and weights of the discrete target the certificate is stated against.
-
-    The same object for every method on a map: the target density restricted to the
-    reachable component and renormalized (`metrics.discrepancy.grid_target`, which is the
-    `_restrict_to_mask` convention every other metric uses). The open tier synthesises its
-    arrays at a finer resolution than the metric grid, so its density is resampled onto
-    `CERTIFICATE_BINS` -- the certificate's cost is quadratic in the support size, and more
-    importantly a target defined on a different grid is a different target.
+    """
+    Support points and weights of the discrete target the certificate is stated against.
     """
     from ergodic_control_mppi.metrics.discrepancy import grid_target
 
@@ -909,18 +659,7 @@ def _certificate_target(tier: str, arrays: dict, scenario, limits_x, limits_y):
 
 
 def certificate_columns(positions: np.ndarray, support, weights, bandwidth: float) -> dict:
-    """Score one executed path with the finite-trajectory MMD certificate.
-
-    Controller-agnostic by construction -- the bound is an identity plus one inequality and
-    assumes nothing about how the path was produced -- which is exactly what lets the same
-    certificate be applied to every baseline on equal terms.
-
-    `mmd_final` is the quantity methods are compared on. `mmd_bound` and `mmd_trivial` are
-    **not** performance measures: the bound carries a controller-independent noise term, so
-    a better controller yields a looser certificate. They are reported so the certificate's
-    own validity (does the inequality hold, does it beat the trivial comparator) can be
-    counted separately from any method's coverage.
-    """
+    """Score one executed path with the finite-trajectory MMD certificate."""
     from ergodic_control_mppi.metrics.discrepancy import walk
 
     # A descent gap needs a successor, so a path shorter than two strides is thinned less
@@ -943,13 +682,8 @@ def certificate_columns(positions: np.ndarray, support, weights, bandwidth: floa
 
 def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
              maps_path: Path, output: Path | None = None, *, overwrite: bool = False) -> list[dict]:
-    """Fly every (method, map, seed) cell of one tier and score it like a campaign row.
-
-    Rows are appended to ``output`` as they finish, not collected and written at the
-    end. The clutter tier is $8$ maps by $5$ methods by $12$ seeds and runs for hours;
-    holding all of it in memory until the last cell means one interruption discards the
-    lot. Resuming is by identity: a cell already present in the file is skipped, so a
-    re-run costs only what never finished.
+    """
+    Fly every (method, map, seed) cell of one tier and score it like a campaign row.
     """
     from ergodic_control_mppi.config import load_config
     from ergodic_control_mppi.experiments.uav_pillar_tuning import _grid_config, score_run
@@ -1068,12 +802,7 @@ def run_tier(tier: str, methods, seeds, cfg: BaselineConfig, config_path: str,
 
 
 def _append_row(output: Path, row: dict, rows: list[dict]) -> None:
-    """Append one scored cell, refusing a changed header.
-
-    `score_run` can return a different key set for a method that reports something the
-    others do not, and a plain append would then silently misalign the columns. Cheap
-    a changed field set requires a fresh output or explicit overwrite.
-    """
+    """Append one scored cell, refusing a changed header."""
     fields = sorted({k for existing in rows for k in existing})
     header_ok = False
     if output.exists():

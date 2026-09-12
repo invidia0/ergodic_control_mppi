@@ -1,15 +1,5 @@
-"""Figures for the discrepancy audit: what the witness looks like, and how the bound behaves.
-
-Two figures, answering the two questions the audit raises. :func:`mechanism_figure` draws
-the object the theory is about -- the RKHS witness ``w_n`` over the workspace, the point the
-ideal oracle would jump to, and the point the vehicle actually reached -- so the descent gap
-is a distance on a map rather than a column in a CSV. :func:`bound_figure` draws whether the
-bound is worth having: the accumulated bound against the observed error and the gap split by
-how restricted the vehicle's choice set was.
-
-Both take plain arrays, so they replot unchanged from a laptop smoke test or a full campaign
-bundle; ``scripts/theory_audit.py discrepancy --figures`` drives them from the audit's own
-saved series.
+"""
+Figures for the discrepancy audit: what the witness looks like, and how the bound behaves.
 """
 
 from __future__ import annotations
@@ -26,22 +16,17 @@ def herding_points(
     support: np.ndarray, embedding: np.ndarray, bandwidth: float,
     count: int, start: np.ndarray,
 ) -> np.ndarray:
-    """Run the exact occupation-descent oracle on the target's support.
-
-    Each step takes the witness minimizer over the support, which is the ``delta_n = 0``
-    mechanism the theorem is stated for. It ignores dynamics entirely -- that is the point:
-    the difference between this point set and an executed path *is* the gap the audit
-    measures.
-
+    """
+    Run the exact occupation-descent oracle on the target's support.
+    
     Args:
-        support: Target support points, ``(S, 2)``.
-        embedding: ``m_pi`` evaluated on ``support``, shape ``(S,)``.
-        bandwidth: The kernel's ``h``.
-        count: How many points to place.
-        start: The first point, shape ``(2,)``.
-
+            support: Target support points, ``(S, 2)``.
+            embedding: ``m_pi`` evaluated on ``support``, shape ``(S,)``.
+            bandwidth: The kernel's ``h``.
+            count: How many points to place.
+            start: The first point, shape ``(2,)``.
     Returns:
-        The placed points with shape ``(count, 2)``.
+            The placed points with shape ``(count, 2)``.
     """
     kernel_sum = np.zeros(support.shape[0])
     points = [np.asarray(start, dtype=np.float64)]
@@ -72,28 +57,25 @@ def mechanism_figure(
     density: np.ndarray, mask: np.ndarray, occupancy: np.ndarray, extent,
     limits_x, limits_y, step_radius: float,
 ):
-    """Draw the target, the witness at the end of the run, and the ideal oracle's points.
-
-    The target panel shows ``p*`` as certified -- masked to the reachable component and
-    renormalized -- so the figure and the bound are about the same measure.
-
+    """
+    Draw the target, the witness at the end of the run, and the ideal oracle's points.
+    
     Args:
-        path: The audited executed positions, shape ``(N, 2)``.
-        support: Target support points, ``(S, 2)``, from
-            :func:`ergodic_control_mppi.metrics.discrepancy.grid_target`.
-        weights: Target weights, ``(S,)``.
-        bandwidth: The kernel's ``h``.
-        density: The unrestricted target grid, ``(rows, columns)``, on ``linspace`` nodes.
-        mask: Reachable component on that grid, ``(rows, columns)``.
-        occupancy: Rasterized obstacle map for display, on its own raster extent.
-        extent: ``occupancy``'s extent, which is *not* the workspace box the metric grid is
-            drawn on -- the two grids have different resolutions and origins.
-        limits_x: Workspace x limits.
-        limits_y: Workspace y limits.
-        step_radius: One-step reach, drawn as the vehicle's choice set.
-
+            path: The audited executed positions, shape ``(N, 2)``.
+            support: Target support points, ``(S, 2)``, from
+                : func:`ergodic_control_mppi.metrics.discrepancy.grid_target`.
+            weights: Target weights, ``(S,)``.
+            bandwidth: The kernel's ``h``.
+            density: The unrestricted target grid, ``(rows, columns)``, on ``linspace`` nodes.
+            mask: Reachable component on that grid, ``(rows, columns)``.
+            occupancy: Rasterized obstacle map for display, on its own raster extent.
+            extent: ``occupancy``'s extent, which is *not* the workspace box the metric grid is
+                drawn on -- the two grids have different resolutions and origins.
+            limits_x: Workspace x limits.
+            limits_y: Workspace y limits.
+            step_radius: One-step reach, drawn as the vehicle's choice set.
     Returns:
-        The figure.
+            The figure.
     """
     field_extent = (limits_x[0], limits_x[1], limits_y[0], limits_y[1])
     rows, columns = density.shape
@@ -152,18 +134,18 @@ def mechanism_figure(
 
 def bound_figure(series: dict[str, np.ndarray], bandwidths=None, looseness=None,
                  constraint_share=None):
-    """Draw the bound against the observed error and the gap against its reach proxy.
-
+    """
+    Draw the bound against the observed error and the gap against its reach proxy.
+    
     Args:
-        series: ``n``, ``error``, ``bound``, ``gap``, ``gap_reach``, ``trivial`` -- the keys
-            ``scripts/theory_audit.py discrepancy`` writes into its series file.
-        bandwidths: Optional kernel ``h`` values of a sensitivity sweep; when given, a third
-            panel is drawn. The audit does not produce a sweep, so it is normally absent.
-        looseness: Final ``bound / error`` at each swept bandwidth.
-        constraint_share: Median ``(gap - gap_reach) / gap`` at each swept bandwidth.
-
+            series: ``n``, ``error``, ``bound``, ``gap``, ``gap_reach``, ``trivial`` -- the keys
+                ``scripts/theory_audit.py discrepancy`` writes into its series file.
+            bandwidths: Optional kernel ``h`` values of a sensitivity sweep; when given, a third
+                panel is drawn. The audit does not produce a sweep, so it is normally absent.
+            looseness: Final ``bound / error`` at each swept bandwidth.
+            constraint_share: Median ``(gap - gap_reach) / gap`` at each swept bandwidth.
     Returns:
-        The figure.
+            The figure.
     """
     count, error, bound = series["n"], series["error"], series["bound"]
     columns = 2 if bandwidths is None else 3

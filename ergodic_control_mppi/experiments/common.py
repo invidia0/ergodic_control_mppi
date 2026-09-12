@@ -141,10 +141,8 @@ def execution_record(driver: str, device: str) -> dict:
 
 
 def ensure_bundle(output: Path, record: dict, overwrite: bool = False) -> str:
-    """Create or verify an adjacent manifest before any simulation or output mutation.
-
-    Unknown legacy provenance remains readable but cannot satisfy a new run. A fresh
-    path or explicit overwrite is required for incompatible results.
+    """
+    Create or verify an adjacent manifest before any simulation or output mutation.
     """
     manifest = output.with_suffix(".manifest.json")
     record = numerical_record(record)
@@ -165,12 +163,13 @@ def ensure_bundle(output: Path, record: dict, overwrite: bool = False) -> str:
 
 def verified_rows(path: Path, identity_fields: tuple[str, ...],
                   *, legacy: bool = False) -> list[dict]:
-    """Read one bundle and reject mixed provenance and duplicate cell identities.
-
+    """
+    Read one bundle and reject mixed provenance and duplicate cell identities.
+    
     Args:
-        path: CSV and adjacent manifest location.
-        identity_fields: Columns defining one unique observation.
-        legacy: Allow a wholly legacy CSV for historical analysis, never for resume.
+            path: CSV and adjacent manifest location.
+            identity_fields: Columns defining one unique observation.
+            legacy: Allow a wholly legacy CSV for historical analysis, never for resume.
     """
     if not path.exists():
         return []

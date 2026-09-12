@@ -52,31 +52,26 @@ class ConfigTest(unittest.TestCase):
         config = load_config(self._mutate(lambda data: data["map"]["obstacles"].update(num_obstacles=0)))
         self.assertEqual(config.controller.workspace.obstacles.shape, (0, 3))
 
-    def test_withdrawn_stein_knobs_raise(self):
-        """Loud, not silently ignored.
-
-        A stale profile that still sets `theta` would otherwise load, fly a different field
-        from the one it describes, and be compared against arms it is not comparable with.
-        That is the porting hazard this replaces.
-        """
-        for retired in ("theta", "curl_boost", "ell_self", "attraction", "memory_scales",
+    def test_unknown_reference_keys_raise(self):
+        for unknown in ("theta", "curl_boost", "ell_self", "attraction", "memory_scales",
                         "coarse_bandwidth", "service_penalty", "plan_repulsion",
                         "flow_iterations", "flow_step", "ensemble_subsample"):
-            with self.subTest(key=retired), self.assertRaises(ValueError):
+            with self.subTest(key=unknown), self.assertRaises(ValueError):
                 load_config(self._mutate(
-                    lambda data, key=retired: data["reference"].update({key: 1.0})
+                    lambda data, key=unknown: data["reference"].update({key: 1.0})
                 ))
 
-    def test_the_stein_section_itself_raises(self):
+    def test_stein_section_raises(self):
         def rename(data):
             data["stein"] = data.pop("reference")
         with self.assertRaises(ValueError):
             load_config(self._mutate(rename))
 
-    def test_weight_stein_is_reported_as_renamed(self):
+    def test_weight_stein_points_to_weight_track(self):
         with self.assertRaises(ValueError) as raised:
             load_config(self._mutate(lambda data: data["reference"].update(weight_stein=1.0)))
         self.assertIn("weight_track", str(raised.exception))
+
 
     def test_release_ratio_must_exceed_one(self):
         """sigma* = 1 is release exactly at fair share, which needs an unbounded penalty."""

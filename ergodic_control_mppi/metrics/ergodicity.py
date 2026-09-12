@@ -33,12 +33,7 @@ def compute_reachable_mask(
     map_y_limits: tuple[float, float],
     bins: tuple[int, int],
 ) -> ArrayLike:
-    """Boolean grid ``(bins_y, bins_x)``: True where a cell center lies outside
-    every obstacle's ``radius + safe_distance``.
-
-    Used to restrict coverage metrics to the space the robot can actually reach,
-    so target mass sitting inside an obstacle is not counted as "missed".
-    """
+    """Boolean grid ``(bins_y, bins_x)``: True where a cell center lies outside"""
     _validate_map_limits(map_x_limits, map_y_limits)
     bins_x, bins_y = bins
     x_min, x_max = map_x_limits
@@ -82,16 +77,15 @@ def _bin_points_2d(
     bins: tuple[int, int],
 ) -> tuple[ArrayLike, ArrayLike, ArrayLike]:
     """
-    Bin 2D points into integer cell indices.
-
+        Bin 2D points into integer cell indices.
+    
     Returns:
-      ix, iy, valid
-    where:
-      - ix has shape (n_points,) in [0, bins_x - 1]
-      - iy has shape (n_points,) in [0, bins_y - 1]
-      - valid marks points inside map bounds
-
-    Points exactly on the upper boundary are assigned to the last bin.
+          ix, iy, valid
+        where:
+          - ix has shape (n_points,) in [0, bins_x - 1]
+          - iy has shape (n_points,) in [0, bins_y - 1]
+          - valid marks points inside map bounds
+        Points exactly on the upper boundary are assigned to the last bin.
     """
     _validate_map_limits(map_x_limits, map_y_limits)
 
@@ -130,8 +124,7 @@ def _team_occupancy_grid(
     bins: tuple[int, int],
 ) -> ArrayLike:
     """
-    Returns normalized team occupancy histogram with shape (bins_y, bins_x).
-    bins is ordered as (bins_x, bins_y).
+        Returns normalized team occupancy histogram with shape (bins_y, bins_x).
     """
     team_paths = _as_team_paths(robot_paths)
     xy = team_paths[..., :2].reshape(-1, 2)
@@ -169,15 +162,7 @@ def compute_team_ergodic_error(
     bins: tuple[int, int] | None = None,
     reachable_mask: ArrayLike | None = None,
 ) -> float:
-    """
-    Compute the canonical scalar occupancy-based ergodic error.
-    Lower is better.
-
-    If ``reachable_mask`` (a ``(bins_y, bins_x)`` boolean grid from
-    :func:`compute_reachable_mask`) is given, the target and occupancy are
-    restricted to reachable cells and renormalized, so target mass inside
-    obstacles is not counted as uncovered.
-    """
+    """    Compute the canonical scalar occupancy-based ergodic error."""
     target = _restrict_to_mask(_normalize_density(target_density_grid), reachable_mask)
     grid_bins = bins if bins is not None else (target.shape[1], target.shape[0])
     occupancy = _team_occupancy_grid(robot_paths, map_x_limits, map_y_limits, grid_bins)
@@ -200,19 +185,7 @@ def compute_cumulative_team_ergodic_error(
     reachable_mask: ArrayLike | None = None,
     stride: int = 1,
 ) -> ArrayLike:
-    """
-    Cumulative occupancy MSE over time.
-
-    For each step t, the occupancy uses samples from steps [0, t]. If
-    ``reachable_mask`` is given, target and occupancy are restricted to reachable
-    cells and renormalized (see :func:`compute_team_ergodic_error`).
-
-    ``stride`` subsamples the returned series without subsampling the histogram:
-    every step still contributes to the occupancy, only the O(bins) error
-    evaluation is skipped. The last entry therefore always equals
-    :func:`compute_team_ergodic_error` on the same path, which subsampling the
-    path beforehand would not.
-    """
+    """    Cumulative occupancy MSE over time."""
     team_paths = _as_team_paths(robot_paths)
     target = _restrict_to_mask(_normalize_density(target_density_grid), reachable_mask)
     grid_bins = bins if bins is not None else (target.shape[1], target.shape[0])
@@ -268,23 +241,17 @@ def compute_cumulative_team_ergodic_error(
 # helpers live here rather than in experiments/ because both consume them.
 
 
-def fourier_wavenumbers(order: int) -> tuple[ArrayLike, ArrayLike]:
-    """Return the ``(k, Lambda_k)`` pair for all modes up to ``order``.
-
-    Excludes the ``(0, 0)`` mode, whose coefficient is identically one for any
-    normalized measure and therefore carries no information.
+def fourier_wavenumbers(order: int, dim: int = 2) -> tuple[ArrayLike, ArrayLike]:
+    """Return the ``(k, Lambda_k)`` pair for all modes up to ``order`` in ``dim`` axes.
 
     Raises:
         ValueError: If ``order`` is below one.
     """
     if order < 1:
         raise ValueError("fourier order must be >= 1")
-    k_list = [
-        (float(kx), float(ky))
-        for kx in range(order + 1)
-        for ky in range(order + 1)
-        if not (kx == 0 and ky == 0)
-    ]
+    from itertools import product
+
+    k_list = [k for k in product(range(order + 1), repeat=dim) if any(k)]
     k_arr = np.asarray(k_list, dtype=np.float64)
     lambda_k = np.power(1.0 + np.sum(k_arr * k_arr, axis=1), -1.5)
     return k_arr, lambda_k
@@ -298,11 +265,8 @@ def fourier_basis_values(
     y_min: float,
     y_max: float,
 ) -> ArrayLike:
-    """Evaluate the cosine basis at ``(n, >=2)`` points, returning ``(n, n_k)``.
-
-    Unnormalized (the ``h_k`` factor is omitted): it is a fixed per-mode scale
-    that cancels in the ``c_k - phi_k`` difference up to a constant absorbed by
-    ``Lambda_k``, and both terms here use the same convention.
+    """
+    Evaluate the cosine basis at ``(n, >=2)`` points, returning ``(n, n_k)``.
     """
     pts = np.asarray(xy, dtype=np.float64)
     kx = np.asarray(k_arr, dtype=np.float64)[:, 0][None, :]
@@ -321,12 +285,7 @@ def fourier_target_coefficients(
     k_arr: ArrayLike,
     reachable_mask: ArrayLike | None = None,
 ) -> ArrayLike:
-    """Spatial coefficients ``phi_k`` of the target grid, shape ``(n_k,)``.
-
-    If ``reachable_mask`` is given the target is restricted and renormalized
-    first, exactly as :func:`compute_team_ergodic_error` does, so the two
-    metrics score against the same reference measure.
-    """
+    """Spatial coefficients ``phi_k`` of the target grid, shape ``(n_k,)``."""
     _validate_map_limits(map_x_limits, map_y_limits)
     target = _restrict_to_mask(_normalize_density(target_density_grid), reachable_mask)
     ny, nx = target.shape
@@ -369,12 +328,8 @@ def compute_cumulative_fourier_ergodic_metric(
     reachable_mask: ArrayLike | None = None,
     stride: int = 1,
 ) -> ArrayLike:
-    """Spectral ergodic metric after each step, shape ``(ceil(steps/stride),)``.
-
-    Vectorized: the running coefficients are one ``cumsum`` over the per-step
-    basis values, so unlike the occupancy series this costs no Python loop.
-    ``stride`` subsamples the *output* only; every step still contributes to the
-    time average.
+    """
+    Spectral ergodic metric after each step, shape ``(ceil(steps/stride),)``.
     """
     if stride < 1:
         raise ValueError("stride must be >= 1")
@@ -427,11 +382,8 @@ def compute_cumulative_fourier_ergodic_metric(
 def _disc_mass_field(
     mass: ArrayLike, radius: float, cell_x: float, cell_y: float
 ) -> ArrayLike:
-    """Mass inside a disc of world-unit ``radius`` centred on each cell, via zero-padded FFT.
-
-    The disc is built in world units rather than in cells, so a grid whose cells are not
-    exactly square -- the deployment's 267x134 raster over a 40x20 workspace is square only
-    to 0.4% -- still gets a circle rather than an ellipse, at any aspect ratio.
+    """
+    Mass inside a disc of world-unit ``radius`` centred on each cell, via zero-padded FFT.
     """
     height, width = mass.shape
     pad_y, pad_x = height * 2, width * 2
@@ -453,25 +405,21 @@ def compute_ball_ergodic_metric(
     radii: int = 24,
     reachable_mask: ArrayLike | None = None,
 ) -> float:
-    """Multiscale ball ergodic metric between an occupancy grid and a target. Lower is better.
-
-    Both inputs are treated as *mass* grids (each renormalized to unit total), so the
-    returned value carries units of area squared times length and is comparable only
-    between calls sharing a workspace, ``max_radius`` and ``radii``.
-
+    """
+    Multiscale ball ergodic metric between an occupancy grid and a target. Lower is better.
+    
     Args:
-        occupancy: Visitation mass with shape ``(bins_y, bins_x)``, e.g. from
-            :func:`compute_team_occupancy_grid`.
-        target_density_grid: Target on the same grid; renormalized here.
-        map_x_limits: Workspace ``x`` bounds.
-        map_y_limits: Workspace ``y`` bounds.
-        max_radius: Largest ball radius ``R``; defaults to half the shorter workspace side,
-            beyond which every ball covers the whole workspace and contributes nothing.
-        radii: Number of midpoint quadrature nodes on ``[0, R]``.
-        reachable_mask: Optional mask restricting both measures to reachable cells.
-
+            occupancy: Visitation mass with shape ``(bins_y, bins_x)``, e.g. from
+                : func:`compute_team_occupancy_grid`.
+            target_density_grid: Target on the same grid; renormalized here.
+            map_x_limits: Workspace ``x`` bounds.
+            map_y_limits: Workspace ``y`` bounds.
+            max_radius: Largest ball radius ``R``; defaults to half the shorter workspace side,
+                beyond which every ball covers the whole workspace and contributes nothing.
+            radii: Number of midpoint quadrature nodes on ``[0, R]``.
+            reachable_mask: Optional mask restricting both measures to reachable cells.
     Returns:
-        The scalar metric.
+            The scalar metric.
     """
     if radii < 1:
         raise ValueError("radii must be >= 1")

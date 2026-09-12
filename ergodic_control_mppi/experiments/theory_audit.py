@@ -1,24 +1,5 @@
-r"""Measure every term the closed-loop analysis names, on the loop it analyses.
-
-Sec. "guarantees" states five assumptions, two theorems, four propositions and a corollary,
-and none of them currently carries a number. Each statement there is an inequality whose
-*both* sides are computable from a recorded planning step, so this module computes them and
-reports the slack. Nothing here proves an assumption -- Assumptions 1-5 are conditions, and
-what is reported is whether the deployed loop satisfies them and by what margin.
-
-The per-step quantities follow Prop. "executed_flow_tracking" exactly:
-
-    ||v_exec - h(z_t)||^2  <=  2||v_exec - v_bar||^2  +  2 sum_b w_b S_FM_b
-    \_______ eps_track ___/     \___ eps_avg ____/       \___ eps_FM ____/
-
-with S_FM the *squared* Euler residual of eq. (S_FM_def), not the first-order surrogate the
-MPPI weights are actually built from -- the proposition holds for any nonnegative weights
-summing to one, which is what lets the two differ.
-
-Time averages are taken by striding recorded snapshots rather than by instrumenting
-``mppi_step``: the averages are Cesaro limits, so a strided subsample is unbiased, and the
-hot loop keeps its signature and its numerical branch. ``mppi.replay.replay_step`` already
-expands a snapshot back into the exact cloud its step used.
+"""
+Measure every term the closed-loop analysis names, on the loop it analyses.
 """
 
 from typing import NamedTuple
@@ -46,30 +27,19 @@ RESIDUAL_FIELDS = (
 
 
 class StepResiduals(NamedTuple):
-    """One replanning step's error-budget terms, all in m^2/s^2 unless noted.
+    """One replanning step's error-budget terms (m^2/s^2 unless noted).
 
     Attributes:
-        eps_track: ``||v_exec - h(z_t)||^2``, the executed tracking error.
-        eps_avg: ``||v_exec - v_bar||^2``, the control-to-motion averaging gap.
-        eps_fm_k0: ``sum_b w_b`` times the ``k=0`` term of the squared Euler residual --
-            the only term the proof of Prop. "executed_flow_tracking" uses.
-        eps_fm_full: the same weighted average over the complete ``T``-step residual, which
-            is what the paper's ``eps_FM`` denotes.
-        rhs_k0: ``(sqrt(eps_avg) + sqrt(eps_fm_k0))^2``, the bound as the proof builds it.
-            The sharp L^2 triangle inequality -- Young at its optimal parameter -- rather
-            than the ``||a+b||^2 <= 2||a||^2 + 2||b||^2`` split, whose factor 2 the audit
-            measured at 2.001 slack and which was therefore the entire looseness. Tight when
-            the two errors are parallel.
-        rhs_full: the same with ``eps_fm_full``, the bound as stated.
-        jensen_slack: ``sum_b w_b ||v_b - v_bar||^2``, the weighted spread of the first-slot
-            rollout velocities. With ``eps_avg = 0`` the sharp bound collapses to
-            ``eps_fm_k0``, and this is exactly ``rhs_k0 - eps_track`` -- so it *is* the
-            conservatism of the k=0 bound, not a proxy for it.
-        flow_speed: ``||h(z_t)||`` in m/s.
-        gauge_regularized: 1.0 when the speed gauge sat in its regularized branch. Detected
-            from the output alone: the gauge returns exactly ``reference_speed`` whenever the
-            raw field norm clears the ``1e-3`` floor, and strictly less when it does not.
-        saturated_fraction: fraction of the executed control's three channels at their bound.
+        eps_track: Squared executed tracking error.
+        eps_avg: Squared control-to-motion averaging gap.
+        eps_fm_k0: k=0 Euler residual term in the tracking bound.
+        eps_fm_full: Full-horizon Euler residual.
+        rhs_k0: Sharp bound ``(sqrt(eps_avg) + sqrt(eps_fm_k0))^2``.
+        rhs_full: Same with ``eps_fm_full``.
+        jensen_slack: Weighted first-slot velocity spread.
+        flow_speed: Reference flow speed in m/s.
+        gauge_regularized: 1.0 when the speed gauge used the regularized branch.
+        saturated_fraction: Fraction of control channels at their bound.
     """
 
     eps_track: float
@@ -85,13 +55,8 @@ class StepResiduals(NamedTuple):
 
 
 def _sharp(first: jax.Array, second: jax.Array) -> jax.Array:
-    """``(sqrt(a) + sqrt(b))^2``: the sharp L^2 triangle bound on ``||u + w||^2``.
-
-    Young's inequality at the optimal parameter, rather than at the parameter 1 that gives
-    the textbook ``2a + 2b``. The two agree only when ``a = b``; at the measured
-    ``eps_avg ~ 4e-10`` against ``eps_fm ~ 0.6`` the cross term is ``~3e-5``, so this is
-    ``eps_fm`` to five decimal places and the factor 2 the audit measured as 2.001 slack is
-    recovered outright.
+    """
+    ``(sqrt(a) + sqrt(b))^2``: the sharp L^2 triangle bound on ``||u + w||^2``.
     """
     return jnp.square(jnp.sqrt(first) + jnp.sqrt(second))
 
@@ -107,8 +72,9 @@ def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Ar
         carry.service_mass,
     )
 
-    origin = carry.state[:2]
-    initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2))
+    d = params.gmm.means.shape[-1]
+    origin = carry.state[:2] if d == 2 else carry.state[:d]
+    initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2 if d == 2 else d))
     evaluation = jnp.concatenate((initial, sampled_positions[:, :-1]), axis=1)
     displacements = sampled_positions - evaluation
     flow = reference_flow(params, evaluation, carry.memory, carry.service_mass)
@@ -119,7 +85,7 @@ def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Ar
     # identical values -- *is* z_t, and flow[0] is h(z_t) with no interpolation.
     reference = flow[0]
     rollout_velocity = displacements[:, 0] / delta_t
-    executed_velocity = (step(carry.state, result.control, params.model)[:2] - origin) / delta_t
+    executed_velocity = (step(carry.state, result.control, params.model)[:2 if d == 2 else d] - origin) / delta_t
     average_velocity = jnp.einsum("k,ki->i", weights, rollout_velocity)
 
     residual = displacements / delta_t - flow[None]
@@ -135,7 +101,7 @@ def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Ar
     jensen = jnp.einsum("k,k->", weights, jnp.sum(spread * spread, axis=-1))
 
     limits = jnp.array(
-        [params.model.max_accel_lin_abs] * 2 + [params.model.max_accel_ang_abs],
+        [params.model.max_accel_lin_abs] * d + [params.model.max_accel_ang_abs],
         dtype=jnp.float32,
     )
     saturated = jnp.mean(jnp.abs(result.control) >= limits * (1.0 - 1e-6))
@@ -148,14 +114,14 @@ def _residuals(params: ControllerParams, carry: SingleControllerState) -> jax.Ar
 
 
 def step_residuals(params: ControllerParams, carry: SingleControllerState) -> StepResiduals:
-    """Compute the Prop. "executed_flow_tracking" budget for one recorded planning step.
-
+    """
+    Compute the Prop. "executed_flow_tracking" budget for one recorded planning step.
+    
     Args:
-        params: The parameters the step ran under.
-        carry: A recorded closed-loop carry, from ``mppi.replay.restore_snapshot``.
-
+            params: The parameters the step ran under.
+            carry: A recorded closed-loop carry, from ``mppi.replay.restore_snapshot``.
     Returns:
-        The step's residual terms. ``carry`` is not advanced.
+            The step's residual terms. ``carry`` is not advanced.
     """
     return StepResiduals(*(float(value) for value in _residuals(params, carry)))
 
@@ -163,20 +129,15 @@ def step_residuals(params: ControllerParams, carry: SingleControllerState) -> St
 def endpoint_jacobian(
     params: ControllerParams, state: jax.Array, controls: jax.Array
 ) -> np.ndarray:
-    """Jacobian of the ``n``-step endpoint map of As. "endpoint", shape ``(6, 3n)``.
-
-    As. "endpoint" asks for full row rank at *some interior* admissible sequence. Passing a
-    saturated ``controls`` is therefore not a counterexample to the assumption -- ``clamp``
-    zeroes the derivative there, which is exactly why the assumption is stated on the
-    interior. Report the interior witness and the saturated case side by side.
-
+    """
+    Jacobian of the ``n``-step endpoint map of As. "endpoint", shape ``(6, 3n)``.
+    
     Args:
-        params: Controller parameters, for the dynamics.
-        state: The state to linearize at, shape ``(6,)``.
-        controls: The control sequence witness, shape ``(n, 3)``.
-
+            params: Controller parameters, for the dynamics.
+            state: The state to linearize at, shape ``(6,)``.
+            controls: The control sequence witness, shape ``(n, 3)``.
     Returns:
-        The endpoint Jacobian with respect to the flattened control sequence.
+            The endpoint Jacobian with respect to the flattened control sequence.
     """
     def endpoint(sequence: jax.Array) -> jax.Array:
         return jax.lax.scan(
@@ -197,33 +158,21 @@ def residual_walk(
     stride: int,
     preflight_steps: int = 0,
 ) -> tuple[jax.Array, jax.Array]:
-    """Run one closed loop, returning the executed path and a strided residual history.
-
-    Nested scan rather than a residual at every step: the outer scan evaluates the budget
-    once and the inner scan advances ``stride`` steps plainly, so measuring costs one extra
-    rollout per ``stride`` instead of one per step. The time averages the analysis defines
-    are Cesaro limits, so the strided sample is an unbiased estimator of them.
-
-    **This is a different numerical branch than ``run_single``.** The nested scan lowers
-    differently, and the closed loop amplifies a one-ULP difference into metres, so the path
-    here is not the path that call produces from the same key -- measured, not assumed. It
-    does not matter for what this function is for: the residuals and the trajectory they are
-    reported against come from the *same* run, so every inequality check is internally exact,
-    and the audit's conclusions are distributional over seeds like every other claim in this
-    project. It does mean audit rows must never be pooled with campaign rows.
-
+    """
+    Run one closed loop, returning the executed path and a strided residual history.
+    
     Args:
         params: Controller parameters.
-        initial_state: State with shape ``(6,)``.
-        initial_controls: Warm-start controls with shape ``(T, 3)``.
+        initial_state: State with shape ``(2d + 2,)``.
+        initial_controls: Warm-start controls with shape ``(T, d + 1)``.
         key: JAX PRNG key.
-        steps: Total control steps; must be divisible by ``stride``. Static under JIT.
-        stride: Steps between residual evaluations. Static under JIT.
-        preflight_steps: Stationary planning iterations retained before motion starts.
+        steps: Total control steps; must be divisible by ``stride``.
+        stride: Steps between residual evaluations.
+        preflight_steps: Stationary planning iterations before motion starts.
 
     Returns:
-        ``(path, residuals)`` with shapes ``(steps, 6)`` and ``(steps // stride, 10)``, the
-        latter's columns ordered as :data:`RESIDUAL_FIELDS`.
+        ``(path, residuals)`` with shapes ``(steps, 2d + 2)`` and
+        ``(steps // stride, len(RESIDUAL_FIELDS))``.
     """
     if steps % stride:
         raise ValueError(f"steps {steps} is not divisible by stride {stride}")
@@ -256,22 +205,8 @@ def residual_walk(
 
 
 def project_admissible(position: jax.Array, workspace) -> jax.Array:
-    """Nearest admissible point: inside the workspace box, and outside any circular pillar.
-
-    As. "ideal_kernel_stability" describes P_0 as realizing the reference flow exactly, but
-    read literally that kernel is not confined: the field carries no boundary term (boundary
-    and obstacle costs live in the rollout cost and act on the *executed* motion, which P_0
-    overrides). An unprojected ideal walk leaves the workspace by a median 40 m, so its
-    invariant law is not supported on Omega_free at all and the TV it reports is measuring
-    divergence rather than coverage. Projecting restores As. 1 for the comparison kernel, at
-    the price of a tracking residual wherever the flow points out -- measured, not assumed.
-
-    The campaign maps carry their obstacles as a rasterized occupancy grid and leave
-    ``obstacles`` empty, so only the box clip binds there. That is enough for the question
-    being asked: ``coverage_terms`` masks the occupancy by the reachable set and renormalizes,
-    so time spent inside a pillar is already excluded from TV, while time spent 40 m outside
-    the box was not. The residual exposure -- how much of the ideal law sits inside obstacles
-    -- is reported separately as ``inside_obstacle_fraction`` rather than projected away.
+    """
+    Nearest admissible point: inside the workspace box, and outside any circular pillar.
     """
     lower = jnp.stack((workspace.x_limits[0], workspace.y_limits[0]))
     upper = jnp.stack((workspace.x_limits[1], workspace.y_limits[1]))
@@ -294,20 +229,8 @@ def project_admissible(position: jax.Array, workspace) -> jax.Array:
 
 
 def ideal_step(params: ControllerParams, carry):
-    """One step of the ideal kernel of As. "ideal_kernel_stability", tracking the flow exactly.
-
-    As. 7 posits a comparison kernel P_0 "sharing the same augmented-state description and
-    sampling mechanism but realizing the reference flow exactly". That wording is load-bearing
-    and easy to misread: the reference field is *not* a standalone vector field, because its
-    Stein term is built from the rollout occupancy. Integrating some position-only field would
-    be a different object entirely. So this keeps the whole controller -- rollouts, weights,
-    warm start, temperature, memory -- and overrides only the executed motion, which is the
-    single thing As. 7 idealizes.
-
-    The resulting motion is deliberately *not* dynamically feasible: velocity snaps to the
-    reference rather than accelerating toward it, so the acceleration limit is ignored. That
-    is the idealization, not a bug -- it is what makes eps_track identically zero, which is
-    the premise Cor. "flow_matching_consistency" needs and the thing being tested here.
+    """
+    One step of the ideal kernel of As. "ideal_kernel_stability", tracking the flow exactly.
     """
     from ergodic_control_mppi.mppi.field import responsibilities
     from ergodic_control_mppi.mppi.single import SingleControllerState, adapt_temperature
@@ -400,10 +323,8 @@ def residual_batch(
     stride: int,
     preflight_steps: int = 0,
 ) -> tuple[jax.Array, jax.Array]:
-    """Vmap :func:`residual_walk` over lanes, as ``mppi.single.run_batch`` does for runs.
-
-    The same branch warning applies: a lane count is part of a result's identity, so every
-    cell whose residuals are compared must come from one width.
+    """
+    Vmap :func:`residual_walk` over lanes, as ``mppi.single.run_batch`` does for runs.
     """
     states = jnp.broadcast_to(
         jnp.atleast_2d(initial_state), (keys.shape[0], jnp.atleast_2d(initial_state).shape[-1])

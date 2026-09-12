@@ -223,10 +223,7 @@ def _limit_speed(v: np.ndarray, desired_speed: float) -> np.ndarray:
 
 
 def _clamp_controls_np(u: np.ndarray, model_params) -> np.ndarray:
-    """Clamp in float32, matching `models.double_integrator.clamp` bit for bit.
-
-    See `_double_integrator_step_np` for why this is a hand-written copy rather than a call.
-    """
+    """Clamp in float32, matching `models.double_integrator.clamp` bit for bit."""
     limits = np.array([model_params.max_accel_lin_abs, model_params.max_accel_lin_abs,
                        model_params.max_accel_ang_abs], dtype=np.float32)
     return np.clip(np.asarray(u, dtype=np.float32), -limits, limits).astype(np.float64)
@@ -252,19 +249,8 @@ def _clip_state_to_map_np(
 
 
 def _double_integrator_step_np(x: np.ndarray, u: np.ndarray, model_params) -> np.ndarray:
-    """Advance the double integrator, matching `models.double_integrator.step` bit for bit.
-
-    A transcription rather than a call, for one reason: the baselines step this from a
-    Python loop 20 000 times per run, and dispatching two JAX primitives per call cost
-    412 us against 7.6 us here -- 46% of every baseline's runtime spent in tracing overhead
-    for six multiply-adds.
-
-    The arithmetic must be *float32*, because that is what the original does. It takes
-    float64 in, but ``jax_enable_x64`` is off, so ``jnp.asarray`` silently narrows and the
-    whole computation happens in single precision before being widened again on the way
-    out. A float64 transcription would be the more natural code and would quietly change
-    every trajectory: this loop is chaotic enough that one ULP flips a run's outcome.
-    ``tests.test_baselines.IntegratorTranscriptionTest`` pins the equality.
+    """
+    Advance the double integrator, matching `models.double_integrator.step` bit for bit.
     """
     params = model_params
     x = np.asarray(x, dtype=np.float32)

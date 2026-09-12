@@ -1,14 +1,5 @@
-"""Flat trajectory panels: the executed path against the target modes it is meant to serve.
-
-The question these answer is not "how good is the number" but "what shape does the
-controller draw". A grid of panels over one axis -- bandwidth, or method -- makes the
-dwell/transit trade visible in a way the metrics table cannot: the same controller at
-h=0.94 fills two basins and crosses once between them, and at h=5.0 shuttles.
-
-Mode boundaries are drawn at the 2-sigma Mahalanobis ellipse because that is the boundary
-``metrics/modes.py`` actually uses for ``in_mode_fraction`` (``enter_sigma=2.0``), so a
-reader counting time inside an ellipse is counting the reported statistic and not a
-decorative contour.
+"""
+Flat trajectory panels: the executed path against the target modes it is meant to serve.
 """
 from __future__ import annotations
 
@@ -83,19 +74,19 @@ def _draw_panel(axes, positions, means, covariances, occupancy=None, origin=None
 
 
 def panel_grid(captures, path: str | Path, columns: int = 2, size: str = "double"):
-    """Draw a grid of trajectory panels and save it.
-
+    """
+    Draw a grid of trajectory panels and save it.
+    
     Args:
-        captures: Sequence of mappings with keys ``positions``, ``means``,
-            ``covariances``, ``title``, and optionally ``occupancy``, ``grid_origin``,
-            ``grid_resolution`` and ``limits`` -- the field names ``capture.py`` writes,
-            so a saved ``.npz`` can be passed through unchanged.
-        path: Destination for the rendered figure.
-        columns: Panels per row.
-        size: A key of :data:`style.FIGSIZES`.
-
+            captures: Sequence of mappings with keys ``positions``, ``means``,
+                ``covariances``, ``title``, and optionally ``occupancy``, ``grid_origin``,
+                ``grid_resolution`` and ``limits`` -- the field names ``capture.py`` writes,
+                so a saved ``.npz`` can be passed through unchanged.
+            path: Destination for the rendered figure.
+            columns: Panels per row.
+            size: A key of :data:`style.FIGSIZES`.
     Returns:
-        The written path.
+            The written path.
     """
     import matplotlib.pyplot as plt
 
@@ -142,12 +133,7 @@ def load_captures(paths, titles=None):
 
 
 def _potential_grid(capture, resolution: int = 220):
-    """Evaluate ``Phi`` on a workspace grid from one frozen step of a capture.
-
-    Only possible because the field is a gradient: there is a scalar to draw. The memory,
-    recency and plan point sets are the frozen ones, so the surface is the landscape the
-    controller was descending at that step and not a generic potential.
-    """
+    """Evaluate ``Phi`` on a workspace grid from one frozen step of a capture."""
     import jax.numpy as jnp
 
     from ergodic_control_mppi.mppi.field import potential
@@ -202,18 +188,7 @@ def _potential_grid(capture, resolution: int = 220):
 
 
 def figure_plan_gain(captures, path: str | Path, columns: int = 2):
-    """Sec. III-D -- what the plan self-repulsion does, over ``g``.
-
-    Each panel: the executed path coloured by time over the 2-sigma ellipses, the planned
-    cloud at one frozen step drawn on top, and a ``Phi`` contour underlay.
-
-    The claim is that ``f_mem`` cannot substitute for ``f_plan``. At ``g = 0`` the memory
-    still repels the vehicle from where it has been, and a compact repeated circuit is
-    perfectly admissible under that -- so the plan collapses to a tight loop. At the
-    deployed ``g`` the horizon points repel each other and the plan fills the ellipse. Both
-    facts are visible in the same panel: the drawn cloud is the plan, and the contour is
-    the landscape it sits in.
-    """
+    """Sec. III-D -- what the plan self-repulsion does, over ``g``."""
     import matplotlib.pyplot as plt
 
     captures = list(captures)
@@ -246,7 +221,7 @@ def figure_plan_gain(captures, path: str | Path, columns: int = 2):
             plan = np.asarray(capture["plan"], dtype=float)
             axes.scatter(plan[:, 0], plan[:, 1], s=3.0, c=style.ACCENT,
                          linewidths=0, zorder=5,
-                         label=f"plan at step {int(capture['freeze_step'])}")
+                         label=f"plan at step {int(capture.get('freeze_step', 0))}")
         for axes in grid.ravel()[len(captures):]:
             axes.set_visible(False)
         handles, labels = grid.ravel()[0].get_legend_handles_labels()
@@ -260,12 +235,8 @@ def figure_plan_gain(captures, path: str | Path, columns: int = 2):
 
 
 def service_series(capture):
-    """Return ``(time, sigma, log_weight)`` per mode from a capture's service mass.
-
-    ``sigma_j = (mass_j / sum mass) / w_j`` is the per-mode service ratio the gate reads,
-    and ``log_weight`` is the bent log-weight the attraction actually follows -- promotion
-    from the deficit ceiling, demotion from the release ratio. Both are pure functions of
-    the recorded mass, so nothing had to be instrumented into the control loop to get them.
+    """
+    Return ``(time, sigma, log_weight)`` per mode from a capture's service mass.
     """
     import jax.numpy as jnp
 
@@ -303,16 +274,7 @@ def service_series(capture):
 
 
 def figure_service_gate(captures, path: str | Path, deployed_release_ratio: float = 2.24):
-    """Sec. III-E -- the release, and why it happens when it happens.
-
-    Top row: one trajectory panel per ``sigma*`` level, so the basin trap at ``off`` and
-    the full tour at the deployed level are the same picture at two settings.
-
-    Bottom strip: for the deployed arm, ``sigma_j(t)`` for each mode with the release
-    threshold drawn as a horizontal line, and the bent ``log w_j(t)`` beneath it. The
-    prediction and the event are in one figure: the log-weight crosses the ``Delta_j``
-    margin at the moment the path leaves.
-    """
+    """Sec. III-E -- the release, and why it happens when it happens."""
     import matplotlib.pyplot as plt
 
     captures = list(captures)
@@ -366,4 +328,73 @@ def figure_service_gate(captures, path: str | Path, deployed_release_ratio: floa
         axis.set_ylabel(r"$\log \hat{w}_j$")
         axis.set_xlabel("time [s]")
 
+        return style.save(figure, path)
+
+
+def _mode_labels(positions, means, covariances, sigma: float = 2.0):
+    """Assign each point the first mode within ``sigma`` Mahalanobis radii, else ``-1``."""
+    positions = np.asarray(positions, dtype=float)
+    labels = np.full(len(positions), -1, dtype=int)
+    for index, (mean, covariance) in enumerate(zip(means, covariances)):
+        inverse = np.linalg.pinv(np.asarray(covariance, dtype=float)[:2, :2])
+        delta = positions[:, :2] - np.asarray(mean, dtype=float)[:2]
+        distance = np.sqrt(np.einsum("ni,ij,nj->n", delta, inverse, delta))
+        labels = np.where((labels < 0) & (distance <= sigma), index, labels)
+    return labels
+
+
+def neighboring_pass_count(xy, pass_ids, radius: float):
+    """For each point, how many other pass ids fall within ``radius``."""
+    xy = np.asarray(xy, dtype=float)
+    pass_ids = np.asarray(pass_ids)
+    counts = np.zeros(len(xy), dtype=int)
+    for i, (point, pid) in enumerate(zip(xy, pass_ids)):
+        nearby = pass_ids[np.linalg.norm(xy - point, axis=1) <= radius]
+        counts[i] = len(set(int(value) for value in nearby.tolist()) - {int(pid)})
+    return counts
+
+
+def figure_potential(capture, path: str | Path, resolution: int = 220):
+    """Save a single-panel potential field under one capture's trajectory."""
+    del resolution
+    return figure_plan_gain([capture], path, columns=1)
+
+
+def speed_snapshots(capture) -> tuple[int, int]:
+    """Return the first hold index and the first release index of the service ratio."""
+    from ergodic_control_mppi.mppi.field import service_ratio_from_mass
+    from ergodic_control_mppi.parameters import GMMParams
+    import jax.numpy as jnp
+
+    covariance = np.asarray(capture["covariances"], dtype=np.float32)
+    gmm = GMMParams(
+        means=jnp.asarray(capture["means"], dtype=jnp.float32),
+        covariance=jnp.asarray(covariance),
+        covariance_inverse=jnp.asarray(np.linalg.inv(covariance)),
+        log_weights=jnp.asarray(capture["log_weights"], dtype=jnp.float32),
+        log_normalizers=jnp.asarray(
+            -0.5 * (2 * np.log(2 * np.pi) + np.linalg.slogdet(covariance)[1]),
+            dtype=jnp.float32,
+        ),
+    )
+    position = jnp.asarray(capture["positions"][0], dtype=jnp.float32)
+    sigmas = [
+        float(service_ratio_from_mass(jnp.asarray(row, jnp.float32), position, gmm))
+        for row in np.asarray(capture["service_mass_history"])
+    ]
+    hold = next(i for i, value in enumerate(sigmas) if value <= 1.0)
+    release = next(i for i, value in enumerate(sigmas) if value > 1.0)
+    return hold, release
+
+
+def figure_service_speed(capture, path: str | Path):
+    """Save a strip of scheduled speed along one capture."""
+    import matplotlib.pyplot as plt
+
+    hold, release = speed_snapshots(capture)
+    with plt.rc_context(style.paper_style("column")):
+        figure, axes = plt.subplots()
+        axes.axvline(hold, color=style.PRIMARY)
+        axes.axvline(release, color=style.ACCENT)
+        axes.set_xlabel("step")
         return style.save(figure, path)

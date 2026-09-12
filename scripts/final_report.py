@@ -1,31 +1,7 @@
-"""Read the campaign archive and apply the pre-registered promotion gate.
+"""
+Read the campaign archive and apply the pre-registered promotion gate.
 
-The gate is written down here, in code, rather than applied by eye after the fact. Its
-shape comes from what went wrong before: ``alpha = 1.0`` had a pooled p-value of 0.0005 and
-tripled the tour count, and was still wrong, because the entire effect lived on one map. A
-small pooled p-value is necessary and nowhere near sufficient.
-
-So an arm is promoted only if **all three** hold:
-
-  1. the pooled paired Wilcoxon over all 108 cells survives Holm within its own axis,
-  2. the per-map median effect has the **same sign on at least 6 of 8 maps**, and
-  3. the joint sensitivity clears :data:`SENSITIVITY_FLOOR` sigma.
-
-Condition 2 is the one that would have caught the two retracted findings. It is checked on
-sign, not on significance: nine per-map tests at twelve seeds have no power to spare, and
-demanding significance on each would promote nothing.
-
-Condition 3 was added after a null arm was promoted on synthetic data at p = 0.011 with
-every map agreeing. Two things make that possible and neither is a fluke. Holm applied
-within a *two-arm* axis sets the bar at p < 0.025, and with sixteen axes the familywise
-error across the table is over 50%; and a paired Wilcoxon over 108 cells has enough power
-to resolve effects far too small to act on. An effect-size floor is the standard answer,
-and the joint sensitivity is the right quantity for it because it is a signal-to-noise
-ratio rather than a raw magnitude -- the false positive had a median effect indistinguishable
-from a real arm's (+0.214 against +0.210 log2) and a sensitivity fifty times smaller
-(0.3 against 14.5). Consistency, not size, is what separated them.
-
-    uv run python scripts/final_report.py --output results/uav/final_report.md
+uv run python scripts/final_report.py --output results/uav/final_report.md
 """
 
 import argparse

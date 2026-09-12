@@ -1,10 +1,10 @@
 scenario_name: literature_comparison
 scenario_config_path: configs/mppi_params.yaml
 
-output_csv_path: results/dars2026/literature/literature_comparison.csv
-summary_csv_path: results/dars2026/literature/literature_comparison_summary.csv
-convergence_csv_path: results/dars2026/literature/literature_comparison_convergence.csv
-plot_output_dir: results/dars2026/literature/plots
+output_csv_path: results/literature/literature_comparison.csv
+summary_csv_path: results/literature/literature_comparison_summary.csv
+convergence_csv_path: results/literature/literature_comparison_convergence.csv
+plot_output_dir: results/literature/plots
 
 steps: 5000
 seeds: [0, 1, 2]

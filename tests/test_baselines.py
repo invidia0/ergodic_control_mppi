@@ -1,8 +1,4 @@
-"""The baseline harness: the physics that makes the comparison fair, not the tuning.
-
-Each of these pins a bug the fidelity gate actually caught while the baselines were being
-written. They are cheap and they are the reason a "we win" row can be believed.
-"""
+"""Regressions for the literature baseline harness and fidelity gate."""
 
 import unittest
 from pathlib import Path

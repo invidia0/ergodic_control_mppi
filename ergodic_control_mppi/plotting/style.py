@@ -1,14 +1,4 @@
-"""Shared paper plot style, palette, and figure saving.
-
-One source of truth for what used to be three copies of ``_paper_plot_style()``
-(``plotting/literature.py`` plus the deleted ``sensitivity.py``/``ablations.py``,
-identical except for font sizes).
-
-The palette -- light blue-grey axes on white, near-white grid -- is unchanged.
-Layered on top are the structural conventions of the SciencePlots ``ieee`` style
-(inward ticks on all four spines, minor ticks, thin spines, tight bbox with a
-small pad); its white background and color cycle are deliberately *not* adopted.
-"""
+"""Shared paper plot style, palette, and figure saving."""
 
 from pathlib import Path
 from typing import Any
@@ -17,9 +7,23 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
+from cmcrameri import cm as crameri
 
-# Categorical palette (Tableau 10 subset). Shared with plotting/literature.py so
-# a scenario keeps its color across every figure in the paper.
+# Nature Publishing Group categorical cycle. One hue per entity across figures.
+NPG = (
+    "#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F",
+    "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85",
+)
+METHOD_COLORS = {
+    "ours": NPG[3],
+    "mppi": NPG[3],
+    "hedac": NPG[1],
+    "sves": NPG[2],
+    "fmec": NPG[4],
+    "smc": NPG[5],
+}
+
+# Categorical palette (Tableau 10 subset). A scenario keeps its color across figures.
 SCENARIO_COLORS = {
     "unimodal": "#4E79A7",
     "bimodal": "#F28E2B",
@@ -56,24 +60,7 @@ SURFACE = "#E2E3E6"  # axes.facecolor; every ramp below is validated against it
 
 
 def sequential(hue: str = "Blues", low: float = 0.55, high: float = 0.95) -> LinearSegmentedColormap:
-    """Single-hue ramp clipped so its light end still reads against SURFACE.
-
-    The chart surface is light, so a ramp running to near-white loses its low end
-    into the background -- measured WCAG contrast of the lightest step against
-    SURFACE:
-
-        Blues full   #f7fbff   1.27:1   invisible
-        Blues @0.35  #a6cee4   1.30:1   invisible
-        Blues @0.55  #5ba3d0   2.15:1   ok      <- default here
-        Reds  @0.55  #f6583e   2.56:1   ok
-        cividis      #f3db42   1.08:1   invisible (and multi-hue)
-
-    2:1 is the floor for the lightest step of an ordinal ramp. Darkening the
-    surface does not help -- it lowers contrast with a light-ended ramp further --
-    so the ramp is clipped instead of the surface changed. Verified with the
-    dataviz palette validator, not by eye. (These figures moved a fraction when
-    the panel went from blue-grey to neutral grey; the ordering did not.)
-    """
+    """Single-hue ramp clipped so its light end still reads against SURFACE."""
     base = plt.get_cmap(hue)
     return LinearSegmentedColormap.from_list(
         f"{hue}_{low:g}_{high:g}", base(np.linspace(low, high, 256))
@@ -83,7 +70,8 @@ def sequential(hue: str = "Blues", low: float = 0.55, high: float = 0.95) -> Lin
 # Diverging map for "% change vs the shipped default": blue = better (negative),
 # white = default, red = worse. Its near-surface midpoint is deliberate -- on a
 # diverging scale zero should read as nothing.
-DIVERGING_CMAP = "RdBu_r"
+DIVERGING_CMAP = crameri.roma
+POTENTIAL_CMAP = plt.get_cmap("RdYlBu_r")
 SEQUENTIAL_CMAP = sequential("Blues")   # magnitude: recency, generic scalars
 EXCESS_CMAP = sequential("Reds")        # magnitude: over-coverage / error
 
@@ -160,14 +148,14 @@ _FONT_SIZES = {
 
 
 def paper_style(size: str = "column") -> dict[str, Any]:
-    """Return rcParams for ``plt.rc_context``.
-
+    """
+    Return rcParams for ``plt.rc_context``.
+    
     Args:
-        size: ``"column"`` (single-column figure), ``"double"`` (full width), or
-            ``"poster"`` (the large sizes the literature figures already use).
-
+            size: ``"column"`` (single-column figure), ``"double"`` (full width), or
+                ``"poster"`` (the large sizes the literature figures already use).
     Raises:
-        ValueError: If ``size`` is not a known preset.
+            ValueError: If ``size`` is not a known preset.
     """
     if size not in _FONT_SIZES:
         raise ValueError(f"size must be one of {sorted(_FONT_SIZES)}, got {size!r}")
@@ -239,23 +227,16 @@ NATURE_SANS = ["Arial", "Helvetica", "Liberation Sans", "Nimbus Sans", "DejaVu S
 
 
 def nature_style(width: str = "double", height_mm: float = 60.0) -> dict[str, Any]:
-    """rcParams for a figure built to the Nature research-figure specification.
-
-    Separate from :func:`paper_style` rather than replacing it: that one matches the
-    IEEEtran body text in serif on a grey panel, which is right for the manuscript's own
-    format and wrong here. This one is sans-serif at 5--7 pt on white, with text kept as
-    text in the PDF (``fonttype`` 42) because the guide asks for editable layers and
-    forbids outlined type.
-
+    """
+    rcParams for a figure built to the Nature research-figure specification.
+    
     Args:
-        width: ``"single"`` (89 mm) or ``"double"`` (183 mm).
-        height_mm: Figure height; must not exceed :data:`NATURE_MAX_HEIGHT_MM`.
-
+            width: ``"single"`` (89 mm) or ``"double"`` (183 mm).
+            height_mm: Figure height; must not exceed :data:`NATURE_MAX_HEIGHT_MM`.
     Returns:
-        rcParams for ``plt.rc_context``.
-
+            rcParams for ``plt.rc_context``.
     Raises:
-        ValueError: If ``width`` is unknown or the height exceeds the page allowance.
+            ValueError: If ``width`` is unknown or the height exceeds the page allowance.
     """
     if width not in NATURE_WIDTH_MM:
         raise ValueError(f"width must be one of {sorted(NATURE_WIDTH_MM)}, got {width!r}")

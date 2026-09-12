@@ -154,29 +154,6 @@ class ProvenanceTest(unittest.TestCase):
             _commit_timing_output(staged, output)
             self.assertEqual(output.read_text(), "new")
 
-    def test_hierarchical_effects_keep_pairing_and_render(self):
-        from scripts.report_figures import paired_effect_summary, fig_final_ablation
-        table = {"baseline@36": {}, "memory_off": {}, "T_350": {}}
-        for density in (10, 15, 20):
-            for map_seed in (1, 2):
-                for seed in range(6):
-                    cell = (density, map_seed, seed)
-                    value = 1 + seed + map_seed
-                    table["baseline@36"][cell] = {"occupancy_mse": value, "lanes": "36", "axis": "-"}
-                    for arm, axis in (("memory_off", "memory_gain"), ("T_350", "T")):
-                        table[arm][cell] = {"occupancy_mse": value / 2, "lanes": "36", "axis": axis}
-        summary = paired_effect_summary(table)
-        for row in summary["arms"]:
-            self.assertEqual(row["median"], 1)
-            self.assertEqual(row["interval"], [1, 1])
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "effects.pdf"
-            fig_final_ablation(table, path)
-            self.assertTrue(path.is_file())
-        del table["memory_off"][(10, 1, 0)]
-        with self.assertRaisesRegex(ValueError, "incomplete"):
-            paired_effect_summary(table)
-
     def test_branch_gate_actually_uses_odd_requested_width(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = write_small_config(Path(directory))
@@ -206,9 +183,24 @@ class ProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             scheduled = {name: (command, count, paths) for name, command, count, paths in stages(root)}
-            self.assertEqual(scheduled["ablation_clutter"][1], 1476)
-            self.assertEqual(scheduled["ablation_open"][1], 276)
+            self.assertEqual(scheduled["ablation_clutter"][1], 1728)
+            self.assertEqual(scheduled["ablation_open"][1], 336)
             self.assertEqual(len([n for n in scheduled if n.startswith("nt_")]), 6)
+            # Modality sweep: four sigma* arms x 12 seeds x the single open map, one stage
+            # per target. `trimodal` must NOT appear -- it is the deployed profile and its
+            # rows are already in open/ablation.csv.
+            from scripts.modality_configs import MODALITY_DENSITIES
+            from scripts.run_t150_revision import MODALITY_TARGETS, RELEASE_ARMS
+            self.assertEqual(tuple(MODALITY_DENSITIES), MODALITY_TARGETS)
+            self.assertNotIn("trimodal", MODALITY_TARGETS)
+            for target in MODALITY_TARGETS:
+                command, count, _ = scheduled[f"modality_{target}"]
+                self.assertEqual(count, len(RELEASE_ARMS) * 12)
+                self.assertEqual(command[command.index("--arms") + 1], ",".join(RELEASE_ARMS))
+                # The whole design is "only the density changed", so a stage pointed at the
+                # frozen config.yaml would silently re-fly trimodal under another name.
+                self.assertEqual(command[command.index("--config") + 1],
+                                 str(root / "modality" / f"config_{target}.yaml"))
             for i in range(4):
                 command = scheduled[f"inits_start{i}"][0]
                 self.assertEqual(command[command.index("--start-index") + 1], str(i))

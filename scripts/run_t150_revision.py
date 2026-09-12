@@ -1,9 +1,5 @@
-"""Run the frozen T150 numerical revision, stopping dependent stages on any failure.
-
-Prepare the bundle's config.yaml, clutter/maps.json and open/maps.json first. Map
-manifests must point to copied arrays inside the bundle. `plan` prints the exact
-commands; `run` executes them sequentially and checks artifacts before marking success.
-Laptop timing and SITL are separate, supervised validation sessions.
+"""
+Run the frozen T150 numerical revision, stopping dependent stages on any failure.
 """
 
 import argparse
@@ -21,6 +17,13 @@ import time
 import yaml
 from ergodic_control_mppi.experiments.common import artifact_digests, execution_record
 from ergodic_control_mppi.experiments.uav_ablation import FINAL_ARMS, _BY_NAME
+try:
+    from modality_configs import MODALITY_DENSITIES
+except ImportError:
+    from scripts.modality_configs import MODALITY_DENSITIES
+
+MODALITY_TARGETS = tuple(MODALITY_DENSITIES)
+RELEASE_ARMS = ("baseline", "release_off", "release_1.75", "release_3.0")
 
 
 def stages(bundle: Path):
@@ -45,7 +48,7 @@ def stages(bundle: Path):
     mechanism = [a for a in FINAL_ARMS if a == "baseline" or _BY_NAME[a][0] not in
                  {"T", "K", "alpha", "exploration", "lam_max", "track_weight",
                   "reference_speed", "penalty_scale", "boundary_scale"}]
-    for tier, maps, seeds, count in (("clutter", clutter, 6, 1476), ("open", opened, 12, 276)):
+    for tier, maps, seeds, count in (("clutter", clutter, 6, 1728), ("open", opened, 12, 336)):
         output = bundle / tier / "ablation.csv"
         command = [python, "scripts/final_ablation.py", "run", *base, "--maps", str(maps),
                    "--seeds", str(seeds), "--first-seed", "43", "--steps", "20000",
@@ -81,6 +84,13 @@ def stages(bundle: Path):
     yield "captures", [python, "scripts/mechanism_captures.py", "--config", str(config),
         "--out", str(captures), "--axis", "plan_gain", "--levels", "0,6,10", "--seed", "43",
         "--steps", "20000", "--freeze", "12000"], None, [captures / f"plan_gain_{g}_s43.npz" for g in (0, 6, 10)]
+    for target in MODALITY_TARGETS:
+        output = bundle / "modality" / f"{target}.csv"
+        yield f"modality_{target}", [python, "scripts/final_ablation.py", "run",
+            "--config", str(bundle / "modality" / f"config_{target}.yaml"), "--device", "gpu",
+            "--maps", str(opened), "--seeds", "12", "--first-seed", "43", "--steps", "20000",
+            "--output", str(output), "--arms", ",".join(RELEASE_ARMS),
+            "--stop-file", str(bundle / "STOP")], len(RELEASE_ARMS) * 12, [output]
 
 
 def check_artifacts(paths, count):

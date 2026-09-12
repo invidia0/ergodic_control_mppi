@@ -1,14 +1,4 @@
-"""Publication figures for the ablation campaign.
-
-Reads only the archive (``experiments/analyze.load_index`` / ``load_run``), so
-re-plotting never touches the GPU.
-
-    python -m ergodic_control_mppi.plotting.ablation --stage all
-
-Colour policy (plotting/style.py): interaction heatmaps show % change against the
-shipped default on a diverging map centred at zero -- blue better, red worse;
-timing uses single-hue tints; nothing rainbow.
-"""
+"""Publication figures for the ablation campaign."""
 
 from __future__ import annotations
 
@@ -114,10 +104,7 @@ def _baseline(rows: list[dict[str, str]], metric: str) -> np.ndarray:
 def plot_tornado(
     campaign_dir: Path, stage: str, output: Path, metric: str = "occupancy_mse"
 ) -> Path:
-    """Rank every swept axis by the span its levels induce in the metric.
-
-    The first figure the reader should see: what matters, before any detail.
-    """
+    """Rank every swept axis by the span its levels induce in the metric."""
     rows = load_index(campaign_dir, stage)
     grouped = _by_axis(rows, metric)
     base = _baseline(rows, metric)
@@ -307,12 +294,7 @@ def plot_interactions(
 
 
 def _iso_reach(axis, levels_a, levels_b, delta_t: float = 0.02) -> None:
-    """Overlay iso-``L = v*T*dt`` contours on the speed x horizon panel.
-
-    ``levels_a`` is the x axis and ``levels_b`` the y axis, both drawn at integer
-    positions, so the mesh is built on the same index grid the pcolormesh uses.
-    Which of the two is the speed does not matter: the reach is their product.
-    """
+    """Overlay iso-``L = v*T*dt`` contours on the speed x horizon panel."""
     grid_a, grid_b = np.meshgrid(
         np.asarray(levels_a, dtype=np.float64), np.asarray(levels_b, dtype=np.float64)
     )
@@ -524,12 +506,7 @@ STRUCTURE_COLS = {
 def plot_structure(
     campaign_dir: Path, stage: str, output: Path, metric: str = "occupancy_mse"
 ) -> Path:
-    """Balance x scale-bank matrix for the structural cross.
-
-    Arm names are the grid coordinates (``<balance>_<scale>``); arms that do not
-    parse -- ``memory_off``, where both axes are meaningless -- are drawn as a
-    reference line instead of forced into a cell.
-    """
+    """Balance x scale-bank matrix for the structural cross."""
     rows = load_index(campaign_dir, stage)
     cells: dict[tuple[str, str], list[float]] = defaultdict(list)
     outside: dict[str, list[float]] = defaultdict(list)
@@ -596,12 +573,7 @@ def plot_structure(
 
 
 def plot_timing(timing_json: Path, output: Path) -> Path:
-    """Per-stage time budget (donut) beside the cost scaling in K, T, P, Q.
-
-    A pie asserts an additive decomposition of a total, which holds for code
-    stages but not for parameters -- parameter effects are elasticities and do
-    not sum to 100%. Hence: stages in (a), per-parameter scaling laws in (b).
-    """
+    """Per-stage time budget (donut) beside the cost scaling in K, T, P, Q."""
     report = json.loads(Path(timing_json).read_text(encoding="utf-8"))
     stages = report["stages"]
     labels = {
@@ -686,13 +658,7 @@ def write_best_table(
     palette: str = "warm",
     threshold_factor: float = 1.5,
 ) -> Path:
-    """LaTeX table with the top three ranks colour-coded per metric column.
-
-    ``warm`` is red/orange/yellow for 1st/2nd/3rd as specified. ``mono`` uses
-    three tints of one hue instead: red-for-best inverts the usual convention and
-    the warm triple is hard to rank under deuteranopia, so the camera-ready has
-    an out.
-    """
+    """LaTeX table with the top three ranks colour-coded per metric column."""
     palettes = {
         "warm": ("bestred", "bestorange", "bestyellow"),
         "mono": ("bestdark", "bestmid", "bestlight"),

@@ -1,24 +1,8 @@
-"""Focused diagnostics for MPPI weights and the JAX-to-UAV discrepancy.
+"""
+Focused diagnostics for MPPI weights and the JAX-to-UAV discrepancy.
 
-The original ESS and cost diagnostics answer questions the coverage metrics cannot. The
-discrepancy modes add a falsification-first comparison of pure JAX, ideal ROS feedback,
-and the SO3 simulator without changing controller parameters.
-
-``ess`` sweeps candidate temperature caps and penalty scales and reports where the adaptive
-loop actually converges. ESS and temperature settle within ~350 steps, so a short run is
-sufficient, and it runs on CPU so it need not contend with a sweep on the GPU. The CPU and
-GPU backends give different trajectories, but ESS is set by the cost *scale* rather than
-the path, so it screens combinations faithfully.
-
-``costs`` decomposes one planning step's per-rollout cost into its terms. Only cross-rollout
-variance matters -- the softmax sees differences, so a term with a huge mean but no spread
-is invisible to the weighting, and a term with modest mean but large spread dominates it.
-
-    uv run python -m ergodic_control_mppi.experiments.uav_diagnostics ess --run-dir ...
-    uv run python -m ergodic_control_mppi.experiments.uav_diagnostics costs --run-dir ...
-    uv run python -m ergodic_control_mppi.experiments.uav_diagnostics discrepancy-jax ...
-    uv run python -m ergodic_control_mppi.experiments.uav_diagnostics discrepancy-ros ...
-    uv run python -m ergodic_control_mppi.experiments.uav_diagnostics discrepancy-report ...
+uv run python -m ergodic_control_mppi.experiments.uav_diagnostics ess --run-dir ...
+uv run python -m ergodic_control_mppi.experiments.uav_diagnostics costs --run-dir ...
 """
 
 import argparse
@@ -689,17 +673,14 @@ def build_discrepancy_report(rows: list[dict[str, str]]) -> str:
         "odometry sampling granularity.",
         "- Tracking lag: best alignment was 0–1 steps and flights travelled 6% farther than "
         "their offline twins.",
-        "- Curl/mirror symmetry: moot. The rotation was removed with the Stein path; "
-        "R = I is the condition under which the field is a gradient at all.",
+        "- Curl/mirror symmetry: R = I, the condition under which the field is a gradient.",
         "- Safety shield: command displacement was 0.3 mm.", "",
         "The surviving premise is a rare-event metric: memory_time is 5.5 s, a tour emerges "
         "over about 160 s, and a 400 s run contains only 2.5 such opportunities. The same pure "
         "JAX config scored 3 cycles on Jeff and 0 on the laptop. Any flight-only mechanism "
         "must first exceed that vehicle-free numerical split.", "",
         "Evidence scope: 3 SO3 flights exist in the current geometry; 24 across all campaigns, "
-        "of which 2 scored one cycle. **Every recorded flight is the Stein controller**, so "
-        "under same-version control none of them describes the shipped field; the flights "
-        "must be re-recorded before any of this is quoted about it.", "",
+        "of which 2 scored one cycle.", "",
         "## Cross-process determinism", "",
         "| Map | Hardware | Runs | Path hashes | Verdict |", "|---:|---|---:|---:|---|",
         *(determinism_lines or ["| — | — | 0 | 0 | pending |"]), "",

@@ -1,10 +1,5 @@
-"""Recover the MPPI sample cloud behind a recorded control step, for figures.
-
-The rollouts are the largest intermediate in ``mppi_step`` -- ``(K, T, 2)`` floats every
-step -- so they are deliberately not returned by it and not carried through the scan. They
-do not need to be: ``single_step`` is pure and ``SingleControllerState`` carries the PRNG
-key, so re-drawing from the same key reproduces the same cloud exactly. Saving the small
-carry and replaying it here costs ~7 kB per snapshot instead of ~700 kB.
+"""
+Recover the MPPI sample cloud behind a recorded control step, for figures.
 """
 
 from typing import NamedTuple
@@ -18,17 +13,17 @@ from ergodic_control_mppi.parameters import ControllerParams
 
 
 class RolloutBundle(NamedTuple):
-    """Everything needed to draw one planning step.
+    """Sample cloud and plan for one MPPI planning step.
 
     Attributes:
-        positions: Sampled rollout positions with shape ``(K, T, 2)``.
-        weights: Normalized MPPI weights with shape ``(K,)``; sums to one.
-        costs: Per-rollout costs with shape ``(K,)``.
-        optimal: The selected plan's state trajectory with shape ``(T, 6)``.
-        surrogate: The shared median path the flow was evaluated on, shape ``(T, 2)``.
-        memory: The fading-memory buffer at this step, shape ``(P, 2)``, oldest first.
-        service_mass: The per-component visit mass the service gate read, shape ``(J,)``.
-        state: The state the step planned from, shape ``(6,)``.
+        positions: Rollout positions, shape ``(K, T, d)``.
+        weights: Normalized MPPI weights, shape ``(K,)``.
+        costs: Per-rollout costs, shape ``(K,)``.
+        optimal: Selected state trajectory, shape ``(T, 2d + 2)``.
+        surrogate: Median path for flow evaluation, shape ``(T, d)``.
+        memory: Fading-memory buffer, shape ``(P, d)``.
+        service_mass: Per-component visit mass, shape ``(J,)``.
+        state: Planning state, shape ``(2d + 2,)``.
     """
 
     positions: np.ndarray
@@ -42,18 +37,14 @@ class RolloutBundle(NamedTuple):
 
 
 def replay_step(params: ControllerParams, carry: SingleControllerState) -> RolloutBundle:
-    """Re-run one planning step and return its sample cloud.
-
-    Both draws start from ``carry.key``, so the epsilon here is the one the recorded step
-    used and the returned positions are the exact rollouts its weights were computed from.
-    This does not advance anything -- ``carry`` is unchanged.
-
+    """
+    Re-run one planning step and return its sample cloud.
+    
     Args:
-        params: The same controller parameters the step ran under.
-        carry: A recorded closed-loop carry.
-
+            params: The same controller parameters the step ran under.
+            carry: A recorded closed-loop carry.
     Returns:
-        The rollout cloud, weights, plan, and memory for that step.
+            The rollout cloud, weights, plan, and memory for that step.
     """
     epsilon, _ = sample_epsilon(carry.key, params)
     costs, _, positions = _rollouts(
@@ -80,13 +71,13 @@ def replay_step(params: ControllerParams, carry: SingleControllerState) -> Rollo
 
 
 def snapshot_arrays(snapshots: list[SingleControllerState]) -> dict[str, np.ndarray]:
-    """Stack recorded carries into ``npz``-writable arrays.
-
+    """
+    Stack recorded carries into ``npz``-writable arrays.
+    
     Args:
-        snapshots: Carries captured during a run, in step order.
-
+            snapshots: Carries captured during a run, in step order.
     Returns:
-        Mapping of ``snap_*`` array names to stacked values.
+            Mapping of ``snap_*`` array names to stacked values.
     """
     # The key is a typed PRNG array and refuses np.asarray; store its raw words instead.
     # Without the key a snapshot cannot be replayed at all, so it is not optional.
@@ -98,14 +89,14 @@ def snapshot_arrays(snapshots: list[SingleControllerState]) -> dict[str, np.ndar
 
 
 def restore_snapshot(arrays, index: int) -> SingleControllerState:
-    """Rebuild one carry from the arrays written by :func:`snapshot_arrays`.
-
+    """
+    Rebuild one carry from the arrays written by :func:`snapshot_arrays`.
+    
     Args:
-        arrays: An ``npz`` mapping, or anything indexable by the ``snap_*`` names.
-        index: Which snapshot to rebuild.
-
+            arrays: An ``npz`` mapping, or anything indexable by the ``snap_*`` names.
+            index: Which snapshot to rebuild.
     Returns:
-        The carry, ready to pass to :func:`replay_step`.
+            The carry, ready to pass to : func:`replay_step`.
     """
     import jax.numpy as jnp
 

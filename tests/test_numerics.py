@@ -10,7 +10,7 @@ import numpy as np
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.models.double_integrator import clamp, step
 from ergodic_control_mppi.mppi.core import (
-    _flow_tracking_cost,
+    _tracking_cost,
     _rollouts,
     _smooth,
     mppi_step,
@@ -21,7 +21,7 @@ from ergodic_control_mppi.mppi.field import (
     kernel,
     kernel_gradient,
     logpdf,
-    memory_flow,
+    memory_repulsion,
     pdf,
     score_pdf,
     smoothed,
@@ -109,7 +109,7 @@ class NumericalTest(unittest.TestCase):
         self.assertAlmostEqual(float(blurred.sum()) * cell, 1.0, places=3)
         self.assertLess(float(blurred.max()), float(raw.max()))
 
-    def test_memory_flow_gauge_and_balance(self):
+    def test_memory_repulsion_gauge_and_balance(self):
         field = replace(self.params.field, memory_balance=0.0, fine_bandwidth=0.32)
         positions = jnp.array([[0.0, 0.0], [4.0, -2.0], [-7.0, 5.0]])
         memory = jnp.array([[1.0, 0.5], [1.2, 0.4], [0.8, 0.9], [5.0, -6.0]])
@@ -120,7 +120,7 @@ class NumericalTest(unittest.TestCase):
         expected = jnp.sqrt(0.5 * jnp.e * field.fine_bandwidth) * kde_repulsion(
             positions, memory, recency, field.fine_bandwidth
         )
-        trail = memory_flow(positions, memory, recency, self.params.gmm, field, floor)
+        trail = memory_repulsion(positions, memory, recency, self.params.gmm, field, floor)
         np.testing.assert_allclose(trail, expected, rtol=1e-5, atol=1e-6)
 
         # The sqrt(h e / 2) gauge bounds the field by max|grad kappa_h|, so it is O(1)
@@ -128,7 +128,7 @@ class NumericalTest(unittest.TestCase):
         # commensurate under one gauge.
         self.assertLess(float(jnp.max(jnp.linalg.norm(trail, axis=-1))), 1.0 + 1e-5)
         for bandwidth in (0.01, 2.0, 140.0):
-            wide = memory_flow(
+            wide = memory_repulsion(
                 positions, memory, recency, self.params.gmm,
                 replace(field, fine_bandwidth=bandwidth), floor,
             )
@@ -136,7 +136,7 @@ class NumericalTest(unittest.TestCase):
 
         # Over-coverage correction is a different field ...
         excess_field = replace(field, memory_balance=1.0)
-        excess_only = memory_flow(
+        excess_only = memory_repulsion(
             positions, memory, recency, self.params.gmm, excess_field, floor
         )
         self.assertFalse(np.allclose(excess_only, trail))
@@ -147,7 +147,7 @@ class NumericalTest(unittest.TestCase):
         # density floor drives every e_i -> 0, standing in for a fully under-covered
         # buffer (which a self-kernel KDE cannot actually produce).
         faded = [
-            float(jnp.max(jnp.abs(memory_flow(
+            float(jnp.max(jnp.abs(memory_repulsion(
                 positions, memory, recency, self.params.gmm, excess_field, jnp.array(scale)
             ))))
             for scale in (1e3, 1e6, 1e9)
@@ -206,12 +206,12 @@ class NumericalTest(unittest.TestCase):
             axis=-1,
         )
         np.testing.assert_allclose(
-            _flow_tracking_cost(flow, displacements, time_step), expected
+            _tracking_cost(flow, displacements, time_step), expected
         )
         self.assertTrue(
             np.all(
-                _flow_tracking_cost(flow, time_step * flow, time_step)
-                < _flow_tracking_cost(flow, -time_step * flow, time_step)
+                _tracking_cost(flow, time_step * flow, time_step)
+                < _tracking_cost(flow, -time_step * flow, time_step)
             )
         )
 
@@ -222,7 +222,7 @@ class NumericalTest(unittest.TestCase):
 
         def cost_at(source_particles, gmm):
             flow = score_pdf(source_particles, gmm)
-            return _flow_tracking_cost(flow[None], increments, time_step)
+            return _tracking_cost(flow[None], increments, time_step)
 
         shift = jnp.array([3.0, -2.0])
         shifted_gmm = replace(self.params.gmm, means=self.params.gmm.means + shift)

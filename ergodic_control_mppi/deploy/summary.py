@@ -1,9 +1,4 @@
-"""The one summary row a deployment trial produces, and how it is computed.
-
-Both the online recorder and the paired offline runner emit rows through here, so a UAV
-trial and its ideal twin are always scored by identical code. ``SUMMARY_FIELDS`` is a
-public contract: append to it, never reorder or rename.
-"""
+"""The one summary row a deployment trial produces, and how it is computed."""
 
 from pathlib import Path
 from typing import Any
@@ -101,20 +96,14 @@ def tracking_stats(
     commanded_times: np.ndarray,
     commanded: np.ndarray,
 ) -> dict[str, float]:
-    """Compare executed motion against the setpoints that were actually accepted.
-
-    The two streams are sampled at different rates (odometry runs faster than the control
-    loop) and start at different moments, so they are aligned by timestamp -- comparing
-    them by index would difference two unrelated instants and report an error the size of
-    the workspace. Velocity error is differenced from the same aligned pairs rather than
-    taken from odometry twist, so both columns describe one consistent comparison -- but on
-    the control grid, since the odometry period is far too short to difference across.
-
+    """
+    Compare executed motion against the setpoints that were actually accepted.
+    
     Args:
-        actual_times: Odometry timestamps in seconds, shape ``(N,)``.
-        actual: Executed positions, shape ``(N, 2)``.
-        commanded_times: Setpoint timestamps in seconds, shape ``(M,)``.
-        commanded: Accepted setpoint positions, shape ``(M, 2)``.
+            actual_times: Odometry timestamps in seconds, shape ``(N,)``.
+            actual: Executed positions, shape ``(N, 2)``.
+            commanded_times: Setpoint timestamps in seconds, shape ``(M,)``.
+            commanded: Accepted setpoint positions, shape ``(M, 2)``.
     """
     actual_times = np.asarray(actual_times, dtype=np.float64).ravel()
     commanded_times = np.asarray(commanded_times, dtype=np.float64).ravel()
@@ -166,10 +155,8 @@ def tracking_stats(
 
 
 def steps_to_threshold(convergence: np.ndarray, stride: int, factor: float = 1.5) -> float:
-    """First step where the occupancy error stays within ``factor`` of its final value.
-
-    Returns NaN when the run never settles, which is the censored case the campaign
-    analysis already treats separately.
+    """
+    First step where the occupancy error stays within ``factor`` of its final value.
     """
     convergence = np.asarray(convergence, dtype=np.float64).ravel()
     if convergence.size == 0:
@@ -210,38 +197,38 @@ def compute_row(
     odometry_seconds: float,
     control_seconds: float,
 ) -> dict[str, Any]:
-    """Build one complete summary row.
-
+    """
+    Build one complete summary row.
+    
     Args:
-        identity: Reproducibility and labelling columns (run id, seeds, hashes, versions).
-        positions: Executed positions with shape ``(N, 2)``.
-        target_grid: Normalized target density on the metric grid.
-        x_limits: Workspace x bounds.
-        y_limits: Workspace y bounds.
-        reachable_mask: Boolean mask restricting the coverage metrics.
-        gmm_means: Target mode centres with shape ``(M, 2)``.
-        gmm_inverses: Inverse mode covariances with shape ``(M, 2, 2)``.
-        delta_t: Control timestep in seconds.
-        occupancy: Raw, uninflated map occupancy used for the clearance and collision test.
-        grid_origin: Lower-left corner of the occupancy grid.
-        grid_resolution: Occupancy cell size in metres.
-        robot_radius: Physical footprint radius; clearance below it counts as a collision.
-        guard_states: Guard state strings, sampled at the guard's own rate.
-        guard_period: Seconds between guard samples; the guard runs faster than the
-            controller, so its duration must not be integrated with ``delta_t``.
-        speeds: Per-sample speed magnitudes.
-        actual_times: Odometry timestamps, aligned with ``positions``.
-        commanded_times: Setpoint timestamps, aligned with ``commanded``.
-        commanded: Accepted setpoint positions with shape ``(M, 2)``.
-        step_ms: Per-step solve times in milliseconds.
-        deadline_ms: Real-time budget per step.
-        wall_seconds: Wall-clock duration of the run, including compilation.
-        odometry_seconds: Simulated duration covered by the odometry.
-        control_seconds: Seconds between the first and last control step, which is what
-            the achieved control rate is measured over.
-
+            identity: Reproducibility and labelling columns (run id, seeds, hashes, versions).
+            positions: Executed positions with shape ``(N, 2)``.
+            target_grid: Normalized target density on the metric grid.
+            x_limits: Workspace x bounds.
+            y_limits: Workspace y bounds.
+            reachable_mask: Boolean mask restricting the coverage metrics.
+            gmm_means: Target mode centres with shape ``(M, 2)``.
+            gmm_inverses: Inverse mode covariances with shape ``(M, 2, 2)``.
+            delta_t: Control timestep in seconds.
+            occupancy: Raw, uninflated map occupancy used for the clearance and collision test.
+            grid_origin: Lower-left corner of the occupancy grid.
+            grid_resolution: Occupancy cell size in metres.
+            robot_radius: Physical footprint radius; clearance below it counts as a collision.
+            guard_states: Guard state strings, sampled at the guard's own rate.
+            guard_period: Seconds between guard samples; the guard runs faster than the
+                controller, so its duration must not be integrated with ``delta_t``.
+            speeds: Per-sample speed magnitudes.
+            actual_times: Odometry timestamps, aligned with ``positions``.
+            commanded_times: Setpoint timestamps, aligned with ``commanded``.
+            commanded: Accepted setpoint positions with shape ``(M, 2)``.
+            step_ms: Per-step solve times in milliseconds.
+            deadline_ms: Real-time budget per step.
+            wall_seconds: Wall-clock duration of the run, including compilation.
+            odometry_seconds: Simulated duration covered by the odometry.
+            control_seconds: Seconds between the first and last control step, which is what
+                the achieved control rate is measured over.
     Returns:
-        A mapping keyed by ``SUMMARY_FIELDS``.
+            A mapping keyed by ``SUMMARY_FIELDS``.
     """
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
     paths = positions[:, None, :]

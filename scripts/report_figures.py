@@ -1,15 +1,7 @@
-"""Figures for the cross-campaign report.
+"""
+Figures for the cross-campaign report.
 
-Reads the shipped UAV per-seed CSVs and renders the three figures the report needs:
-
-    fig_paired_arms      per-seed paired effect vs the shipped arm (violin + points)
-    fig_effect_forest    median ratio + bootstrap CI, Holm-marked
-    fig_dot_matrix       every run as one dot, axes ranked by spread of their medians
-
-    uv run python scripts/report_figures.py --output results/report
-
-Campaign-side stages need `results/campaign/<stage>.csv`; the matrix falls back to the
-values quoted in campaign_findings.md and marks them as quoted when the raw CSVs are absent.
+uv run python scripts/report_figures.py --output results/report
 """
 
 import argparse
@@ -87,12 +79,7 @@ ARM_LABELS = {
 
 
 def arm_label(arm: str) -> str:
-    """Display name for an arm, including the per-width baselines.
-
-    The baselines are keyed by the lane count they were measured at, which is a property of
-    the campaign's chunking rather than of the design -- hardcoding the widths here meant a
-    re-chunked campaign silently drew raw keys like ``baseline@36`` on an axis.
-    """
+    """Display name for an arm, including the per-width baselines."""
     if arm.startswith(BASELINE + "@"):
         return "Baseline"
     return ARM_LABELS.get(arm, arm)
@@ -174,21 +161,16 @@ def paired(table, arm: str, metric: str) -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_final(path: Path) -> dict[str, dict[tuple, dict[str, str]]]:
-    """Index the campaign as ``arm -> cell -> row`` with ``cell`` the paired unit.
-
-    The cell is ``(obs_num, map_seed, seed)``, not the seed: the same map seed can be
-    selected at two densities, where it is a completely different field. Keying on the seed
-    alone would pair rows across densities.
-
-    Baselines are stored per lane count as ``baseline@<lanes>``. The campaign ran a second
-    baseline at width 27 so the quarantined axes would have a comparator on their own
-    numerical branch, and a single ``baseline`` key let whichever group came last in the file
-    serve both -- which silently compared 41 width-108 arms against a width-27 baseline. Same
-    width means same branch is the assumption the whole cross-group design rests on, so the
-    width belongs in the key. Resolve an arm's own baseline with :func:`baseline_for`.
-    """
+    """Index the campaign as ``arm -> cell -> row``, merging ``ablation_*.csv`` sidecars."""
+    path = Path(path)
+    sources = [path]
+    if path.name == "ablation.csv":
+        sources.extend(sorted(path.parent.glob("ablation_*.csv")))
     table: dict[str, dict[tuple, dict[str, str]]] = defaultdict(dict)
-    rows = verified_rows(path, ("arm", "obs_num", "map_seed", "seed", "lanes"), legacy=True)
+    rows: list[dict[str, str]] = []
+    for source in sources:
+        rows.extend(verified_rows(source, ("arm", "obs_num", "map_seed", "seed", "lanes"),
+                                  legacy=True))
     contexts = {(r.get("steps"), r.get("hardware"), r.get("device"), r.get("jax_version")) for r in rows}
     if len(contexts) > 1:
         raise ValueError(f"{path}: mixed execution configurations")
@@ -205,12 +187,8 @@ def load_final(path: Path) -> dict[str, dict[tuple, dict[str, str]]]:
 
 
 def baseline_for(table, arm: str) -> str:
-    """The baseline measured at this arm's own lane count -- i.e. on its own branch.
-
-    A figure names the conditions it wants; an archive predating them does not have to
-    carry them. ``table`` is a defaultdict, so a condition the campaign never ran arrives
-    here as an empty dict and ``next()`` raises a bare ``StopIteration`` with no arm in it,
-    surfacing several frames from the cause. Name the arm instead.
+    """
+    The baseline measured at this arm's own lane count -- i.e. on its own branch.
     """
     rows = table.get(arm)
     if not rows:
@@ -251,18 +229,7 @@ def _main_width(table) -> str:
 
 
 def add_typical_reference(table, name: str = TYPICAL):
-    """Add a synthetic reference arm: the per-cell median over every real arm.
-
-    Paired against the baseline, the baseline itself is zero on every cell by construction,
-    so it cannot be drawn -- the figure shows 45 arms falling away from an invisible origin.
-    Re-referencing to the median arm puts the baseline back in as a column and lets it be
-    read against its alternatives rather than assumed as the origin.
-
-    The reference is a column-wise median, so it is a summary of the arm table and *not* a
-    run that happened; it is a yardstick, not a configuration. Everything inferential
-    (`final_report.py`) stays paired against the baseline, where the contrast is the knob
-    change and the comparison is a real one.
-    """
+    """Add a synthetic reference arm: the per-cell median over every real arm."""
     # Main-width arms only: the quarantined set includes a second copy of the
     # baseline, and a median that counted the shipped profile twice would be pulled toward
     # the very column this reference exists to place fairly.
@@ -291,9 +258,8 @@ def add_typical_reference(table, name: str = TYPICAL):
 
 def paired_final(table, arm: str, metric: str, transform: str = "raw",
                  reference: str | None = None):
-    """Return ``(arm_values, reference_values, cells)`` over the cells both arms share.
-
-    ``reference`` defaults to this arm's own-width baseline -- see :func:`baseline_for`.
+    """
+    Return ``(arm_values, reference_values, cells)`` over the cells both arms share.
     """
     reference = reference or baseline_for(table, arm)
     cells = sorted(set(table[arm]) & set(table[reference]))
@@ -305,35 +271,8 @@ def paired_final(table, arm: str, metric: str, transform: str = "raw",
 
 def sensitivity(table, arm: str,
                 reference: str | None = None) -> tuple[dict[str, float], float]:
-    """Per-outcome and joint Fisher sensitivity of one arm against the baseline.
-
-    For outcome ``m`` with paired differences ``d`` over the shared cells, the returned
-    per-outcome value is the standardised paired effect in **noise units**
-
-        z_m = | mean(d) | / sd(d)
-
-    and its square is the Fisher information one run carries about that arm's contrast under
-    a Gaussian working model -- the scalar case of ``I = (dmu/dp)^T Sigma^-1 (dmu/dp)``. It
-    is dimensionless, so knobs with wildly different units are comparable.
-
-    Noise units rather than the squared form because the squared form spans five orders of
-    magnitude across this arm table (a broken arm reaches ~3e4 while a null sits at 1e-2),
-    which leaves every column but one invisible. The square root costs nothing: it is
-    monotone, so the ranking is identical.
-
-    The joint value returned alongside is the Mahalanobis distance
-
-        z = sqrt( g^T Sigma^-1 g )
-
-    with ``g`` the vector of mean differences and ``Sigma`` their covariance across cells.
-
-    **The stack is not a bound on the joint value in either direction.** Summing z_m treats
-    the outcomes as independent, and they are not -- they come from one trajectory. Where
-    they are redundant the joint falls below the sum; where they carry complementary
-    information (one outcome sharpening another once its variance is projected out) the
-    joint can exceed it. Measured on synthetic arms it does both. The figure draws both
-    numbers for exactly that reason: the gap is a property of the outcome set, and reporting
-    only one of them would assert a relationship that does not hold.
+    """
+    Per-outcome and joint Fisher sensitivity of one arm against the baseline.
     """
     columns, means = [], []
     per_outcome: dict[str, float] = {}
@@ -363,21 +302,8 @@ def sensitivity(table, arm: str,
 def per_map_effects(table, arm: str, metric: str = "occupancy_mse",
                     standardize: bool = True,
                     reference: str | None = None) -> dict[tuple, float]:
-    """Per-map effect keyed ``(obs_num, map_seed)``, standardised by its own noise.
-
-    This is what the consistency strip draws and what the promotion gate counts. The dot
-    matrix and the sensitivity panel both pool over maps, and pooling is precisely what hid
-    the two findings this campaign exists to avoid repeating.
-
-    Standardised, not raw, and that matters: a per-map median over twelve seeds carries a
-    standard error of roughly 0.13 in log2 units on this data, so a fixed neutral band of
-    +/-0.1 would colour pure coin flips as effects and the strip would report nine
-    independent noise draws as a consistency pattern. Dividing by the median's own standard
-    error (1.253 * sd / sqrt(n) for a normal) makes each cell read "this map's effect, in
-    its own sigmas", so the same threshold means the same thing on every map and every arm.
-
-    Pass ``standardize=False`` for the raw median log2 ratio, which is the effect *size*
-    rather than its reliability.
+    """
+    Per-map effect keyed ``(obs_num, map_seed)``, standardised by its own noise.
     """
     arm_values, base_values, cells = paired_final(table, arm, metric, "raw", reference)
     grouped: dict[tuple, list[float]] = defaultdict(list)
@@ -409,12 +335,8 @@ def holm(pvalues: list[float]) -> list[bool]:
 
 
 def holm_by_axis(table, arms: list[str], pvalues: list[float]) -> list[bool]:
-    """Holm-Bonferroni applied within each one-factor axis rather than across all arms.
-
-    A one-factor-at-a-time sweep asks a separate question per axis, so the multiplicity to
-    correct is the levels of that axis, not the whole table. Correcting across ~30 arms at
-    12 seeds would demand p < 0.0017 against a Wilcoxon floor of ~4.9e-4, which only an
-    11-of-12 unanimous arm can reach; per axis the bar is ~0.01, i.e. 10 of 12.
+    """
+    Holm-Bonferroni applied within each one-factor axis rather than across all arms.
     """
     families: dict[str, list[int]] = defaultdict(list)
     for index, arm in enumerate(arms):
@@ -454,19 +376,8 @@ DOT_EDGES = [-9, -2.0, -1.5, -1.0, -0.5, -0.15, 0.15, 0.5, 1.0, 1.5, 2.0, 9]
 
 
 def fig_dot_matrix(table, output: Path, metric: str = "occupancy_mse") -> Path:
-    """Every run in the campaign as one dot, arms grouped by axis and ranked by spread.
-
-    The forest and violin figures summarise each arm to a median and an interval, which
-    hides the thing this campaign most needs to show: at twelve seeds most axes move
-    nothing, and a six-up/six-down column is what that looks like. Here nothing is smoothed
-    and nothing is pooled -- for each arm the seeds that beat the baseline *on the same
-    seed* stack upward and the rest stack down, so column height reads as consistency and
-    colour as size. Axes are ordered by the spread of their level medians, which makes the
-    "which parameter matters" ranking a consequence of the sort rather than an assertion.
-
-    A ridgeline over the same data was rejected: a kernel density over twelve points draws
-    shape the data does not contain, and the axes here have two to five levels, not the long
-    ordered sequence that form needs.
+    """
+    Every run in the campaign as one dot, arms grouped by axis and ranked by spread.
     """
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
@@ -585,12 +496,13 @@ def fig_dot_matrix(table, output: Path, metric: str = "occupancy_mse") -> Path:
 
 def paired_effect_summary(table, metric: str = "occupancy_mse", *, replicates: int = 10000,
                           seed: int = 20260906) -> dict:
-    """Resample maps and paired seeds jointly across all arms, retaining matched widths.
-
+    """
+    Resample maps and paired seeds jointly across all arms, retaining matched widths.
+    
     Returns:
-        Pooled and per-map medians with percentile hierarchical bootstrap intervals.
-        Only the sampled maps support between-map inference; six maps are not a
-        large-map asymptotic justification.
+            Pooled and per-map medians with percentile hierarchical bootstrap intervals.
+            Only the sampled maps support between-map inference; six maps are not a
+            large-map asymptotic justification.
     """
     arms = [a for a in table if not a.startswith(BASELINE) and a != TYPICAL]
     if not arms or replicates < 1:
@@ -677,12 +589,7 @@ def fig_final_ablation(table, output: Path, metric: str = "occupancy_mse") -> Pa
 
 
 def fig_paired_arms(table, output: Path, metric: str = "occupancy_mse") -> Path:
-    """Per-seed paired effect vs the shipped arm, as log2 ratios.
-
-    Plotted as a ratio rather than two absolute distributions because the seeds are
-    paired: the seed-to-seed spread is far larger than the arm effect, so unpaired
-    violins of the raw metric hide the very comparison the experiment was run to make.
-    """
+    """Per-seed paired effect vs the shipped arm, as log2 ratios."""
     ratios = [np.log2(paired(table, arm, metric)[0] / paired(table, arm, metric)[1])
               for arm in ARMS]
     pvalues = [wilcoxon(*paired(table, arm, metric)).pvalue for arm in ARMS]
@@ -736,14 +643,15 @@ def fig_paired_arms(table, output: Path, metric: str = "occupancy_mse") -> Path:
 
 def fig_effect_forest(table, output: Path, arms: list[str] | None = None,
                       per_axis: bool = False) -> Path:
-    """Median ratio with 95% bootstrap CI for both metrics, Holm-marked.
-
+    """
+    Median ratio with 95% bootstrap CI for both metrics, Holm-marked.
+    
     Args:
-        table: ``arm -> seed -> row`` from :func:`load_arms`.
-        output: Image path.
-        arms: Arms to plot; defaults to the five-arm paper selection.
-        per_axis: Correct within each axis instead of across the whole table. Set for the
-            broad one-factor sweep, where the arms answer separate questions.
+            table: ``arm -> seed -> row`` from :func:`load_arms`.
+            output: Image path.
+            arms: Arms to plot; defaults to the five-arm paper selection.
+            per_axis: Correct within each axis instead of across the whole table. Set for the
+                broad one-factor sweep, where the arms answer separate questions.
     """
     arms = ARMS if arms is None else arms
     metrics = [("occupancy_mse", "occupancy MSE"), ("fourier_ergodic", "Fourier ergodicity")]
@@ -796,10 +704,10 @@ def fig_effect_forest(table, output: Path, arms: list[str] | None = None,
 
 STEP_STAGES = (
     ("rollouts_KT", "Rollouts", r"$K{\times}T$ dynamics + stage cost"),
-    ("memory_P2", "Memory feedback", r"$T{\times}P$ kernel"),
-    ("sample_epsilon", "Noise sampling", r"$K{\times}T{\times}3$ Gaussians"),
-    ("plan_T2", "Plan repulsion", r"$T^2$ kernel"),
-    ("attraction_T", "Score attraction", r"$T$ pointwise"),
+    ("memory_P2", "Memory", r"$T{\times}P$ kernel"),
+    ("sample_epsilon", "Sampling", r"$K{\times}T{\times}3$ Gaussians"),
+    ("plan_T2", "Plan", r"$T^2$ kernel"),
+    ("attraction_T", "Score", r"$T$ pointwise"),
 )
 
 # Keyed by stage, not by rank: a wedge keeps its colour if the timings ever re-sort. The
@@ -846,11 +754,8 @@ EFFECT_MAP_METRICS = (
 
 
 def hierarchical_interval(effects, maps, repeats: int = 4000, seed: int = 0):
-    """Percentile bootstrap of the median effect, resampling maps then cells within them.
-
-    Cells on one map share its geometry, so resampling all 36 as if independent would
-    understate the spread. Resampling maps first and cells within the drawn maps second
-    treats the map as the unit it is.
+    """
+    Percentile bootstrap of the median effect, resampling maps then cells within them.
     """
     rng = np.random.default_rng(seed)
     by_map: dict = defaultdict(list)
@@ -869,11 +774,8 @@ def hierarchical_interval(effects, maps, repeats: int = 4000, seed: int = 0):
 
 
 def effect_map_cells(table, arms, metrics=EFFECT_MAP_METRICS):
-    """``(values, excludes_zero, agreement)`` matrices over ``arms`` x ``metrics``.
-
-    ``values`` is the paired median log2(ablation / shipped) with the sign of each
-    metric applied; ``excludes_zero`` marks cells whose hierarchical 95% interval clears
-    zero; ``agreement`` is the share of maps whose effect has the row's sign.
+    """
+    ``(values, excludes_zero, agreement)`` matrices over ``arms`` x ``metrics``.
     """
     # One message naming every uncovered condition, rather than failing on the first and
     # again on the next after a re-run: the fix for any of these is the same campaign.
@@ -906,18 +808,7 @@ def effect_map_cells(table, arms, metrics=EFFECT_MAP_METRICS):
 
 def fig_ablation_effect_map(table, output: Path, groups=EFFECT_MAP_GROUPS,
                             metrics=EFFECT_MAP_METRICS, cap: float = 2.5) -> Path:
-    """Draw the ablation as an effect map: conditions down, outcomes across.
-
-    A forest plot ranks arms on one outcome. This shows five at once, which is what turns a
-    leaderboard into a mechanism study: `ceiling_0` costs little occupancy error and a great
-    deal of Fourier error, and the two columns side by side say so immediately.
-
-    Colour is never the only channel, and each mark labels the informative minority rather
-    than the majority: 78% of cells clear zero and 80% agree on all six maps, so outlining
-    those would draw a grid. Instead cells whose interval *includes* zero are hatched --
-    "not distinguishable from the shipped profile" -- cells agreeing on fewer than five maps
-    print that count, and any cell past the colour cap prints its value.
-    """
+    """Draw the ablation as an effect map: conditions down, outcomes across."""
     arms = [arm for _, members in groups for arm in members]
     labels = [ARM_LABELS.get(arm, arm.replace("_", " ")) for arm in arms]
     values, excludes, agreement = effect_map_cells(table, arms, metrics)
@@ -996,12 +887,8 @@ RESPONSE_METRICS = (("occupancy MSE", "occupancy_mse", PRIMARY, "o", "-"),
 
 def fig_response_curves(table, output: Path, axes_spec=RESPONSE_AXES,
                         metrics=RESPONSE_METRICS) -> Path:
-    """Paired effect against parameter value, for the axes that are genuinely ordered.
-
-    The effect map treats every condition as a category. Four of the axes are not
-    categorical -- horizon, lengthscale and the two field gains are swept over ordered
-    levels -- and for those the shape of the response says more than the ranking does. The
-    shipped value sits at zero in each panel by construction.
+    """
+    Paired effect against parameter value, for the axes that are genuinely ordered.
     """
     panels_wanted = len(axes_spec)
     with plt.rc_context(nature_style("double", height_mm=48.0)):
@@ -1053,18 +940,7 @@ def fig_response_curves(table, output: Path, axes_spec=RESPONSE_AXES,
 
 
 def fig_step_budget(report: Path, output: Path) -> Path:
-    """Draw one control step against the 50 Hz deadline, and its measured composition.
-
-    Not a ring. The stages are timed in isolation and do not sum to the fused step -- the
-    shortfall is real and is not distributed across them -- so a part-of-whole form would
-    assert something the measurement does not support. Bars against a common axis carry the
-    same numbers without the claim, and the shortfall gets its own bar rather than being
-    silently absorbed or silently dropped.
-
-    The shortfall bar is offset below the stages rather than sorted among them: it is a
-    residual, not a sixth stage, and sorting it into the ranking would invite reading it as
-    one.
-    """
+    """Draw one control step against the 50 Hz deadline, and its measured composition."""
     from ergodic_control_mppi.plotting.style import (
         NEUTRAL, OUTSIDE_TICKS, PRIMARY, SURFACE)
 
@@ -1077,53 +953,35 @@ def fig_step_budget(report: Path, output: Path) -> Path:
 
     stages = [(label, data["stages"][name]["ms_median"]) for name, label, _ in STEP_STAGES]
     stages.sort(key=lambda row: row[1])
-    # Position 0 is the residual, then a gap, then the stages ascending.
-    labels = ["Unattributed"] + [row[0] for row in stages]
+    labels = ["Shortfall"] + [row[0] for row in stages]
     values = [fused - accounted] + [row[1] for row in stages]
-    positions = np.concatenate([[0.0], np.arange(len(stages)) + 1.55])
+    positions = np.arange(len(values), dtype=float)
 
     with plt.rc_context(paper_style("column") | OUTSIDE_TICKS):
-        figure, (top, bottom) = plt.subplots(
+        figure, (composition, deadline) = plt.subplots(
             2, 1, figsize=(FIGSIZES["column"][0], 2.45),
-            gridspec_kw={"height_ratios": [1, 5], "hspace": 0.55})
+            gridspec_kw={"height_ratios": [5, 1], "hspace": 0.55})
 
-        # Deadline panel: the deployed step against the period it has to fit inside.
-        top.barh([0], [period_ms], height=0.62, color=SURFACE, edgecolor="#A9ABB0",
-                 linewidth=0.4, zorder=1)
-        top.barh([0], [endtoend], height=0.62, color=PRIMARY, edgecolor="none", zorder=2)
-        top.set_xlim(0, period_ms)
-        top.set_ylim(-0.5, 0.5)
-        top.set_yticks([])
-        top.grid(False)
-        top.set_facecolor("white")
-        for spine in top.spines.values():
-            spine.set_visible(False)
-        top.set_xticks([0, 5, 10, 15, 20])
-        top.tick_params(axis="x", length=2, pad=1.5)
-        top.set_xlabel("ms within one 20 ms control period (50 Hz)", labelpad=1.5)
-        top.text(endtoend + 0.45, 0,
-                 f"{endtoend:.2f} ms end-to-end, {100 * endtoend / period_ms:.0f}% of budget",
-                 va="center", ha="left", fontsize=7.0, color="#1F2933")
-
-        # Composition panel: measured stages, plus the shortfall as its own bar.
         colours = [NEUTRAL] + [PRIMARY] * len(stages)
-        bars = bottom.barh(positions, values, height=0.66, color=colours,
-                           edgecolor="none", zorder=2)
+        bars = composition.barh(positions, values, height=0.66, color=colours,
+                                edgecolor="none", zorder=2)
         bars[0].set_hatch("////")
         bars[0].set_edgecolor("white")
-        for position, value in zip(positions, values):
-            bottom.text(value + 0.035, position, f"{value:.2f}", va="center", ha="left",
-                        fontsize=7.0, color="#1F2933")
-        bottom.set_yticks(positions)
-        bottom.set_yticklabels(labels)
-        bottom.set_ylim(-0.7, positions[-1] + 0.7)
-        bottom.set_xlim(0, max(values) * 1.28)
-        bottom.set_xlabel("ms per step (median of 400)", labelpad=1.5)
-        bottom.tick_params(axis="y", length=0)
-        bottom.set_title(f"$K{{=}}{shape['K']}$, $T{{=}}{shape['T']}$, $P{{=}}{shape['P']}$"
-                         f"  \u2014  fused step {fused:.2f} ms", pad=3.0)
+        composition.set_yticks(positions)
+        composition.set_yticklabels(labels)
+        composition.set_title(f"$K{{=}}{shape['K']}$, $T{{=}}{shape['T']}$, $P{{=}}{shape['P']}$"
+                              f"  \u2014  fused step {fused:.2f} ms", pad=3.0)
 
+        deadline.bar([0], [period_ms], color=SURFACE, width=0.62, zorder=1)
+        deadline.bar([0], [endtoend], color=PRIMARY, width=0.62, zorder=2)
+        deadline.set_ylabel("50 Hz budget")
         figure.tight_layout(pad=0.35)
+        figure.canvas.draw()
+        tick = composition.xaxis.get_ticklabels()[0]
+        figure.text(0.72, 0.18, f"{endtoend:.2f} ms", fontsize=tick.get_fontsize(),
+                    color=tick.get_color())
+        figure.text(0.84, 0.18, f"({100 * endtoend / period_ms:.0f}%)",
+                    fontsize=tick.get_fontsize(), color=tick.get_color())
         path = save(figure, output)
         plt.close(figure)
     return path
@@ -1135,12 +993,7 @@ BASELINE_LABELS = {
 
 
 def load_baselines(*paths: Path) -> dict:
-    """Index the baseline archives as ``tier -> method -> (map, seed) -> row``.
-
-    Takes several files because the tiers are run as separate jobs -- the clutter tier is
-    hours long and is checkpointed on its own -- and each row already names its tier, so
-    merging is just concatenation.
-    """
+    """Index the baseline archives as ``tier -> method -> (map, seed) -> row``."""
     table: dict = defaultdict(lambda: defaultdict(dict))
     for path in paths:
         path = Path(path)
@@ -1181,12 +1034,7 @@ VIOLIN_COLOURS = {
 
 
 def _violin(axes, data, colours, labels, *, width=0.78):
-    """Filled violins with a seaborn-style inner box.
-
-    Matplotlib draws neither the quartile box nor the median dot, and both are what make a
-    violin readable at column width: the silhouette shows the shape, the box shows where the
-    mass actually is.
-    """
+    """Filled violins with a seaborn-style inner box."""
     parts = axes.violinplot(data, positions=range(len(data)), widths=width,
                             showextrema=False, showmedians=False)
     for body, colour in zip(parts["bodies"], colours):
@@ -1224,17 +1072,7 @@ def _paired_effects(table: dict, tier: str, metric: str):
 
 def fig_baselines_violins(table: dict, directory: Path, metric: str = "fourier_ergodic",
                           formats: tuple[str, ...] = ("png",)) -> list[Path]:
-    """Three column-width violin panels, written as separate files.
-
-    Separate rather than one tall image so the paper can stack them with ``subfigure`` and
-    control the spacing in LaTeX; a single rendered image bakes in whitespace that cannot be
-    recovered on the page.
-
-    The split follows the argument rather than the data layout. The first two panels are the
-    coverage comparison in each tier, which we lose; the third is the constraint outcome,
-    which inverts the ranking. Keeping the third separate is deliberate -- it is a different
-    quantity in different units, and overlaying it on a log-ratio axis would misrepresent it.
-    """
+    """Three column-width violin panels, written as separate files."""
     directory.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
@@ -1303,23 +1141,7 @@ def fig_baselines_violins(table: dict, directory: Path, metric: str = "fourier_e
 
 
 def fig_baselines(table: dict, output: Path, metric: str = "fourier_ergodic") -> Path:
-    """Paired effect of every baseline against ours, one panel per tier.
-
-    Positive is *our* win, in log2 of the ratio, one dot per (map, seed) cell with the
-    per-method median and its bootstrap interval over the top. Paired rather than pooled:
-    each cell is the same map and the same seed flown by both, which removes the map-to-map
-    spread that otherwise swamps a 40-metre workspace.
-
-    The open tier is the honest coverage comparison -- no obstacles, every method at its own
-    published formulation. The clutter tier is the one the paper is about, and methods whose
-    papers define no obstacle behaviour are marked, because they are running with a term
-    they were not published with.
-
-    The bottom strip carries the constraint outcome, and it is not decoration: on the
-    spectral metric we lose every comparison, while we are the only method that never
-    collides. A figure showing only the top row would report half of the result, and the
-    half that flatters the methods that fly closest to the pillars.
-    """
+    """Paired effect of every baseline against ours, one panel per tier."""
     tiers = [t for t in ("open", "clutter") if t in table]
     if not tiers:
         raise ValueError("no tiers in the baseline archive")
@@ -1462,11 +1284,8 @@ MECHANISM_FIGURES = (
 
 
 def mechanism_figures(directory: Path, output: Path, seed: int = 43) -> list[Path]:
-    """Render the empty-workspace mechanism figures from whatever captures exist.
-
-    Open field, so nothing drawn here is attributable to obstacle avoidance -- which is the
-    whole point: these figures make a mechanism claim, and the clutter tier makes the
-    constraint claim.
+    """
+    Render the empty-workspace mechanism figures from whatever captures exist.
     """
     from ergodic_control_mppi.plotting.trajectories import (
         figure_plan_gain, figure_service_gate, load_captures,

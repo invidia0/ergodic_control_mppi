@@ -91,28 +91,14 @@ CAP_FIELDS = FIELDS + ["accepted"]
 def select_split(
     rows: list[dict[str, str]], blocked_mass: dict[int, float] | None = None
 ) -> dict[str, object]:
-    """Select three development and three holdout maps from the qualifying seeds.
+    """Select three development and three holdout maps from qualifying seeds.
 
-    ``blocked_mass`` maps a seed to its **worst mode's** out-of-reach target mass; when
-    supplied, the six are the qualifying seeds carrying the least of it, and each
-    representative is the least of its three. Without it the order is by seed, which is
-    arbitrary.
+    Args:
+        rows: CSV rows with ``map_seed`` and ``qualifies``.
+        blocked_mass: Optional seed-to-blocked-mass map; unmeasured seeds are excluded.
 
-    Why rank on it: qualification already requires every mode reachable and at least two
-    of three mode-to-mode segments blocked, so every candidate is a genuine detour
-    problem. What it does *not* look at is how much of the target lies inside inflation.
-
-    Why the *worst mode* and not the average: ranking on the aggregate was tried and was
-    anti-correlated with what it was meant to protect. Over fifteen generated maps, the two
-    best by aggregate (10.1% and 10.4%) were among the three worst by single mode (22.5%
-    and 25.4%) -- an average over three lobes buys a badly blocked one with two clean ones.
-    Two flights on the 10.1% map each missed the 22.5% mode and no other. A tour needs
-    every mode, so the binding constraint is the worst lobe, not the mean.
-
-    This selects the environment, never the controller or the objective. The obstacles,
-    the inflation and the target density are untouched, the detour requirement is
-    unchanged, and the retained value is reported per map in the campaign report -- the
-    benchmark is stated, not quietly made easier.
+    Returns:
+        Development and holdout seed lists plus representative picks.
     """
     qualifying = [int(row["map_seed"]) for row in rows if int(row["qualifies"])]
     if blocked_mass:
@@ -209,12 +195,7 @@ def stage_arms(stage: str, base_arm: str, winner: str) -> dict[str, dict]:
 
 
 def _grid_config(run_directory: Path, config_path: str = "configs/uav_profile.yaml"):
-    """Load a map's grid onto a controller config.
-
-    ``config_path`` exists for the Cor. "flow_matching_consistency" sweep, which flies the
-    same maps under several controller configurations; everything else takes the default and
-    is unaffected.
-    """
+    """Load a map's grid onto a controller config."""
     manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
     arrays = np.load(run_directory / "arrays.npz", allow_pickle=False)
     config = load_config(config_path)
@@ -230,11 +211,7 @@ def _grid_config(run_directory: Path, config_path: str = "configs/uav_profile.ya
 def score_run(config, arrays, manifest: dict, seed: int, steps: int, positions,
               velocities, ess_fractions, temperatures, wall: float,
               device: str) -> dict[str, object]:
-    """Score one finished rollout into a sweep row.
-
-    Split out of :func:`run_cell` so the sequential and batched drivers cannot drift apart
-    on how a cell is scored -- the rollout differs between them, the scoring must not.
-    """
+    """Score one finished rollout into a sweep row."""
     delta_t = config.controller.model.delta_t
     row = compute_row(
         identity={},
@@ -383,10 +360,8 @@ def run_stage(run_directory: Path, output: Path, stage: str, base_arm: str,
 
 
 def map_geometry(root: Path) -> tuple[dict, str]:
-    """Read the obstacle geometry and inflation this campaign's maps were built with.
-
-    Both are campaign variables now -- the same arms run at more than one obstacle density
-    -- so the reports read them from the archive instead of restating a constant.
+    """
+    Read the obstacle geometry and inflation this campaign's maps were built with.
     """
     maps = sorted((root / "maps").glob("map_*/manifest.json")) if (root / "maps").exists() else []
     if not maps:
@@ -396,21 +371,10 @@ def map_geometry(root: Path) -> tuple[dict, str]:
 
 
 def measure_map(directory: Path) -> dict[str, object]:
-    """Measure one archived map: free space, and how much target mass is out of reach.
+    """Measure free space and unreachable target mass for one archived map.
 
-    Ergodic coverage compares the time-averaged occupancy against the target, so target
-    mass sitting inside inflated obstacles is error the vehicle is pulled toward and can
-    never retire. At 45 pillars and a 1.04 m inflation it was 22.9%, which is what produced
-    the observed local minima.
-
-    Reports the aggregate *and* the per-mode worst case, because the aggregate hides the
-    thing that actually breaks a run. On map 539 the total was 10.1% -- the best of fifteen
-    candidates -- while one mode alone was 22.5% obstructed, and two flights on it missed
-    that exact mode and no other. A mode the vehicle cannot cover is a failed tour whatever
-    the average over the other two says.
-
-    Needs the archived ``arrays.npz``, so it runs on a generated map rather than on the
-    six-second qualification probe -- the probe never builds one.
+    Returns:
+        Grid statistics and blocked-mass fractions.
     """
     from ergodic_control_mppi.deploy.grid import reachable_from
 
@@ -752,12 +716,7 @@ def build_report(root: Path) -> str:
 
 
 def sweep_summary(root: Path) -> list[dict[str, object]]:
-    """Score every sweep arm on continuous outcomes, ranked by tour rate.
-
-    The 10k cap layer is the paired one: it holds a row for every (arm, seed) whether or
-    not the cell toured, so ratios against ``baseline`` are computed there. Tour *rate*
-    can only come from the gated 20k layer, and is NaN for an arm nothing survived.
-    """
+    """Score every sweep arm on continuous outcomes, ranked by tour rate."""
     delta_t = load_config("configs/uav_profile.yaml").controller.model.delta_t
     cap = [row for row in _read(root / "sweep_cap.csv") if row["stage"] == "sweep"]
     full = [row for row in _read(root / "sweep.csv") if row["stage"] == "sweep"]
@@ -873,15 +832,12 @@ def build_sweep_report(root: Path) -> str:
 
 
 def write_ablation_copy(root: Path, output: Path) -> Path:
-    """Export the balanced 10k sweep layer as a second UAV ablation campaign.
-
-    Columns lead with the ablation schema so ``scripts/report_figures.py`` reads this the
-    same way it reads ``results/uav/ablation.csv``; the ESS and temperature diagnostics
-    this campaign also carries are appended and simply ignored there.
-
+    """
+    Export the balanced 10k sweep layer as a second UAV ablation campaign.
+    
     Raises:
-        ValueError: if the arms do not share one seed set. An unbalanced arm would
-            silently shrink the paired Wilcoxon rather than fail, so it is caught here.
+            ValueError: if the arms do not share one seed set. An unbalanced arm would
+                silently shrink the paired Wilcoxon rather than fail, so it is caught here.
     """
     rows = [row for row in _read(root / "sweep_cap.csv") if row["stage"] == "sweep"]
     if not rows:
@@ -952,11 +908,7 @@ PROFILE_KEYS = {
 
 
 def write_profile(overrides: dict, output: Path) -> Path:
-    """Write ``configs/uav_profile.yaml`` with one arm's overrides applied.
-
-    ``penalty_scale`` and ``boundary_scale`` are multipliers in ``_apply``, so they are
-    applied here as multipliers too rather than written as literals.
-    """
+    """Write ``configs/uav_profile.yaml`` with one arm's overrides applied."""
     data = yaml.safe_load(Path("configs/uav_profile.yaml").read_text(encoding="utf-8"))
     overrides = dict(overrides)
     for name, targets in (

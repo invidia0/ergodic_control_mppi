@@ -1,23 +1,4 @@
-"""Staged ablation campaign runner.
-
-Every cell is one closed-loop run of the shipped controller with a patched
-config. Parameters are addressed by their dotted YAML path (``reference.memory_gain``,
-``mppi.T``), so adding an axis is a config edit, not a code change -- the same
-patch-then-``load_config`` mechanism the throwaway A/B runner used, promoted and
-given an archive.
-
-    python -m ergodic_control_mppi.experiments.ablation --dry-run
-    python -m ergodic_control_mppi.experiments.ablation --stage smoke
-    python -m ergodic_control_mppi.experiments.ablation --stage screening --device gpu
-
-Cells are ordered so that runs sharing an XLA-static signature are contiguous:
-``mppi.K``, ``mppi.T``, ``mppi.memory_length`` and ``reference.release_ratio`` are
-static pytree fields, so each distinct combination costs a full recompile.
-
-Results are written so that no future question needs the GPU again: a scalar CSV
-index, the exact config that produced each run, and an ``.npz`` holding the raw
-executed path plus everything needed to recompute a metric from it.
-"""
+"""Staged ablation campaign runner."""
 
 from __future__ import annotations
 
@@ -141,15 +122,7 @@ def _get_dotted(data: dict[str, Any], dotted: str, default: Any = None) -> Any:
 
 
 def _static_key(data: dict[str, Any]) -> tuple:
-    """Group key for XLA recompiles.
-
-    The static pytree fields are ``mppi.K``, ``mppi.T``, ``mppi.memory_length``
-    and ``reference.release_ratio``. ``memory_length`` is derived from
-    ``reference.memory_time`` and ``model.delta_t`` when absent, so those two raw
-    values belong in the key rather than the derivation being duplicated here:
-    the resolved signature is a pure function of this tuple, so sorting by it
-    groups compiles exactly.
-    """
+    """Group key for XLA recompiles."""
     # -1.0 stands in for an absent key so the tuple stays orderable.
     return tuple(
         -1.0 if (value := _get_dotted(data, dotted)) is None else float(value)
@@ -189,15 +162,7 @@ def _seeds_of(spec: dict[str, Any], defaults: dict[str, Any]) -> list[int]:
 
 
 def _cells_for_stage(name: str, spec: dict[str, Any], defaults: dict[str, Any]) -> list[Cell]:
-    """Expand one stage definition into its cells.
-
-    Four stage kinds cover the whole campaign:
-
-    ``ofat``       one axis at a time around the shipped default
-    ``grid``       full factorial over ``pairs`` of axes (interaction heatmaps)
-    ``arms``       named structural variants, each a dict of axis overrides
-    ``factorial``  named arms crossed with densities and obstacle counts
-    """
+    """Expand one stage definition into its cells."""
     kind = spec.get("kind", "ofat")
     steps = int(spec.get("steps", defaults.get("steps", 10000)))
     seeds = _seeds_of(spec, defaults)
@@ -328,11 +293,7 @@ def _git_sha() -> str:
 
 
 def _grids(config) -> tuple[np.ndarray, tuple, tuple, tuple, np.ndarray]:
-    """Target density, map limits, occupancy bins and reachable mask.
-
-    Built exactly as plotting/simulation.py and the metrics module expect, so a
-    stored run can be re-scored offline without reloading the config.
-    """
+    """Target density, map limits, occupancy bins and reachable mask."""
     from ergodic_control_mppi.mppi.field import pdf
     import jax.numpy as jnp
 
@@ -390,13 +351,7 @@ def run_cell(
     fourier_order: int,
     compiled: bool = False,
 ) -> dict[str, Any]:
-    """Execute one cell, archive its raw arrays, and return its CSV row.
-
-    ``compiled`` marks a cell that triggered an XLA recompile, so its
-    ``ms_per_step`` includes compilation and must be excluded from timing
-    aggregates. experiments/timing.py is the authority on per-step cost; this
-    column is a coarse by-product.
-    """
+    """Execute one cell, archive its raw arrays, and return its CSV row."""
     config_path = root / "configs" / cell.stage / f"{cell.cell_id}.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     data = _patched(base, campaign, cell)

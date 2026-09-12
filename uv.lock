@@ -7,6 +7,20 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "cmcrameri"
+version = "1.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/9e/43d76a835977e9d1b5cb1f9524004055c2d66a12406f91ef7262c83d1631/cmcrameri-1.10.tar.gz", hash = "sha256:38a776359040674cb4028695faf0121d0ccadb40eee0c9834eb4947674962b7e", size = 260605, upload-time = "2026-08-04T09:54:50.477Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/83/17/24e1d6d7a882a15fed5dcf7528891c9782613fd9a2ebe1bb426f4f1ef581/cmcrameri-1.10-py3-none-any.whl", hash = "sha256:0ccc9970fe35d74543bb8aeca5a5a97d8a09de71d2237d1bb714c9968cc2018d", size = 277668, upload-time = "2026-08-04T09:54:49.139Z" },
+]
+
+[[package]]
 name = "contourpy"
 version = "1.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -86,10 +100,12 @@ name = "ergodic-control-mppi"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cmcrameri" },
     { name = "jax" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pyyaml" },
+    { name = "scipy" },
 ]
 
 [package.optional-dependencies]
@@ -99,11 +115,13 @@ cuda13 = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cmcrameri", specifier = ">=1.9" },
     { name = "jax", specifier = ">=0.11.0" },
     { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda13'", specifier = ">=0.11.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.2.6,<2.4" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "scipy", specifier = ">=1.11" },
 ]
 provides-extras = ["cuda13"]
 

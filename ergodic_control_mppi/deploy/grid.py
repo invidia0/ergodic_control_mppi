@@ -1,10 +1,5 @@
-"""Occupancy-grid construction and queries for the fixed-altitude UAV deployment.
-
-Pure NumPy so the map adapter, the safety shield, and the paired offline runner share one
-implementation, and so the geometry is testable without a ROS environment. The grid is
-row-major ``grid[row, column]`` with ``row`` indexing y and ``column`` indexing x, and
-``origin`` naming the lower-left corner of cell ``(0, 0)`` -- the same convention as
-``nav_msgs/OccupancyGrid`` and as the runtime grid in ``WorkspaceParams``.
+"""
+Occupancy-grid construction and queries for the fixed-altitude UAV deployment.
 """
 
 from collections import deque
@@ -22,26 +17,20 @@ def inflation_radius(
     reaction_time: float,
     resolution: float,
 ) -> float:
-    """Return the radius obstacles must be grown by before planning against them.
-
-    The budget is the robot footprint, a discretionary clearance for odometry and map
-    error, the worst-case cell quantization, the setpoint-tracking allowance, and the
-    distance needed to stop from ``max_speed`` after a ``reaction_time`` delay. The
-    stopping term is included in the *planning* grid on purpose: it is what guarantees the
-    controller never commands its way into a region the shield could not brake out of.
-
+    """
+    Return the radius obstacles must be grown by before planning against them.
+    
     Args:
-        robot_radius: Cylindrical footprint radius in metres.
-        clearance: Additional discretionary margin in metres.
-        tracking_allowance: Expected setpoint-tracking error in metres. Calibrate this
-            from the measured position error rather than trusting the default.
-        max_speed: Speed cap enforced by the shield, in metres per second.
-        brake_accel: Deceleration the shield commands, in metres per second squared.
-        reaction_time: Delay before braking takes effect, in seconds.
-        resolution: Grid cell size in metres.
-
+            robot_radius: Cylindrical footprint radius in metres.
+            clearance: Additional discretionary margin in metres.
+            tracking_allowance: Expected setpoint-tracking error in metres. Calibrate this
+                from the measured position error rather than trusting the default.
+            max_speed: Speed cap enforced by the shield, in metres per second.
+            brake_accel: Deceleration the shield commands, in metres per second squared.
+            reaction_time: Delay before braking takes effect, in seconds.
+            resolution: Grid cell size in metres.
     Returns:
-        The inflation radius in metres.
+            The inflation radius in metres.
     """
     if brake_accel <= 0.0:
         raise ValueError("brake_accel must be positive")
@@ -51,15 +40,15 @@ def inflation_radius(
 
 
 def slice_cloud(points: np.ndarray, altitude: float, half_extent: float) -> np.ndarray:
-    """Keep the ``(x, y)`` of points inside the robot's vertical footprint.
-
+    """
+    Keep the ``(x, y)`` of points inside the robot's vertical footprint.
+    
     Args:
-        points: Cloud with shape ``(N, 3)``.
-        altitude: Flight altitude in metres.
-        half_extent: Half the vertical footprint height in metres.
-
+            points: Cloud with shape ``(N, 3)``.
+            altitude: Flight altitude in metres.
+            half_extent: Half the vertical footprint height in metres.
     Returns:
-        Horizontal positions with shape ``(M, 2)``.
+            Horizontal positions with shape ``(M, 2)``.
     """
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     inside = np.abs(points[:, 2] - altitude) <= half_extent
@@ -87,15 +76,15 @@ def rasterize(
 
 
 def inflate(occupancy: np.ndarray, radius: float, resolution: float) -> np.ndarray:
-    """Grow occupied cells by a disk of the given radius.
-
+    """
+    Grow occupied cells by a disk of the given radius.
+    
     Args:
-        occupancy: Boolean grid with shape ``(H, W)``.
-        radius: Inflation radius in metres.
-        resolution: Grid cell size in metres.
-
+            occupancy: Boolean grid with shape ``(H, W)``.
+            radius: Inflation radius in metres.
+            resolution: Grid cell size in metres.
     Returns:
-        A new boolean grid, never smaller than the input.
+            A new boolean grid, never smaller than the input.
     """
     cells = int(np.ceil(radius / resolution))
     if cells <= 0:
@@ -136,13 +125,7 @@ def _inside(grid: np.ndarray, row: int, column: int) -> bool:
 def entry_cell(
     grid: np.ndarray, origin: tuple[float, float], resolution: float, start: tuple[float, float]
 ) -> tuple[int, int] | None:
-    """Return the cell the vehicle first occupies, or ``None`` if it never can.
-
-    A start *outside* the grid is legitimate: the vehicle flies in from open space, and the
-    boundary term in the stage cost pulls it back over the workspace. Connectivity is then
-    judged from where it enters, not from a cell that does not exist. A start *inside* the
-    grid but on an obstacle is a different matter and has no entry cell.
-    """
+    """Return the cell the vehicle first occupies, or ``None`` if it never can."""
     row, column = (int(index) for index in world_to_cell(np.asarray(start), origin, resolution))
     if _inside(grid, row, column):
         return None if grid[row, column] else (row, column)
@@ -156,13 +139,11 @@ def entry_cell(
 def reachable_from(
     grid: np.ndarray, origin: tuple[float, float], resolution: float, start: tuple[float, float]
 ) -> np.ndarray:
-    """Flood-fill the free cells four-connected to ``start``.
-
-    A start outside the grid is seeded from the cell it would enter through, so flying in
-    from open space is allowed; a start on an obstacle reaches nothing.
-
+    """
+    Flood-fill the free cells four-connected to ``start``.
+    
     Returns:
-        Boolean mask with the shape of ``grid``.
+            Boolean mask with the shape of ``grid``.
     """
     visited = np.zeros(grid.shape, dtype=bool)
     cell = entry_cell(grid, origin, resolution, start)
@@ -196,20 +177,20 @@ def all_reachable(
     start: tuple[float, float],
     targets: np.ndarray,
 ) -> tuple[bool, np.ndarray]:
-    """Check that every target is free and connected to ``start``.
-
+    """
+    Check that every target is free and connected to ``start``.
+    
     Args:
-        grid: Inflated boolean occupancy.
-        origin: World coordinates of the lower-left grid corner.
-        resolution: Grid cell size in metres.
-        start: Arming position.
-        targets: Positions that must be reachable, with shape ``(M, 2)``.
-
+            grid: Inflated boolean occupancy.
+            origin: World coordinates of the lower-left grid corner.
+            resolution: Grid cell size in metres.
+            start: Arming position.
+            targets: Positions that must be reachable, with shape ``(M, 2)``.
     Returns:
-        Whether every target is reachable, the per-target boolean mask, and a diagnosis
-        mapping naming *why* it failed: whether the start itself is blocked, how large the
-        reachable component is against the total free space, and which modes are blocked
-        outright versus merely cut off.
+            Whether every target is reachable, the per-target boolean mask, and a diagnosis
+            mapping naming *why* it failed: whether the start itself is blocked, how large the
+            reachable component is against the total free space, and which modes are blocked
+            outright versus merely cut off.
     """
     visited = reachable_from(grid, origin, resolution, start)
     cells = world_to_cell(np.asarray(targets, dtype=np.float64).reshape(-1, 2), origin, resolution)
@@ -259,25 +240,19 @@ def metric_reachable_mask(
     y_limits: tuple[float, float],
     bins: tuple[int, int],
 ) -> np.ndarray:
-    """Sample grid reachability onto the coverage-metric grid.
-
-    The circle-based ``compute_reachable_mask`` cannot be used for a deployment run,
-    because the deployment carries no circles -- its obstacles are the grid. Reachability
-    here is literal: flood-fill the inflated grid from the arming position, then ask
-    whether each metric cell centre landed in that component. Cells the robot could never
-    occupy are excluded from the coverage error on both the UAV and ideal sides.
-
+    """
+    Sample grid reachability onto the coverage-metric grid.
+    
     Args:
-        grid: Inflated boolean occupancy.
-        origin: World coordinates of the lower-left grid corner.
-        resolution: Grid cell size in metres.
-        start: Arming position.
-        x_limits: Workspace x bounds of the metric grid.
-        y_limits: Workspace y bounds of the metric grid.
-        bins: Metric grid shape as ``(rows, columns)``.
-
+            grid: Inflated boolean occupancy.
+            origin: World coordinates of the lower-left grid corner.
+            resolution: Grid cell size in metres.
+            start: Arming position.
+            x_limits: Workspace x bounds of the metric grid.
+            y_limits: Workspace y bounds of the metric grid.
+            bins: Metric grid shape as ``(rows, columns)``.
     Returns:
-        Boolean mask with shape ``bins``.
+            Boolean mask with shape ``bins``.
     """
     visited = reachable_from(grid, origin, resolution, start)
     rows, columns = bins
@@ -296,11 +271,8 @@ def nearest_free(
     resolution: float,
     position: tuple[float, float],
 ) -> tuple[float, float] | None:
-    """Return the centre of the free cell closest to ``position``, or ``None`` if none.
-
-    Serves two purposes: the entry cell for a start outside the grid, and a concrete
-    suggestion when a start inside the grid is refused. It never relocates the vehicle --
-    the vehicle spawns wherever the launch says.
+    """
+    Return the centre of the free cell closest to ``position``, or ``None`` if none.
     """
     free = np.argwhere(~grid)
     if free.size == 0:
@@ -322,11 +294,8 @@ def segment_blocked(
     start: np.ndarray,
     end: np.ndarray,
 ) -> bool:
-    """Whether the straight segment from ``start`` to ``end`` touches a blocked cell.
-
-    Sampled at half the cell size, so no cell along the segment can be stepped over.
-    Positions outside the grid count as blocked: the grid covers the whole workspace, so
-    leaving it is already a safety failure.
+    """
+    Whether the straight segment from ``start`` to ``end`` touches a blocked cell.
     """
     start = np.asarray(start, dtype=np.float64)
     end = np.asarray(end, dtype=np.float64)
@@ -378,20 +347,16 @@ def clearance_along(
     resolution: float,
     positions: np.ndarray,
 ) -> np.ndarray:
-    """Return each position's distance to the nearest occupied cell centre.
-
-    Uses the *raw* (uninflated) occupancy, so the result is physical map clearance rather
-    than a margin-inclusive one, which is what a collision claim has to be based on.
-    Positions are all infinitely clear when the map is empty.
-
+    """
+    Return each position's distance to the nearest occupied cell centre.
+    
     Args:
-        occupancy: Boolean grid with shape ``(H, W)``.
-        origin: World coordinates of the lower-left grid corner.
-        resolution: Grid cell size in metres.
-        positions: Query positions with shape ``(N, 2)``.
-
+            occupancy: Boolean grid with shape ``(H, W)``.
+            origin: World coordinates of the lower-left grid corner.
+            resolution: Grid cell size in metres.
+            positions: Query positions with shape ``(N, 2)``.
     Returns:
-        Distances with shape ``(N,)``.
+            Distances with shape ``(N,)``.
     """
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
     occupied = np.argwhere(occupancy)

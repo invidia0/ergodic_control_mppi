@@ -1,12 +1,4 @@
-"""Read the campaign archive and derive summaries. Never touches the GPU.
-
-Everything downstream of the runs goes through here: the loaders that hide the
-archive layout, the seed aggregates, the paired per-seed comparisons, and the
-transient metric. Because the runner stores raw paths, any metric invented later
-is a change to this file alone -- no re-run.
-
-    python -m ergodic_control_mppi.experiments.analyze --stage components
-"""
+"""Read the campaign archive and derive summaries. Never touches the GPU."""
 
 from __future__ import annotations
 
@@ -88,11 +80,7 @@ def bootstrap_ci(
 
 
 def steps_to_threshold(steps: np.ndarray, values: np.ndarray, threshold: float) -> float:
-    """First step after which the series stays at or below ``threshold``.
-
-    Requires the condition to hold for the whole remainder of the series, so a
-    transient dip does not count as convergence. ``nan`` if never reached.
-    """
+    """First step after which the series stays at or below ``threshold``."""
     below = np.asarray(values) <= threshold
     if not below.any() or not below[-1]:
         return float("nan")
@@ -121,13 +109,7 @@ def summarize_stage(
     threshold_factor: float = 1.5,
     with_transient: bool = True,
 ) -> list[dict[str, Any]]:
-    """Aggregate one stage over seeds, paired against its reference arm.
-
-    The threshold for ``steps_to_threshold`` is
-    ``threshold_factor * median(final occupancy_mse of the reference arm)``,
-    computed per density so arms on different targets are never compared against
-    a shared, meaningless number.
-    """
+    """Aggregate one stage over seeds, paired against its reference arm."""
     rows = load_index(campaign_dir, stage)
     grouped: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for row in rows:

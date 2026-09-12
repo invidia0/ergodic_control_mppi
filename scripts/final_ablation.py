@@ -1,9 +1,5 @@
-"""T150 ablation: 39 alternatives and one profile on six maps and six paired seeds.
-
-The K axis and its own profile use batch9; other clutter groups use batch36.
-Open mechanisms use one map and twelve seeds at batch12. Companion invariance must
-be checked at each width before running a comparison. Outputs resume only with a
-matching resolved-input/source/environment manifest.
+"""
+T150 ablation: 39 alternatives and one profile on six maps and six paired seeds.
 """
 
 import argparse
@@ -67,9 +63,6 @@ AXIS_CHUNKS = {"K": 4}
 # 20 is comfortably conservative.
 DENSITIES = (10, 15, 20)
 MAPS_PER_DENSITY = 2
-# No pins and no flown maps. Every recorded flight was flown by the Stein controller, so
-# under same-version control none of them describes this campaign's controller -- pinning a
-# map to keep a flight comparison alive would keep a comparison that is already void.
 PINNED: dict[int, tuple[int, ...]] = {}
 
 
@@ -77,11 +70,8 @@ PINNED: dict[int, tuple[int, ...]] = {}
 
 
 def build_map_manifest(output: Path, roots: dict[int, Path]) -> dict:
-    """Pick two maps per density and record them, refusing anything not a pillar field.
-
-    Selection is `select_split`'s ordering -- qualifying seeds ranked by worst-mode blocked
-    target mass -- except where :data:`PINNED` overrides it. Every map is checked here rather
-    than at run time so a wrong map cannot reach the campaign at all.
+    """
+    Pick two maps per density and record them, refusing anything not a pillar field.
     """
     entries = []
     for obs_num in DENSITIES:
@@ -107,14 +97,7 @@ def build_map_manifest(output: Path, roots: dict[int, Path]) -> dict:
 
 
 def _check_map(run_dir: Path, map_seed: int, obs_num: int) -> dict:
-    """Validate one map and return its manifest entry.
-
-    Every map in this campaign is a ``random_forest`` pillar field. Mixing generators would
-    put a map-*family* difference inside an ablation measuring a density difference, and any
-    per-map disagreement would then be unattributable between the two. `results/uav/paper01`
-    is perlin and carries no ``map_source`` key at all, so it fails here by construction
-    rather than by anyone remembering to exclude it.
-    """
+    """Validate one map and return its manifest entry."""
     if not (run_dir / "arrays.npz").exists():
         raise SystemExit(f"{run_dir} has no arrays.npz -- build it before selecting")
     meta = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -154,24 +137,7 @@ def _check_map(run_dir: Path, map_seed: int, obs_num: int) -> dict:
 
 
 def _assert_distinct(entries: list[dict]) -> None:
-    """Refuse a manifest that names the same field twice.
-
-    Seed 525 qualified at both 15 and 25 pillars, and the driver flew the 15-pillar field
-    under both labels -- silently, because every downstream check keys on the label rather
-    than on the array. That is why the old gate read 6-of-8 and why ``report_figures.py``
-    carried a ``DUPLICATE_MAPS`` patch.
-
-    Two assertions, because either alone misses a case. ``(obs_num, map_seed)`` catches the
-    manifest listing one entry twice; ``occupancy_digest`` catches two *differently labelled*
-    entries that are the same field, which is the failure that actually happened.
-
-    The digest is a hash of the occupancy array itself, not a summary of it. An earlier
-    version compared ``occupied_cells``, which is an integer count over a quantized grid and
-    therefore collides between genuinely different pillar draws: maps 513 and 530 of
-    ``density_15`` both have 457 occupied cells and differ in 908 of them. A summary can only
-    give false positives here; the array is the thing the claim is about, so it is what is
-    compared.
-    """
+    """Refuse a manifest that names the same field twice."""
     labels = [(e["obs_num"], e["map_seed"]) for e in entries]
     if len(set(labels)) != len(labels):
         raise SystemExit(f"map manifest repeats an (obs_num, map_seed): {labels}")
@@ -206,11 +172,8 @@ def load_maps(path: Path) -> list[dict]:
 
 
 def groups(maps: list[dict], seeds: range, arms=FINAL_ARMS):
-    """Yield ``(label, execution, [lane, ...])`` with every group at exactly one width.
-
-    A lane is ``(map_entry, arm, seed)``. One arm's 108 cells are one group at the default
-    width; a quarantined axis is chunked into equal-width groups instead, which keeps its
-    comparison internally exact without forcing the whole campaign down to that width.
+    """
+    Yield ``(label, execution, [lane, ...])`` with every group at exactly one width.
     """
     full = len(maps) * len(seeds)
     for arm in arms:
@@ -240,14 +203,7 @@ def groups(maps: list[dict], seeds: range, arms=FINAL_ARMS):
 
 
 def identity(lane, steps: int, hardware: str, execution: str, config_hash: str = "") -> tuple:
-    """Resume key for one cell. Branch selectors are part of it, not metadata.
-
-    ``obs_num`` is in the key because a map seed is **not** unique across densities: all
-    three ``prepare`` runs probe seeds 511-610, so the same seed can qualify and be selected
-    at two densities, where it is a completely different field. Keyed on the seed alone,
-    those two cells collide -- resume would skip one that never ran, and the analysis would
-    pair rows from different densities against each other.
-    """
+    """Resume key for one cell. Branch selectors are part of it, not metadata."""
     entry, arm, seed = lane
     return (arm, str(entry["obs_num"]), str(entry["map_seed"]), str(seed), str(steps),
             hardware, execution, config_hash)
@@ -257,14 +213,7 @@ def identity(lane, steps: int, hardware: str, execution: str, config_hash: str =
 
 
 def _configs(cache: dict, entry: dict, config_path: str = "configs/uav_profile.yaml") -> tuple:
-    """Load and cache one map's base config, manifest and arrays.
-
-    Keyed on density *and* seed. Not the seed alone: all three ``prepare`` runs probe
-    511-610, so a seed can be selected at two densities where it is a completely different
-    field. Seed 525 was, and a seed-keyed cache flew the 15-pillar map under both labels --
-    silently, because every downstream check keys on the label rather than on the array. See
-    :func:`identity`, which carries ``obs_num`` for the same reason.
-    """
+    """Load and cache one map's base config, manifest and arrays."""
     key = (entry["obs_num"], entry["map_seed"])
     if key not in cache:
         cache[key] = _grid_config(Path(entry["run_dir"]), config_path)
@@ -272,11 +221,8 @@ def _configs(cache: dict, entry: dict, config_path: str = "configs/uav_profile.y
 
 
 def run_group(label: str, execution: str, lanes: list, cache: dict, arguments) -> list[dict]:
-    """Run one whole group as a single fused call and score every lane against its own map.
-
-    Unlike the gate driver this group spans maps, so the config and the scoring arrays are
-    looked up per lane. Only the grid differs between maps and the grid is a traced leaf, so
-    the lanes still share one static signature and stack cleanly.
+    """
+    Run one whole group as a single fused call and score every lane against its own map.
     """
     device = select_device(arguments.device)
     lane_configs, lane_arrays, lane_manifests = [], [], []
@@ -337,18 +283,7 @@ def run_group(label: str, execution: str, lanes: list, cache: dict, arguments) -
 
 
 def append_rows(output: Path, rows: list[dict]) -> None:
-    """Write a whole group in one call, header-checked.
-
-    Per-group rather than per-row on purpose. Scoring runs ~0.55 s per lane, so appending
-    inside that loop leaves a minute-long window in which an interrupt writes half a group
-    -- which the resume logic then refuses, requiring manual deletion. A group is now
-    atomically present or absent.
-
-    The header is compared against ``FIELDS`` every time: ``DictWriter`` emits values in
-    ``FIELDS`` order regardless of what the file says, so adding a column and appending to
-    an existing archive shifts every later row by one and corrupts the file while looking
-    like it worked. That happened once.
-    """
+    """Write a whole group in one call, header-checked."""
     output.parent.mkdir(parents=True, exist_ok=True)
     fresh = not (output.exists() and output.stat().st_size)
     if not fresh:
@@ -375,12 +310,8 @@ def completed(output: Path) -> set:
 
 
 def verify_branch(maps: list[dict], arguments) -> bool:
-    """The gate: at a fixed lane count, does a lane depend on which companions it has?
-
-    Changing the width is already known to change the result. This asks the narrower
-    question the campaign's grouping rests on -- same width, different companions -- by
-    running one lane set twice with different neighbours and comparing bit patterns. If it
-    fails, every arm must be grouped with its own baseline instead.
+    """
+    The gate: at a fixed lane count, does a lane depend on which companions it has?
     """
     cache: dict = {}
     entry = maps[0]

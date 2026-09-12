@@ -27,19 +27,16 @@ class SingleRunResult(NamedTuple):
 
 
 class SingleControllerState(NamedTuple):
-    """Everything the closed loop carries from one control step to the next.
+    """Closed-loop carry from one control step to the next.
 
     Attributes:
-        state: Current state with shape ``(6,)``.
-        controls: Warm-start control sequence with shape ``(T, 3)``.
+        state: Current state, shape ``(2d + 2,)`` (planar ``(6,)``).
+        controls: Warm-start controls, shape ``(T, d + 1)`` (planar ``(T, 3)``).
         key: JAX PRNG key.
-        temperature: Scalar ESS-adapted MPPI temperature.
-        memory: Fading-memory positions with shape ``(P, 2)``, oldest first.
-        step_index: Number of completed control steps.
-        service_mass: Recency-weighted per-component visit mass, shape ``(J,)``. A
-            deterministic contraction of the executed path -- it adds no information the
-            path does not already carry -- whose decay is set by ``service_time``, so the
-            window the service gate reasons over is independent of the memory trail.
+        temperature: ESS-adapted MPPI temperature.
+        memory: Fading-memory positions, shape ``(P, d)``.
+        step_index: Completed control steps.
+        service_mass: Per-component visit mass for the service gate, shape ``(J,)``.
     """
 
     state: jax.Array
@@ -57,26 +54,15 @@ def initialize_single(
     initial_controls: jax.Array,
     key: jax.Array,
 ) -> SingleControllerState:
-    """Build the initial closed-loop carry.
-
-    Args:
-        params: Controller parameters.
-        initial_state: State with shape ``(6,)``.
-        initial_controls: Zero or warm-start controls with shape ``(T, 3)``.
-        key: JAX PRNG key.
-
-    Returns:
-        The carry consumed by :func:`single_step`.
-    """
+    """Build the initial closed-loop carry."""
+    d = params.gmm.means.shape[-1]
     return SingleControllerState(
         state=initial_state,
         controls=initial_controls,
         key=key,
         temperature=jnp.asarray(params.mppi.temperature, dtype=jnp.float32),
-        memory=jnp.broadcast_to(initial_state[:2], (params.mppi.memory_length, 2)),
-        # Start at the stationary mass of standing still at the initial position, so the
-        # gate does not read a cold accumulator as "nothing has been served anywhere".
-        service_mass=responsibilities(initial_state[:2], params.gmm)
+        memory=jnp.broadcast_to(initial_state[:d], (params.mppi.memory_length, d)),
+        service_mass=responsibilities(initial_state[:d], params.gmm)
         / jnp.maximum(1.0 - params.field.service_decay, 1e-12),
         step_index=jnp.asarray(0, dtype=jnp.int32),
     )
@@ -85,18 +71,14 @@ def initialize_single(
 def single_step(
     params: ControllerParams, carry: SingleControllerState
 ) -> tuple[SingleControllerState, MPPIStepResult]:
-    """Advance the closed loop by one control step.
-
-    The appended memory sample is the position the robot actually reaches. Online
-    callers must therefore overwrite ``state`` with the measured observation before
-    the next call, so the buffer keeps executed positions rather than predicted ones.
-
+    """
+    Advance the closed loop by one control step.
+    
     Args:
-        params: Controller parameters.
-        carry: Current closed-loop carry.
-
+            params: Controller parameters.
+            carry: Current closed-loop carry.
     Returns:
-        The next carry and the planning outputs of this step.
+            The next carry and the planning outputs of this step.
     """
     result = mppi_step(
         params,
@@ -108,15 +90,16 @@ def single_step(
         carry.service_mass,
     )
     next_state = step(carry.state, result.control, params.model)
+    d = params.gmm.means.shape[-1]
     next_carry = SingleControllerState(
         state=next_state,
         controls=result.controls,
         key=result.key,
         temperature=adapt_temperature(carry.temperature, result.weights, params),
-        memory=jnp.concatenate((carry.memory[1:], next_state[None, :2]), axis=0),
+        memory=jnp.concatenate((carry.memory[1:], next_state[None, :d]), axis=0),
         step_index=carry.step_index + 1,
         service_mass=params.field.service_decay * carry.service_mass
-        + responsibilities(next_state[:2], params.gmm),
+        + responsibilities(next_state[:d], params.gmm),
     )
     return next_carry, result
 
@@ -128,11 +111,12 @@ def stationary_step(
 ) -> tuple[SingleControllerState, MPPIStepResult]:
     """Plan once while holding the executed state and fading memory stationary."""
     next_carry, result = single_step(params, carry)
+    d = params.gmm.means.shape[-1]
     held = next_carry._replace(
         state=state,
-        memory=jnp.broadcast_to(state[:2], next_carry.memory.shape),
+        memory=jnp.broadcast_to(state[:d], next_carry.memory.shape),
         step_index=jnp.asarray(0, dtype=jnp.int32),
-        service_mass=responsibilities(state[:2], params.gmm)
+        service_mass=responsibilities(state[:d], params.gmm)
         / jnp.maximum(1.0 - params.field.service_decay, 1e-12),
     )
     return held, result
@@ -147,22 +131,23 @@ def run_single(
     progress: bool = False,
     preflight_steps: int = 0,
 ) -> SingleRunResult:
-    """Run a single-robot closed loop.
-
-    Args:
-        params: Controller parameters.
-        initial_state: State with shape ``(6,)``.
-        initial_controls: Zero or warm-start controls with shape ``(T, 3)``.
-        key: JAX PRNG key.
-        steps: Positive scan length; static under JIT.
-        progress: Whether to print approximately one update per percent.
-        preflight_steps: Stationary planning iterations retained before motion starts.
-
-    Returns:
-        Executed path, final planning outputs, and per-step ESS/temperature histories.
     """
-    initial_optimal = jnp.broadcast_to(initial_state, (params.mppi.horizon, 6))
-    initial_surrogate = jnp.broadcast_to(initial_state[:2], (params.mppi.horizon, 2))
+    Run a single-robot closed loop.
+    
+    Args:
+            params: Controller parameters.
+            initial_state: State with shape ``(6,)``.
+            initial_controls: Zero or warm-start controls with shape ``(T, 3)``.
+            key: JAX PRNG key.
+            steps: Positive scan length; static under JIT.
+            progress: Whether to print approximately one update per percent.
+            preflight_steps: Stationary planning iterations retained before motion starts.
+    Returns:
+            Executed path, final planning outputs, and per-step ESS/temperature histories.
+    """
+    d = params.gmm.means.shape[-1]
+    initial_optimal = jnp.broadcast_to(initial_state, (params.mppi.horizon, initial_state.shape[-1]))
+    initial_surrogate = jnp.broadcast_to(initial_state[:d], (params.mppi.horizon, d))
     progress_interval = max(1, (steps + 99) // 100)
 
     def scan_step(carry, index):
@@ -213,18 +198,13 @@ def run_single(
 
 
 def stack_params(per_lane: list[ControllerParams]) -> ControllerParams:
-    """Stack per-lane controller parameters into one batched pytree.
-
-    ``samples``, ``horizon``, ``memory_length`` and ``smooth_window`` are ``static=True``
-    fields, so they are *not* pytree leaves: this raises on a mismatch rather than silently
-    batching arms whose shapes differ. That is the grouping rule enforcing itself — callers
-    must split arms by static signature, and cannot forget to.
-
+    """
+    Stack per-lane controller parameters into one batched pytree.
+    
     Args:
-        per_lane: One parameter set per lane; all must share the static signature.
-
+            per_lane: One parameter set per lane; all must share the static signature.
     Returns:
-        Parameters whose every leaf carries a leading lane axis.
+            Parameters whose every leaf carries a leading lane axis.
     """
     if not per_lane:
         raise ValueError("stack_params needs at least one lane")
@@ -246,29 +226,18 @@ def run_batch(
     steps: int,
     preflight_steps: int = 0,
 ) -> SingleRunResult:
-    """Run one closed loop per lane, in a single fused scan.
-
-    The loop is launch-latency bound rather than throughput bound -- per step it does ~90k
-    cheap transitions and ~400k kernel evaluations spread over thousands of tiny kernels --
-    so lanes are close to free until the GPU actually fills. Measured 6.2x throughput at 48
-    lanes for 327 MiB.
-
-    **Batched results are a different numerical branch than sequential ones.** The epsilon
-    draw itself differs under ``vmap`` and this closed loop amplifies float-level
-    differences into metres, so rows produced here must never be pooled with sequentially
-    produced rows, and the lane count is part of a run's identity exactly as the device and
-    the host are.
-
+    """
+    Run one closed loop per lane, in a single fused scan.
+    
     Args:
-        params: Batched parameters from :func:`stack_params`, lane axis leading.
-        initial_state: Shared start state with shape ``(6,)``.
-        initial_controls: Shared warm start with shape ``(T, 3)``.
-        keys: Per-lane PRNG keys, lane axis leading.
-        steps: Positive scan length; static under JIT.
-        preflight_steps: Stationary planning iterations retained before motion starts.
-
+            params: Batched parameters from :func:`stack_params`, lane axis leading.
+            initial_state: Shared start state with shape ``(6,)``.
+            initial_controls: Shared warm start with shape ``(T, 3)``.
+            keys: Per-lane PRNG keys, lane axis leading.
+            steps: Positive scan length; static under JIT.
+            preflight_steps: Stationary planning iterations retained before motion starts.
     Returns:
-        :class:`SingleRunResult` with a leading lane axis on every field.
+            : class:`SingleRunResult` with a leading lane axis on every field.
     """
     return jax.vmap(
         lambda lane_params, key: run_single(

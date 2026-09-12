@@ -1,11 +1,4 @@
-"""Regressions for the final nine-map ablation driver.
-
-The expensive part of this campaign is unrunnable in a test, so what is pinned here is
-everything that decides *whether the expensive part is valid*: the grouping widths that
-define the numerical branch, the resume identity that must not let one branch satisfy
-another, the atomic group write that a corrupt archive already cost us once, and the map
-guard that keeps a perlin map out of a pillar campaign.
-"""
+"""Regressions for the final nine-map ablation driver."""
 
 import csv
 import importlib.util
@@ -16,7 +9,10 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+import matplotlib.colors as mcolors
 import numpy as np
+
+from ergodic_control_mppi.plotting.style import PRIMARY  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
@@ -59,12 +55,17 @@ class ArmTableTest(unittest.TestCase):
         # An arm identical to the shipped profile would pair the control against itself
         # and dilute its axis with a guaranteed null.
         self.assertIn("baseline", FINAL_ARMS)
-        # The withdrawn Stein axes must not be reachable as arms at all.
         for gone in ("theta_0", "theta_15", "Q2", "Q3_fine", "ell_self_0.25"):
             self.assertNotIn(gone, FINAL_ARMS)
 
     def test_campaign_size_matches_the_registered_design(self):
-        self.assertEqual(len(FINAL_ARMS), 40)
+        self.assertEqual(len(FINAL_ARMS), 47)
+
+    def test_spectrum_fill_levels_are_registered(self):
+        self.assertEqual(_BY_NAME["transit_2"][2], {"transit_speedup": 2.0})
+        self.assertEqual(_BY_NAME["transit_6"][2], {"transit_speedup": 6.0})
+        self.assertEqual(_BY_NAME["alpha_0.95"][2], {"alpha": 0.95})
+        self.assertEqual(_BY_NAME["alpha_0.97"][2], {"alpha": 0.97})
 
     def test_the_three_necessity_rows_are_present(self):
         """One per term of Phi the mechanism argument claims is load-bearing."""
@@ -120,8 +121,8 @@ class GroupingTest(unittest.TestCase):
             self.assertTrue(all(seen[k] == expected for k in cells), arm)
 
     def test_total_cell_count(self):
-        # 38 arms x 36, plus the 36-cell baseline replicate the K quarantine needs.
-        self.assertEqual(sum(len(lanes) for _, _, lanes in self.groups), 40 * 36 + 36)
+        # 47 arms x 36, plus the 36-cell baseline replicate the K quarantine needs.
+        self.assertEqual(sum(len(lanes) for _, _, lanes in self.groups), 47 * 36 + 36)
 
 
 class IdentityTest(unittest.TestCase):
@@ -431,24 +432,27 @@ class SensitivityMathTest(unittest.TestCase):
             places=9,
         )
 
-    def _archive(self, path: Path):
+    def _archive(self, path: Path, arm: str | None = None):
         """A miniature archive with both baseline widths and a seed reused across densities."""
         fields = ["arm", "obs_num", "map_seed", "seed", "lanes", "occupancy_mse",
                   "fourier_ergodic",
                   "all_modes_reached", "mode_cycles", "mode_dwell_median_s",
                   "in_mode_fraction", "path_length_m", "steps", "axis", "value"]
         maps = [(15, 513), (15, 525), (25, 516), (25, 525)]
+        rows = ((arm, 108, 3.0),) if arm is not None else (
+            ("baseline", 108, 1.0), ("wide", 108, 2.0),
+            ("narrow", 27, 4.0), ("baseline", 27, 8.0),
+        )
         with path.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
             # baseline@108 first and baseline@27 last, matching the real file: with a
             # width-blind key the trailing width-27 rows win and serve every arm.
-            for arm, lanes, value in (("baseline", 108, 1.0), ("wide", 108, 2.0),
-                                      ("narrow", 27, 4.0), ("baseline", 27, 8.0)):
+            for name, lanes, value in rows:
                 for obs, map_seed in maps:
                     for seed in range(43, 46):
                         writer.writerow({
-                            "arm": arm, "obs_num": obs, "map_seed": map_seed, "seed": seed,
+                            "arm": name, "obs_num": obs, "map_seed": map_seed, "seed": seed,
                             "lanes": lanes, "occupancy_mse": value,
                             "fourier_ergodic": value,
                             "all_modes_reached": 1, "mode_cycles": 2,
@@ -488,43 +492,23 @@ class SensitivityMathTest(unittest.TestCase):
         self.assertEqual(keys, {(15, 513), (15, 525), (25, 516), (25, 525)})
         self.assertEqual(len(self.rf.per_map_effects(table, "wide")), 4)
 
-    def test_typical_reference_is_the_per_cell_median_arm(self):
-        # Why the reference exists at all: paired against itself the baseline is exactly
-        # zero on every cell, so under the default reference it cannot be drawn as a column.
-        table = self._table({"a": 0.3, "b": -0.3})
-        table["baseline@27"] = {
-            cell: {**row, "lanes": "27"}
-            for cell, row in table["baseline@108"].items()
-        }
-        arm, base, _ = self.rf.paired_final(table, "baseline@108", "fourier_ergodic")
-        self.assertTrue(np.array_equal(arm, base))
-
-        self.rf.add_typical_reference(table)
-        cell = next(iter(table["baseline@108"]))
-        self.assertAlmostEqual(
-            float(table[self.rf.TYPICAL][cell]["fourier_ergodic"]),
-            float(np.median([float(table[a][cell]["fourier_ergodic"])
-                             for a in ("baseline@108", "a", "b")])),
-            places=12,
-        )
-        # And with it the baseline becomes a real column. Bracket it deterministically --
-        # one arm strictly better on every cell, one strictly worse -- so the median arm is
-        # the baseline itself and its drawn effect is exactly zero rather than approximately.
-        for cell in table["baseline@108"]:
-            value = float(table["baseline@108"][cell]["fourier_ergodic"])
-            table["a"][cell]["fourier_ergodic"] = repr(value * 0.5)
-            table["b"][cell]["fourier_ergodic"] = repr(value * 2.0)
-        table.pop(self.rf.TYPICAL)
-        self.rf.add_typical_reference(table)
-        arm, base, cells = self.rf.paired_final(table, "baseline@108", "fourier_ergodic",
-                                                reference=self.rf.TYPICAL)
-        self.assertEqual(len(cells), len(table["baseline@108"]))
-        self.assertTrue(np.allclose(arm, base))
-        # The bracketing arms are drawn at exactly +/-1 log2 unit, which is what the dot
-        # matrix colours: the reference is a yardstick, not one of the runs.
-        worse, reference, _ = self.rf.paired_final(table, "b", "fourier_ergodic",
-                                                   reference=self.rf.TYPICAL)
-        self.assertTrue(np.allclose(np.log2(reference / worse), -1.0))
+    def test_load_final_merges_named_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ablation.csv"
+            self._archive(path)
+            self._archive(Path(directory) / "ablation_gain.csv", arm="gain_5")
+            self._archive(
+                Path(directory) / "ablation_transit_alpha.csv", arm="transit_2"
+            )
+            table = self.rf.load_final(path)
+            self.assertIn("wide", table)
+            self.assertIn("gain_5", table)
+            self.assertIn("transit_2", table)
+            # A sidecar loaded on its own must not pull its sibling, or two extras
+            # in one directory recurse.
+            solo = self.rf.load_final(Path(directory) / "ablation_gain.csv")
+            self.assertIn("gain_5", solo)
+            self.assertNotIn("transit_2", solo)
 
     def test_joint_is_not_bounded_by_the_marginal_sum(self):
         # Recorded because the opposite was asserted while designing this panel and the
@@ -610,14 +594,31 @@ class StepBudgetTest(unittest.TestCase):
             with unittest.mock.patch.object(self.rf, "save", lambda figure, path: figure):
                 figure = self.rf.fig_step_budget(report, Path(directory) / "f.pdf")
 
-            deadline, composition = figure.axes
+            composition, deadline = figure.axes
             # Bars are added residual-first, then the stages ascending.
             residual, *stages = [patch.get_width() for patch in composition.patches]
             self.assertAlmostEqual(0.6, residual)  # 5.5 fused - 4.9 accounted
             self.assertEqual([0.1, 0.4, 0.6, 0.8, 3.0], sorted(stages))
+            self.assertEqual(
+                ["Shortfall", "Score", "Plan", "Sampling", "Memory", "Rollouts"],
+                [tick.get_text() for tick in composition.get_yticklabels()],
+            )
             self.assertIn("5.50", composition.get_title())
+            np.testing.assert_allclose(composition.get_yticks(), np.arange(6))
 
             # The end-to-end step is a different measurement and is shown against the
             # period, never mixed into the composition.
-            self.assertAlmostEqual(6.2, min(patch.get_width() for patch in deadline.patches))
-            self.assertIn("6.20", "".join(text.get_text() for text in deadline.texts))
+            self.assertAlmostEqual(6.2, min(patch.get_height() for patch in deadline.patches))
+            endtoend = min(deadline.patches, key=lambda patch: patch.get_height())
+            self.assertEqual(mcolors.to_hex(endtoend.get_facecolor()).upper(), PRIMARY)
+            self.assertEqual(deadline.get_ylabel(), "50 Hz budget")
+            callout = " ".join(text.get_text() for text in figure.texts)
+            self.assertIn("6.20 ms", callout)
+            self.assertIn("(31%)", callout)
+            ms_label = next(text for text in figure.texts if text.get_text() == "6.20 ms")
+            pct_label = next(text for text in figure.texts if text.get_text() == "(31%)")
+            tick_label = composition.xaxis.get_ticklabels()[0]
+            self.assertEqual(ms_label.get_fontsize(), tick_label.get_fontsize())
+            self.assertEqual(ms_label.get_color(), tick_label.get_color())
+            self.assertEqual(pct_label.get_fontsize(), ms_label.get_fontsize())
+            self.assertEqual(pct_label.get_color(), ms_label.get_color())

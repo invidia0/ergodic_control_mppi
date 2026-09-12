@@ -107,8 +107,9 @@ class RampContrastTest(unittest.TestCase):
             ("old trail", TRAIL_CMAP(0.0), MECHANISM_OCCUPANCY_CMAP(0.0), 1.3),
             ("new trail", TRAIL_CMAP(1.0), darkest, 2.5),
             ("flat trail", INK, darkest, 2.5),
-            ("robot ring", ROBOT_EDGE, darkest, 2.5),
-            ("robot fill", ROBOT_COLOR, ROBOT_EDGE, 10.0),
+            # A solid jet-black dot, as in every figure: it has to clear the field as the
+            # trail does, not its own ring.
+            ("robot", ROBOT_COLOR, darkest, 2.5),
             ("target contour", TARGET_LINE, darkest, 1.5),
             ("construction", CONSTRUCTION, darkest, 2.0),
             ("mode", "#33415C", darkest, 1.7),
@@ -141,13 +142,14 @@ class RampContrastTest(unittest.TestCase):
         ramp's luminance somewhere in the middle and the contour disappears exactly
         where the occupancy ridge is, which is the part of the figure being argued
         about. The rejects below are the two obvious candidates -- the colour this
-        replaced (#356FA8, 1.08:1) and the paper blue taken straight (#0078FF,
-        1.03:1) -- so the guard fails what it was written for.
+        replaced (#356FA8, 1.08:1), the old paper blue (#0078FF), and PRIMARY
+        taken straight -- so the guard fails what it was written for.
         """
         from ergodic_control_mppi.plotting.mechanism import (
             MECHANISM_OCCUPANCY_CMAP,
             TARGET_LINE,
         )
+        from ergodic_control_mppi.plotting.style import PRIMARY
 
         def worst(color):
             return min(
@@ -160,7 +162,7 @@ class RampContrastTest(unittest.TestCase):
             ratio, 1.5,
             f"target contours read {ratio:.2f}:1 at the worst step of the field ramp",
         )
-        for reject in ("#356FA8", "#0078FF"):
+        for reject in ("#356FA8", "#0078FF", PRIMARY):
             with self.subTest(reject=reject):
                 self.assertLess(worst(reject), 1.5)
 
@@ -174,12 +176,38 @@ class RampContrastTest(unittest.TestCase):
             )
 
 
+class ManuscriptPaletteTest(unittest.TestCase):
+    """One categorical cycle and two named ramps for every manuscript figure."""
+
+    def test_baseline_methods_have_unique_hues(self):
+        from ergodic_control_mppi.plotting.style import METHOD_COLORS
+
+        keys = ("ours", "hedac", "sves", "fmec", "smc")
+        hues = [METHOD_COLORS[key].lower() for key in keys]
+        self.assertEqual(len(hues), len(set(hues)))
+        self.assertEqual(METHOD_COLORS["ours"], METHOD_COLORS["mppi"])
+
+    def test_diverging_maps(self):
+        from ergodic_control_mppi.plotting.style import DIVERGING_CMAP, POTENTIAL_CMAP
+
+        self.assertIn("roma", DIVERGING_CMAP.name.lower())
+        self.assertEqual("RdYlBu_r", POTENTIAL_CMAP.name)
+
+    def test_density_ramp_is_white_to_jetblack(self):
+        from ergodic_control_mppi.plotting.style import DENSITY_CMAP
+
+        light = matplotlib.colors.to_hex(DENSITY_CMAP(0.0)).lower()
+        dark = DENSITY_CMAP(1.0)
+        self.assertEqual(light, "#ffffff")
+        self.assertLess(_relative_luminance(dark), 0.1)
+
+
 class MechanismFieldTest(unittest.TestCase):
     """The figures must compute what the controller computes, not a lookalike.
 
     ``_field_at`` / ``_rho`` / ``_rho_excess`` transcribe ``field.py:memory_weights`` and
     ``kde_repulsion`` so they can be evaluated on a grid instead of only at the memory
-    points. Pinning their ``memory_balance`` blend against ``memory_flow`` itself is what
+    points. Pinning their ``memory_balance`` blend against ``memory_repulsion`` itself is what
     stops the figures drifting from the implementation.
     """
 
@@ -188,7 +216,7 @@ class MechanismFieldTest(unittest.TestCase):
 
         import jax.numpy as jnp
 
-        from ergodic_control_mppi.mppi.field import memory_flow
+        from ergodic_control_mppi.mppi.field import memory_repulsion
         from ergodic_control_mppi.plotting.mechanism import _rho, _rho_excess
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -206,7 +234,7 @@ class MechanismFieldTest(unittest.TestCase):
         ctx = {"field": field, "gmm": params.gmm, "memory": memory,
                "recency": recency, "density_floor": floor}
 
-        expected = memory_flow(points, memory, recency, params.gmm, field, floor)
+        expected = memory_repulsion(points, memory, recency, params.gmm, field, floor)
         balance = float(field.memory_balance)
         got = float(np.sqrt(0.5 * np.e * bandwidth)) * (
             (1.0 - balance) * _rho(ctx, points, np.asarray(recency), bandwidth)
@@ -232,6 +260,89 @@ class PlottingTest(unittest.TestCase):
             self.assertTrue(output.exists())
             plt.close(figure)
 
+    def test_strip_axes_keeps_the_inset_that_saves_the_caps(self):
+        """Bare 3D renders must not fill the canvas.
+
+        mplot3d draws the projected box outside the axes rectangle. Setting the axes to
+        (0, 0, 1, 1) leaves the far pillar caps with nowhere to land but the figure edge,
+        which is the cut padding the crop cannot undo -- those pixels were never drawn.
+        """
+        from ergodic_control_mppi.plotting.deployment import _strip_axes
+
+        figure = plt.figure()
+        axes = figure.add_subplot(111, projection="3d")
+        axes.set_position((0.06, 0.10, 0.88, 0.76))
+        _strip_axes(axes)
+        box = axes.get_position()
+        plt.close(figure)
+        self.assertLess(box.y0 + box.height, 0.95)
+        self.assertGreater(box.y0, 0.02)
+
+
+class MechanismMapTest(unittest.TestCase):
+    """Visit-count metric and the two split Figure-5 builders."""
+
+    def test_stacked_passes_count_higher_than_offset_passes(self):
+        from ergodic_control_mppi.plotting.trajectories import neighboring_pass_count
+
+        theta = np.linspace(0.0, 12.0 * 2.0 * np.pi, 800)
+        coil = np.stack([0.4 * np.cos(theta), 0.4 * np.sin(theta)], axis=1)
+        coil_ids = np.floor(np.linspace(0.0, 12.0, 800, endpoint=False)).astype(int)
+        t = np.linspace(0.0, 8.0, 200)
+        spread = np.concatenate([
+            np.stack([t, np.zeros_like(t)], axis=1),
+            np.stack([t, np.full_like(t, 3.0)], axis=1),
+        ])
+        spread_ids = np.concatenate([np.zeros(200, dtype=int), np.ones(200, dtype=int)])
+        self.assertGreater(
+            np.median(neighboring_pass_count(coil, coil_ids, 0.6)),
+            np.median(neighboring_pass_count(spread, spread_ids, 0.6)),
+        )
+
+    def test_offset_passes_are_not_neighbours(self):
+        from ergodic_control_mppi.plotting.trajectories import neighboring_pass_count
+
+        t = np.linspace(0.0, 8.0, 80)
+        xy = np.concatenate([
+            np.stack([t, np.zeros_like(t)], axis=1),
+            np.stack([t, np.full_like(t, 3.0)], axis=1),
+        ])
+        ids = np.concatenate([np.zeros(80, dtype=int), np.ones(80, dtype=int)])
+        self.assertEqual(int(neighboring_pass_count(xy, ids, radius=0.5).max()), 0)
+
+    def test_plan_gain_and_potential_write_files(self):
+        from ergodic_control_mppi.plotting.trajectories import (
+            figure_plan_gain, figure_potential,
+        )
+
+        t = np.linspace(0.0, 2.0 * np.pi, 40)
+        xy = np.stack([np.cos(t), np.sin(t)], axis=1)
+        capture = {
+            "positions": xy,
+            "limits": np.array([-3.0, 3.0, -3.0, 3.0]),
+            "means": np.array([[0.0, 0.0], [1.5, 0.0]]),
+            "covariances": np.stack([np.eye(2), np.eye(2)]),
+            "log_weights": np.array([np.log(0.5), np.log(0.5)]),
+            "memory": xy[:20],
+            "recency": 0.99 ** np.arange(20)[::-1],
+            "plan": xy[:8],
+            "fine_bandwidth": np.array(0.94),
+            "memory_gain": np.array(1.0),
+            "memory_balance": np.array(0.5),
+            "plan_gain": np.array(6.0),
+            "deficit_ceiling": np.array(0.05),
+            "release_ratio": np.array(2.24),
+            "service_mass": np.array([0.5, 0.5]),
+            "title": "$g=6$",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = figure_plan_gain([capture], directory / "plan.png")
+            potential = figure_potential(capture, directory / "phi.png", resolution=16)
+            self.assertTrue(plan.exists())
+            self.assertTrue(potential.exists())
+            plt.close("all")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -241,8 +352,8 @@ def test_cylinder_scene_sorts_back_to_front():
     """The cylinder pillars and the trail share one painter's order.
 
     `computed_zorder=False` means mplot3d does no depth sorting of its own, so this
-    ordering is the only thing keeping a far pillar's outline from drawing through a near
-    one, and the trail weaving between them rather than floating over the field.
+    ordering is the only thing keeping a far pillar from drawing through a near one,
+    and the trail weaving between them rather than floating over the field.
     """
     import numpy as np
     from unittest.mock import MagicMock

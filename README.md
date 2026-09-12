@@ -1,40 +1,54 @@
 # Ergodic Control MPPI
 
-JAX implementation of flow-matching Model Predictive Path Integral control for
-single-robot ergodic coverage of a Gaussian-mixture target density.
+JAX implementation of service-gated potential-gradient Model Predictive Path Integral
+control for single-robot ergodic coverage of a Gaussian-mixture target density.
+
+![Perlin occupancy flight](figures/fig_perlin.png)
+
+The same lifted controller flying a Perlin occupancy volume (the SITL map rule:
+mockamap `perlin3D` thresholded to 10% of the slab). Bunny-shell, 3D pillar, and
+planar deployment snapshots:
+
+| Stanford bunny shell | 3D pillars | Planar deployment |
+|---|---|---|
+| ![Bunny](figures/fig_bunny.png) | ![Volumetric](figures/fig_volumetric.png) | ![Deployment](figures/fig_deployment.png) |
 
 ## Implementation
 
 At every control step, the controller samples `mppi.K` noisy control sequences
-over `mppi.T` steps, integrates the fixed six-state double integrator, and
-scores obstacle, map-boundary, MPPI control, and reference-field tracking costs.
-The weighted update becomes the next receding-horizon control sequence.
+over `mppi.T` steps, integrates the double integrator, and scores obstacle,
+map-boundary, MPPI control, and reference-field tracking costs. The weighted
+update becomes the next receding-horizon control sequence.
 
-The package separates numerical code from orchestration:
+YAML runs are planar. Position dimension `d > 2` is available through
+`ergodic_control_mppi.experiments.dimension.lift`; the planar branch stays
+bit-identical.
 
 | Path | Responsibility |
 |---|---|
 | `ergodic_control_mppi/config.py` | One-pass YAML loading and validation |
 | `ergodic_control_mppi/parameters.py` | Immutable JAX parameter trees and typed experiment variants |
-| `ergodic_control_mppi/models/double_integrator.py` | Batch-compatible 6-state/3-control dynamics |
+| `ergodic_control_mppi/models/double_integrator.py` | Batch-compatible dynamics: state `(2d+2,)`, control `(d+1,)` |
 | `ergodic_control_mppi/mppi/core.py` | Sampling, rollout costs, reference-field tracking, and MPPI update |
 | `ergodic_control_mppi/mppi/field.py` | Analytic GMM score, KDE repulsion, service gating, and scalar potential |
 | `ergodic_control_mppi/mppi/single.py` | Single-robot closed-loop scan |
+| `ergodic_control_mppi/mppi/replay.py` | Measured-state replay of a recorded flight |
+| `ergodic_control_mppi/deploy/` | Occupancy-grid adapters used by ROS 2 and offline UAV maps |
 | `ergodic_control_mppi/simulation.py` | Device selection, initialization, dispatch, and NumPy results |
-| `ergodic_control_mppi/metrics/` | Ergodicity and coordination metrics |
+| `ergodic_control_mppi/metrics/` | Ergodicity, discrepancy, modes, and coordination metrics |
 | `ergodic_control_mppi/experiments/` | Experiment runners, baselines, analyses, and reports |
-| `ergodic_control_mppi/plotting/` | Simulation and publication figures |
+| `ergodic_control_mppi/plotting/` | Simulation and publication figures, including `dimension.py` |
 
 `run_simulation(...)` always returns paths with shape `(steps, 1, 6)` (a
 trivial robot axis kept for metric/plot compatibility). Internally,
-`run_single(...)` uses `(steps, 6)`. Obstacles have shape `(num_obstacles, 3)`
-and may be empty.
+`run_single(...)` uses `(steps, 2d+2)`. Obstacles have shape `(num_obstacles, 3)`
+and may be empty; `d >= 3` may append a pillar top height as a fourth column.
 
 ## Reference potential field
 
 At every control step, rollout evaluation states are the current position
 followed by the first `T - 1` sampled positions. Their temporal increments are
-scored with the flow-tracking objective
+scored with the velocity-residual objective
 `sum(-dt * h(z_k) @ delta_z_k + 0.5 * ||delta_z_k||^2)`. The reference velocity
 `h(z_k)` is evaluated once on the horizon-wise median of those states and
 broadcast across rollouts. Before its speed gauge, the field is the gradient of
@@ -78,20 +92,7 @@ The CLI accepts `--device auto|cpu|gpu`. `auto` uses a GPU when JAX exposes one
 and otherwise falls back to CPU. Controller imports do not query devices,
 print, log, or import plotting.
 
-### ROS 2 Jazzy scene
-
-With `DISPLAY` and `XAUTHORITY` exported for the host XWayland session, run:
-
-```bash
-docker compose -f docker/ros2/compose.yaml up --build scene
-```
-
-This opens one RViz window with the Perlin map, configured target density,
-native SO3 drone, and live trail. For headless use, run the image with
-`ros2 launch ergodic_control_mppi_ros scene.launch.py rviz:=false`; the launch
-also accepts `config:=PATH`.
-
-The model dimensions are fixed and are not configuration keys:
+Planar model dimensions are not configuration keys:
 
 - state `(6,)`: `[px, py, vx, vy, yaw, yaw_rate]`
 - control `(3,)`: `[ax, ay, angular_acceleration]`
@@ -111,66 +112,36 @@ model.delta_t)`. `reference.fine_bandwidth` defaults to
 `2 * reference.fill_resolution ** 2`; either derived value can be overridden
 explicitly.
 
-## Research commands
+## UAV simulator and ROS 2
 
-Experiment YAML lives in `configs/experiments/`. Destructive runners refuse to
-replace CSV output unless `--overwrite` is supplied.
+[`uav_simulator/`](uav_simulator/) is the vendored SO3 quadrotor, mockamap, and
+map-generator stack used for SITL. Origin, license, and local integration notes
+are in [`uav_simulator/SOURCE.md`](uav_simulator/SOURCE.md).
 
-```bash
-uv run python -m ergodic_control_mppi.experiments.literature --config configs/experiments/literature_comparison.yaml --overwrite
-```
+The ROS 2 Jazzy package in [`ros2/ergodic_control_mppi_ros/`](ros2/ergodic_control_mppi_ros/)
+flies the same JAX controller on that simulator: map adapter, online driver,
+independent safety guard, and a recorder that pairs every flight with an ideal
+offline run on the identical grid, start state, and seed. Build, topic map,
+launch arguments, and safety budget are in
+[`ros2/ergodic_control_mppi_ros/README.md`](ros2/ergodic_control_mppi_ros/README.md).
 
-Trial CSV rows preserve the established scalar fields, including
-`team_ergodic_error`, `pairwise_overlap`, `safety_metric`,
-`redundancy_metric`, `R_pair`, `D_min_pair`, and `runtime_ms`. Existing CSVs
-are not regenerated automatically.
-
-The UAV research runners expose their campaign, residual-audit, and baseline
-options through:
+With `DISPLAY` and `XAUTHORITY` exported for the host XWayland session:
 
 ```bash
-uv run python scripts/final_ablation.py --help
-uv run python scripts/theory_audit.py --help
-uv run python -m ergodic_control_mppi.experiments.baselines --help
+docker compose -f docker/ros2/compose.yaml up --build scene
 ```
 
-These runners write an adjacent `.manifest.json` containing resolved inputs,
-source hashes, and execution metadata. Resume requires matching provenance;
-incompatible outputs require a fresh output path or `--overwrite`.
-`final_ablation.py plan` reports the cell count without running simulations.
-The horizon alternatives are 75, 100, 250, 350, and 500 steps around the
-150-step baseline. The theory audit supports a fixed start with
-`--inits 4 --start-index 0` (indices 0 through 3).
-
-The frozen T150 bundle contains its configuration, copied maps, audit variants,
-and input hashes under `results/uav/T150/`. Its sequential campaign driver
-checks stage artifacts and records logs and completion receipts:
+This opens one RViz window with the Perlin map, configured target density,
+native SO3 drone, and live trail. Headless:
 
 ```bash
-uv run python scripts/run_t150_revision.py plan --bundle results/uav/T150
-uv run python scripts/run_t150_revision.py run --bundle results/uav/T150
+docker compose -f docker/ros2/compose.yaml run --rm uav \
+    ros2 launch ergodic_control_mppi_ros scene.launch.py rviz:=false
 ```
 
-The driver waits for competing GPU compute jobs; `--wait-for-pid PID` also
-waits for a specified process before starting. Laptop timing and SITL
-validation run separately. The timing module's `--endtoend` measurement uses
-synchronized controller calls and transfer of the applied control to NumPy;
-`--steps` sets untimed warmup and `--repeats` sets measured calls. Timing
-outputs have provenance manifests and require `--overwrite` for replacement.
-`scripts/report_figures.py` renders paired ablation effects with 10,000
-hierarchical bootstrap replicates and displays timing measurements in a table.
-The completed local T150 timing session is stored in
-`results/campaign/timing/T150/timing.json`; it used 200 repeats on the
-RTX PRO 500 laptop GPU while connected to mains. Its median fused-step and
-synchronized applied-control times are 2.365 ms and 2.649 ms, respectively.
+The launch accepts `config:=PATH`.
 
-## ROS 2 UAV deployment
-
-The same controller flies a fixed-altitude single UAV on the SO3 quadrotor simulator, with
-a map adapter, an independent safety guard, and a recorder that pairs every flight with an
-ideal offline run on the identical grid, start state and seed. See
-[`ros2/ergodic_control_mppi_ros/README.md`](ros2/ergodic_control_mppi_ros/README.md) for the
-build, topic map, launch arguments, safety budget, and outputs.
+Fixed-altitude UAV smoke run:
 
 ```bash
 docker compose -f docker/ros2/compose.yaml build uav
@@ -179,12 +150,60 @@ docker compose -f docker/ros2/compose.yaml run --rm uav \
         config:=/workspace/configs/uav_profile.yaml run_id:=smoke steps:=200 rviz:=false
 ```
 
-`configs/uav_profile.yaml` is the deployment configuration, with `T=150` and
-`K=250`; `configs/uav_profile_T150.yaml` contains the same frozen profile.
+`configs/uav_profile.yaml` is the deployment configuration (`T=150`, `K=250`).
+`configs/uav_profile_T150.yaml` is the same frozen profile.
 `configs/mppi_params.yaml` is the default offline simulation configuration.
-The local selection snapshot is stored under
-`results/selection/T350_20260906_local/`, with its scope and file hashes in
-`archive.json`. The T150 GPU validation campaign has not yet been completed.
+
+## Research commands
+
+Experiment YAML lives in `configs/experiments/`. Destructive runners refuse to
+replace CSV output unless `--overwrite` is supplied.
+
+```bash
+uv run python -m ergodic_control_mppi.experiments.literature --config configs/experiments/literature_comparison.yaml --overwrite
+uv run python -m ergodic_control_mppi.experiments.baselines --help
+uv run python scripts/final_ablation.py --help
+uv run python scripts/theory_audit.py --help
+uv run python -m ergodic_control_mppi.experiments.dimension {clutter3d,scaling} --help
+uv run python scripts/dimension_figure.py --pillars 20 --seed 0
+uv run python -m ergodic_control_mppi.experiments.bunny {run,figure} --help
+uv run python -m ergodic_control_mppi.experiments.perlin {run,figure} --help
+```
+
+The dimension studies fly the deployed profile with its position dimension
+lifted and every gain unchanged. `clutter3d` flies a 3D pillar field in which
+half the pillars can be flown over, against the same controller held at the
+target's mean altitude. `scaling` sweeps workspace dimensions 2, 3, 4 and 6 on
+an open box against d-dimensional SMC and HEDAC. Outputs default to
+`results/dimension/`. `scripts/dimension_figure.py` renders one stored 3D path.
+
+The bunny comparison flies the same lifted controller around the Stanford bunny
+scan (fetched once into `results/bunny/` and pinned by hash) against HEDAC,
+FMEC, SMC and SVES transcribed to 3D. The target is a shell 0.75 m off the
+scanned surface.
+
+The Perlin demo flies the same lifted controller and the three-altitude target
+of `clutter3d` through Perlin noise thresholded to 10% of the slab, as a 0.1 m
+voxel grid. `run` scores certificate, contact, and altitude use; `figure`
+renders four frames of one stored path. Outputs default to `results/perlin/`.
+
+These runners write an adjacent `.manifest.json` containing resolved inputs,
+source hashes, and execution metadata. Resume requires matching provenance;
+incompatible outputs require a fresh output path or `--overwrite`.
+
+The frozen T150 bundle lives under `results/uav/T150/`:
+
+```bash
+uv run python scripts/run_t150_revision.py plan --bundle results/uav/T150
+uv run python scripts/run_t150_revision.py run --bundle results/uav/T150
+```
+
+`scripts/report_figures.py` renders paired ablation effects. Timing outputs have
+provenance manifests and require `--overwrite` for replacement.
+
+Trial CSV rows preserve the established scalar fields, including
+`team_ergodic_error`, `pairwise_overlap`, `safety_metric`,
+`redundancy_metric`, `R_pair`, `D_min_pair`, and `runtime_ms`.
 
 ## Validation
 

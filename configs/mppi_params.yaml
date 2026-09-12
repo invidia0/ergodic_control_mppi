@@ -67,9 +67,7 @@ reference:
   memory_gain: 60.0         # k_M: memory strength as a ratio to the attraction (implicit weight 1)
 
   # The one lengthscale. The repulsion kernel peaks at sqrt(h/2); h = 0.94 puts that peak
-  # at 0.69 m, the track spacing the plan self-repulsion fills a basin at. This is NOT the
-  # 5.0 the Stein arm flew: with the plan term supplying the filling, the memory no longer
-  # has to be wide enough to evict the vehicle from a basin on its own.
+  # at 0.69 m, the track spacing the plan self-repulsion fills a basin at.
   fine_bandwidth: 0.94
 
   # Plan self-repulsion. Repels the T horizon points from each other, which is what makes

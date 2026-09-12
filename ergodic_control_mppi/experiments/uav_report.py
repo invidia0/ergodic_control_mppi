@@ -1,11 +1,5 @@
-"""Turn the deployment summary CSV into an auto-evaluated acceptance report.
-
-Reads only ``summary.csv``: no GPU, no re-running, so a report can always be regenerated
-from an archived run. Every acceptance criterion renders with the number it was judged on,
-which is the point -- the paper claim should be a table read, not a manual audit.
-
-    python -m ergodic_control_mppi.experiments.uav_report \\
-        --summary results/uav/summary.csv --output results/uav/report.md
+"""
+Turn the deployment summary CSV into an auto-evaluated acceptance report.
 """
 
 import argparse
@@ -77,11 +71,7 @@ def check(name: str, passed: bool, detail: str) -> dict[str, Any]:
 
 
 def acceptance(uav: list[dict], ideal: list[dict]) -> list[dict[str, Any]]:
-    """Evaluate every acceptance criterion against the paired rows.
-
-    A criterion with no data to judge it on fails rather than passing silently: an absent
-    measurement is not evidence of safety.
-    """
+    """Evaluate every acceptance criterion against the paired rows."""
     results = []
     if not uav:
         return [check("paired runs present", False, "no run id appears as both uav and ideal")]

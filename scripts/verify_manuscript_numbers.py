@@ -1,8 +1,7 @@
-"""Check numerical claims in the manuscript against the frozen T=150 bundle.
+"""
+Check numerical claims in the manuscript against the frozen T=150 bundle.
 
-Run from the repository root:
-
-    uv run python scripts/verify_manuscript_numbers.py
+uv run python scripts/verify_manuscript_numbers.py
 """
 
 import collections

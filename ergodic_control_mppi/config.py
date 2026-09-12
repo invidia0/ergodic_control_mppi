@@ -117,18 +117,17 @@ def _generate_obstacles(
 
 
 def load_config(path: str | Path) -> AppConfig:
-    """Read and validate a YAML configuration exactly once.
-
+    """
+    Read and validate a YAML configuration exactly once.
+    
     Args:
-        path: YAML file using the repository controller schema.
-
+            path: YAML file using the repository controller schema.
     Returns:
-        Immutable run and controller parameters.
-
+            Immutable run and controller parameters.
     Raises:
-        ValueError: If a required value is missing, malformed, non-finite, or
-            outside its supported range.
-        OSError: If ``path`` cannot be read.
+            ValueError: If a required value is missing, malformed, non-finite, or
+                outside its supported range.
+            OSError: If ``path`` cannot be read.
     """
     with Path(path).open("r", encoding="utf-8") as stream:
         raw = yaml.safe_load(stream)
@@ -144,17 +143,14 @@ def load_config(path: str | Path) -> AppConfig:
     model_raw = _mapping(raw, "model")
     model_specific = _mapping(model_raw, "double_integrator", "model")
 
-    for removed in ("dim_x", "dim_u"):
-        if removed in mppi_raw:
-            raise ValueError(f"Config key 'mppi.{removed}' was removed; the model dimensions are fixed")
+    for unknown in ("dim_x", "dim_u"):
+        if unknown in mppi_raw:
+            raise ValueError(f"Unknown config key 'mppi.{unknown}'; model dimensions are not YAML knobs")
     if "stein" in raw:
-        raise ValueError(
-            "Config section 'stein' was renamed to 'reference' when the Stein operator was "
-            "replaced by the potential-gradient field; port the block rather than renaming it"
-        )
+        raise ValueError("Unknown config section 'stein'; use 'reference'")
     if "weight_pdf" in field_raw:
-        raise ValueError("Config key 'reference.weight_pdf' was removed because it was inactive")
-    for removed in (
+        raise ValueError("Unknown config key 'reference.weight_pdf'")
+    for unknown in (
         "memory_mode",
         "memory_decay",
         "deficit_gate",
@@ -163,47 +159,43 @@ def load_config(path: str | Path) -> AppConfig:
         "repulsion_weight",
         "spiral_weight",
     ):
-        if removed in field_raw:
+        if unknown in field_raw:
             raise ValueError(
-                f"Config key 'reference.{removed}' was removed with the two-scale memory "
-                "term; use reference.memory_time, reference.memory_balance and "
-                "reference.memory_gain"
+                f"Unknown config key 'reference.{unknown}'; use reference.memory_time, "
+                "reference.memory_balance and reference.memory_gain"
             )
-    # Withdrawn with the Stein path. These RAISE rather than being silently ignored: a
-    # stale profile that still sets `theta` would otherwise load, fly a different field
-    # from the one it describes, and be compared against arms it is not comparable with.
-    for removed, reason in (
-        ("theta", "the rotation was removed; R(theta) = I is what makes the field a gradient"),
-        ("curl_boost", "the scheduled curl was removed with the rotation"),
-        ("ell_self", "the median-heuristic bandwidth was removed; use reference.fine_bandwidth"),
-        ("attraction", "the Stein attraction was removed; the score branch is the only one"),
-        ("memory_scales", "the scale bank was removed; fine_bandwidth is the only scale"),
-        ("coarse_bandwidth", "the scale bank was removed; fine_bandwidth is the only scale"),
-        ("service_penalty", "superseded by reference.release_ratio, derived per mode"),
-        ("plan_repulsion", "plan self-repulsion is always on; reference.plan_gain = 0 disables it"),
-        ("ensemble_subsample", "the Stein ensemble was removed"),
-        ("flow_iterations", "the Stein flow was removed"),
-        ("flow_step", "the Stein flow was removed"),
+    for unknown in (
+        "theta",
+        "curl_boost",
+        "ell_self",
+        "attraction",
+        "memory_scales",
+        "coarse_bandwidth",
+        "service_penalty",
+        "plan_repulsion",
+        "ensemble_subsample",
+        "flow_iterations",
+        "flow_step",
     ):
-        if removed in field_raw:
-            raise ValueError(f"Config key 'reference.{removed}' was removed: {reason}")
-    for renamed, replacement in (
+        if unknown in field_raw:
+            raise ValueError(f"Unknown config key 'reference.{unknown}'")
+    for unknown, replacement in (
         ("repulsion_bandwidth", "fine_bandwidth"),
         ("spiral_bandwidth", "fine_bandwidth"),
         ("weight_stein", "weight_track"),
         ("flow_weight", "weight_track"),
     ):
-        if renamed in field_raw:
+        if unknown in field_raw:
             raise ValueError(
-                f"Config key 'reference.{renamed}' was renamed to 'reference.{replacement}'"
+                f"Unknown config key 'reference.{unknown}'; use 'reference.{replacement}'"
             )
     if "history_len" in mppi_raw:
-        raise ValueError("Config key 'mppi.history_len' was removed with multi-robot support")
-    for removed in ("ell_x", "alpha_cross"):
-        if removed in field_raw:
-            raise ValueError(f"Config key 'reference.{removed}' was removed with multi-robot support")
+        raise ValueError("Unknown config key 'mppi.history_len'")
+    for unknown in ("ell_x", "alpha_cross"):
+        if unknown in field_raw:
+            raise ValueError(f"Unknown config key 'reference.{unknown}'")
     if "robots" in raw:
-        raise ValueError("Config key 'robots' was removed; this controller is single-robot only")
+        raise ValueError("Unknown config key 'robots'; this controller is single-robot")
 
     seed = _integer(raw.get("seed", 0), "seed")
     resolution = _number(_required(map_raw, "resolution", "map"), "map.resolution", 1e-12)
@@ -374,6 +366,7 @@ def load_config(path: str | Path) -> AppConfig:
     workspace = WorkspaceParams(
         x_limits=jnp.asarray(map_x),
         y_limits=jnp.asarray(map_y),
+        extra_limits=jnp.zeros((0, 2), dtype=jnp.float32),
         out_of_map_cost=_number(_required(map_raw, "oom_cost", "map"), "map.oom_cost", 0.0),
         obstacles=_generate_obstacles(
             obstacle_count, obstacle_x, obstacle_y, radius_min, radius_max, obstacle_seed

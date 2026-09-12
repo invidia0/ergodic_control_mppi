@@ -9,12 +9,13 @@ from ergodic_control_mppi.models.double_integrator import DoubleIntegratorParams
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Non-controller simulation settings.
-
+    """
+    Non-controller simulation settings.
+    
     Attributes:
-        seed: JAX random seed.
-        steps: Number of closed-loop control steps.
-        resolution: Visualization grid resolution in workspace units.
+            seed: JAX random seed.
+            steps: Number of closed-loop control steps.
+            resolution: Visualization grid resolution in workspace units.
     """
 
     seed: int
@@ -25,7 +26,7 @@ class RunConfig:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class GMMParams:
-    """Precomputed terms for a two-dimensional Gaussian mixture."""
+    """Precomputed terms for a Gaussian mixture in ``R^d``."""
 
     means: jax.Array
     covariance: jax.Array
@@ -37,17 +38,7 @@ class GMMParams:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FieldParams:
-    """The reference potential field and its service gate.
-
-    Three terms, all gradients of explicit potentials in the query position: the
-    analytic score of the (possibly deficit-bent) target, KDE repulsion from the
-    fading memory of executed positions, and KDE repulsion of the plan from itself.
-    One bandwidth ``fine_bandwidth`` governs both kernels, so ``memory_gain`` and
-    ``plan_gain`` are commensurate under the shared ``sqrt(he/2)`` gauge.
-
-    There is no rotation. ``R(theta) grad Phi`` is not a gradient unless
-    ``R = I``, and the potential is the point.
-    """
+    """The reference potential field and its service gate."""
 
     track_weight: float
     fine_bandwidth: float
@@ -93,18 +84,16 @@ class MPPIParams:
 class WorkspaceParams:
     """Workspace boundaries, obstacle geometry, and constraint costs.
 
-    The occupancy grid is a runtime input rather than a YAML knob: offline runs leave
-    it empty and keep the circular-obstacle behavior unchanged, while a deployment
-    supplies a rasterized map. Both sources are charged ``obstacle_cost``.
-
     Attributes:
-        grid: Occupancy with shape ``(H, W)``, ``1.0`` where blocked, empty when unused.
-        grid_origin: World coordinates of the lower-left corner of cell ``(0, 0)``.
+        extra_limits: Bounds for axes after ``x, y``, shape ``(d - 2, 2)``; empty when planar.
+        grid: Occupancy ``(H, W)`` or volume ``(Z, H, W)``, last axis first; empty when unused.
+        grid_origin: World coordinates of the lowest corner of cell ``(0, ...)``.
         grid_resolution: Grid cell size in workspace units.
     """
 
     x_limits: jax.Array
     y_limits: jax.Array
+    extra_limits: jax.Array
     out_of_map_cost: float
     obstacles: jax.Array
     obstacle_cost: float

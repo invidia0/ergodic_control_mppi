@@ -1,24 +1,7 @@
-"""Fly one seed per arm in the empty workspace and record what Sec. III-D/E need to draw.
+"""
+Fly one seed per arm in the empty workspace and record what Sec. III-D/E need to draw.
 
-Promoted from the scratch capture harness. It re-uses the baselines scenario builder, so a
-drawn path is the same measurement the CSVs score -- nothing here feeds a number, it only
-draws, but it must draw the controller that the numbers describe.
-
-Beyond the executed path it records two things ``run_single`` does not return:
-
-* the **plan** at one frozen step, together with the memory buffer and service mass at that
-  step, which is everything ``field.potential`` needs to evaluate ``Phi`` on a grid. That is
-  what lets ``fig_plan_gain`` put a potential contour under the trajectory -- only possible
-  because the field is a gradient.
-* the **service mass** every ``--stride`` steps. ``sigma_j`` and the bent ``log w_j`` are
-  pure functions of it, so the time series in ``fig_service_gate`` is recomputed offline
-  rather than instrumented into the control loop.
-
-The open tier only: both figures exist to show mechanism, and in clutter any shape is
-partly attributable to obstacle avoidance.
-
-    uv run python scripts/mechanism_captures.py --out results/report/captures \\
-        --axis plan_gain --levels 0,3,6,10
+uv run python scripts/mechanism_captures.py --out results/report/captures \
 """
 
 import argparse

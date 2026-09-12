@@ -172,7 +172,7 @@ def load_literature_comparison_config(path: str | Path) -> LiteratureComparisonC
         raise ValueError("literature comparison config must be a YAML mapping")
 
     output_csv_path = str(
-        cfg.get("output_csv_path", "results/dars2026/literature/literature_comparison.csv")
+        cfg.get("output_csv_path", "results/literature/literature_comparison.csv")
     )
     summary_csv_default = str(Path(output_csv_path).with_name(Path(output_csv_path).stem + "_summary.csv"))
     convergence_csv_default = str(

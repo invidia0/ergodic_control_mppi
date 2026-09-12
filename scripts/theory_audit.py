@@ -1,20 +1,8 @@
-"""Measure every quantity Sec. "guarantees" names, on the campaign maps it is claimed for.
+"""
+Measure every quantity Sec. "guarantees" names, on the campaign maps it is claimed for.
 
-The analysis is one chain of inequalities, and each link has two computable sides:
-
-    eps_avg, eps_FM --Prop.4--> eps_track --Thm.2--> TV(rho*, p*) --Prop.3--> E_K
-
-This driver flies the shipped profile on the campaign's nine pillar fields, records the
-per-step error budget by strided replay, and scores each cell's stationary coverage error in
-the *ball* metric the propositions are actually stated in. It reports both sides of every
-inequality plus the slack, so the paper can say where the budget is spent and where the
-bounds are loose rather than merely asserting they hold.
-
-    uv run python scripts/theory_audit.py run          # the audit, resumable
-    uv run python scripts/theory_audit.py assumptions  # the exactly-checkable conditions
-
-Branch discipline is the campaign's: every cell compared against another must come from one
-lane width, so a partial resume at a different width is refused rather than pooled.
+uv run python scripts/theory_audit.py run          # the audit, resumable
+uv run python scripts/theory_audit.py assumptions  # the exactly-checkable conditions
 """
 
 import argparse
@@ -77,27 +65,8 @@ FIELDS = [
 def coverage_terms(
     positions: np.ndarray, arrays, limits_x, limits_y
 ) -> dict[str, float]:
-    """Score one trajectory's stationary coverage error and every Prop. 3 bound.
-
-    The bound is the *lens* bound, not the sup bound. Writing ``mu = rho* - p*`` for the
-    signed difference and expanding the ball integral as a convolution of indicators,
-
-        int_Omega mu(B(z,r))^2 dz = iint |Omega cap B(x,r) cap B(y,r)| dmu(x) dmu(y)
-                                  <= pi_d r^d |mu|(Omega)^2 = 4 pi_d r^d TV^2,
-
-    since the lens kernel is a positive-definite convolution of indicators and the integrand
-    is non-negative, so restricting to ``Omega`` only lowers it. Integrating ``r`` over
-    ``[0, R]`` gives ``(4 pi_d R^(d+1) / (d+1)) TV^2``. Two things follow: at ``d = 2``,
-    ``R = 5`` the constant is ``4 pi R^3 / 3 = 524`` against the sup bound's ``|Omega| R``
-    = 4000, a 7.6x tightening; and the workspace area drops out entirely, so the bound no
-    longer degrades as ``Omega`` grows.
-
-    The text then rewrites that via the TV--L1 identity and relaxes it via Pinsker. Those
-    are *not* three independent bounds: since ``TV = ||.||_1 / 2`` whenever a density
-    exists, the L1 form is the TV bound in other symbols -- equal here to machine precision,
-    which ``bound_l1_matches_tv`` asserts rather than merely reporting twice. Only KL is a
-    distinct functional, and being a Pinsker *relaxation* of the same bound it can never be
-    tighter; measured, it is 3--4x looser. So TV is the best of the three, not the worst.
+    """
+    Score one trajectory's stationary coverage error and every Prop. 3 bound.
     """
     target = np.asarray(arrays["target_grid"], dtype=np.float64)
     mask = np.asarray(arrays["reachable_mask"], dtype=bool)
@@ -263,14 +232,8 @@ def append_rows(output: Path, rows: list[dict]) -> None:
 
 
 def dispersed_initial_state(arrays, entry, seed: int, arguments, config) -> np.ndarray:
-    """Pick this lane's start. With ``--inits 1`` (default) every lane keeps the archived one.
-
-    Thm. 1 claims convergence "for every initial reduced state", but a campaign that starts
-    every lane from one point cannot see that -- it varies only the noise. With ``--inits n``
-    the seeds are partitioned into ``n`` groups, each given a different free-space start, so
-    between-init and within-init spread can be compared at equal K. The lane *count* is
-    untouched, which keeps the vmap width, and therefore the numerical branch, identical to
-    every group already collected.
+    """
+    Pick this lane's start. With ``--inits 1`` (default) every lane keeps the archived one.
     """
     state = np.asarray(arrays["initial_state"], dtype=np.float64).copy()
     start_index = getattr(arguments, "start_index", None)
@@ -438,14 +401,8 @@ def _inside_obstacle_fraction(positions, arrays, limits_x, limits_y) -> float:
 
 
 def ideal(arguments) -> None:
-    """Fly the As. 7 comparison kernel and ask whether its visitation law is ``p*``.
-
-    Cor. "flow_matching_consistency" says perfect tracking gives exact coverage. That rests
-    entirely on As. 7's clause that P_0's invariant measure has spatial marginal ``p*``, which
-    the paper states and does not establish. This flies a controller with ``eps_track``
-    identically zero and measures the TV its stationary law actually realizes against ``p*``.
-    A value near zero supports the clause; a value near the flown controller's says perfect
-    tracking would *still* miss, and the corollary is idealizing away nothing.
+    """
+    Fly the As. 7 comparison kernel and ask whether its visitation law is ``p*``.
     """
     prepared = audit_inputs(arguments, "ideal")
     if prepared is None:
@@ -554,10 +511,8 @@ def _coarsen(grid: np.ndarray, factor: int, how: str) -> np.ndarray:
 
 def _tv(positions: np.ndarray, target: np.ndarray, mask: np.ndarray,
         limits_x, limits_y) -> float:
-    """TV between a path's binned occupancy and the target, both restricted and renormalized.
-
-    Same convention as :func:`coverage_terms`, so a sweep value at the native resolution
-    reproduces the ``tv`` column rather than merely resembling it.
+    """
+    TV between a path's binned occupancy and the target, both restricted and renormalized.
     """
     bins = (target.shape[1], target.shape[0])
     occupancy = compute_team_occupancy_grid(positions, limits_x, limits_y, bins)
@@ -569,21 +524,16 @@ def _tv(positions: np.ndarray, target: np.ndarray, mask: np.ndarray,
 
 
 def verified_paths(arguments, kind: str):
-    """Load a ``*_paths.npz`` and prove it came from the CSV and inputs sitting beside it.
-
-    Every offline consumer of the recorded trajectories has to answer the same question --
-    are these positions the ones this CSV, this manifest and these maps describe? -- so the
-    check lives here rather than once per subcommand.
-
+    """
+    Load a ``*_paths.npz`` and prove it came from the CSV and inputs sitting beside it.
+    
     Args:
-        arguments: Parsed command line; uses ``paths``, ``maps`` and ``config``.
-        kind: Subcommand name, used only in the error messages.
-
+            arguments: Parsed command line; uses ``paths``, ``maps`` and ``config``.
+            kind: Subcommand name, used only in the error messages.
     Returns:
-        The opened ``npz`` bundle.
-
+            The opened ``npz`` bundle.
     Raises:
-        ValueError: If the receipt, the CSV, the manifest or the configs disagree.
+            ValueError: If the receipt, the CSV, the manifest or the configs disagree.
     """
     bundle = np.load(arguments.paths, allow_pickle=False)
     source_csv = arguments.paths.with_name(arguments.paths.stem.removesuffix("_paths") + ".csv")
@@ -605,21 +555,8 @@ def verified_paths(arguments, kind: str):
 
 
 def sweep(arguments) -> None:
-    """Map the TV estimator's bias over (grid resolution, K), and bracket the true value.
-
-    Three independent handles on the same question, in increasing strength:
-
-    * a **planted null** -- draw K iid samples from ``p*`` itself, where the answer is known
-      to be zero, so whatever the pipeline reports is pure bias. Understates the bias for a
-      correlated path, which is why it is not the last word;
-    * a **split-half** between seeds -- two runs on one map both sample the same stationary
-      law, so the TV between them is sampling noise carrying the real autocorrelation, and
-      ``p*`` never enters. No model, no fit;
-    * a **K-ladder by prefix** -- the first K steps of one trajectory *are* the estimator at
-      sample size K, so one deep run gives the whole ladder with no run-to-run variation.
-
-    The triangle inequality then brackets the quantity the theorems name:
-    ``|TV(rho_K, p*) - TV(rho*, p*)| <= TV(rho_K, rho*)``, the last estimated by split-half.
+    """
+    Map the TV estimator's bias over (grid resolution, K), and bracket the true value.
     """
     bundle = verified_paths(arguments, "sweep")
     out = arguments.output
@@ -743,28 +680,8 @@ DISCREPANCY_FIELDS = [
 
 
 def discrepancy(arguments) -> None:
-    """Score the discrepancy bound on recorded trajectories, offline and without a controller.
-
-    This is the viability check for a discrepancy-descent theory: ``E_n``, the witness gap
-    ``delta_n`` and the accumulated bound are all functions of an executed path, so they can
-    be measured on the shipped controller before anything is rewritten to descend them. The
-    three questions it answers are the ones a claimed bound has to survive -- does it hold on
-    every prefix, does it beat the bound any two probability measures already satisfy, and is
-    it loose by a usable factor rather than an unusable one.
-
-    **What is certified.** The target is the discrete measure the rest of this audit's
-    metrics use: ``target_grid`` restricted to ``reachable_mask`` -- the flood-fill
-    *reachable component* from the arming position (`deploy/grid.py` ``metric_reachable_mask``),
-    not merely the cells outside every obstacle -- and renormalized. Every target integral
-    is then a finite weighted sum over that support, and the witness minimum is an
-    enumeration over it, so the reported numbers are exact for the declared target up to
-    floating-point arithmetic. Nothing here is a quadrature estimate and no grid correction
-    enters the certified series; the metric grid does not approximate the minimization, it
-    defines the target. A claim about the *continuous* truncated mixture would need a proven
-    discretization-error bound, which this audit does not make.
-
-    The path is read at ``--stride``, so ``rho_n`` is the empirical measure of the audited
-    samples and ``delta_n`` is the gap at an audited step, matching how the bound is stated.
+    """
+    Score the discrepancy bound on recorded trajectories, offline and without a controller.
     """
     bundle = verified_paths(arguments, "discrepancy")
     out = arguments.output
@@ -869,11 +786,8 @@ def discrepancy(arguments) -> None:
 
 
 def discrepancy_figures(output: Path, rows, series, cache, positions, stride) -> list[Path]:
-    """Render the two audit figures for the first lane, from the audit's own arrays.
-
-    The shipped path for these figures: everything drawn comes from what the audit just
-    computed and saved, so a reviewer replots them from the bundle rather than from a
-    one-off script that rebuilds the target its own way.
+    """
+    Render the two audit figures for the first lane, from the audit's own arrays.
     """
     from ergodic_control_mppi.plotting import style
     from ergodic_control_mppi.plotting.discrepancy import bound_figure, mechanism_figure

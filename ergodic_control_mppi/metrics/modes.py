@@ -1,11 +1,4 @@
-"""Target-mode visit, dwell, and cycling metrics.
-
-The metrics are experiment independent: mode geometry comes from the mixture itself, so
-the same code applies to any configured density. Membership uses Mahalanobis distance
-with hysteresis, which keeps a path that lingers on a mode boundary from generating a
-burst of spurious visits, and a minimum dwell, which keeps a fast transit through a mode
-from counting as coverage of it.
-"""
+"""Target-mode visit, dwell, and cycling metrics."""
 
 import numpy as np
 
@@ -20,11 +13,8 @@ def _mahalanobis(positions: np.ndarray, means: np.ndarray, inverses: np.ndarray)
 
 
 def _assign(distances: np.ndarray, enter_sigma: float, exit_sigma: float) -> np.ndarray:
-    """Assign each sample to a mode, holding the previous mode until it is released.
-
-    A new mode is entered when its distance drops to ``enter_sigma``; the current mode is
-    kept until its distance exceeds ``exit_sigma``. Between the two thresholds the
-    assignment is sticky, which is what removes boundary chatter.
+    """
+    Assign each sample to a mode, holding the previous mode until it is released.
     """
     labels = np.full(distances.shape[0], _UNASSIGNED, dtype=np.int64)
     nearest = np.argmin(distances, axis=1)
@@ -58,22 +48,22 @@ def compute_mode_metrics(
     exit_sigma: float = 2.5,
     min_dwell: float = 1.0,
 ) -> dict[str, float]:
-    """Summarize how a path visits, dwells in, and cycles through the target modes.
-
+    """
+    Summarize how a path visits, dwells in, and cycles through the target modes.
+    
     Args:
-        positions: Executed positions with shape ``(N, 2)``.
-        means: Mode centers with shape ``(M, 2)``.
-        covariance_inverses: Inverse mode covariances with shape ``(M, 2, 2)``.
-        delta_t: Control timestep in seconds.
-        enter_sigma: Mahalanobis distance at which a mode is entered.
-        exit_sigma: Mahalanobis distance at which the current mode is released.
-        min_dwell: Seconds a stretch must last before it counts as a visit.
-
+            positions: Executed positions with shape ``(N, 2)``.
+            means: Mode centers with shape ``(M, 2)``.
+            covariance_inverses: Inverse mode covariances with shape ``(M, 2, 2)``.
+            delta_t: Control timestep in seconds.
+            enter_sigma: Mahalanobis distance at which a mode is entered.
+            exit_sigma: Mahalanobis distance at which the current mode is released.
+            min_dwell: Seconds a stretch must last before it counts as a visit.
     Returns:
-        Mapping with ``mode_visits``, ``mode_switches``, ``mode_revisits``,
-        ``mode_dwell_median_s``, ``mode_dwell_total_s``, ``mode_transitions``,
-        ``mode_cycles``, ``first_all_modes_s`` (NaN if never reached), and
-        ``in_mode_fraction``.
+            Mapping with ``mode_visits``, ``mode_switches``, ``mode_revisits``,
+            ``mode_dwell_median_s``, ``mode_dwell_total_s``, ``mode_transitions``,
+            ``mode_cycles``, ``first_all_modes_s`` (NaN if never reached), and
+            ``in_mode_fraction``.
     """
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
     means = np.asarray(means, dtype=np.float64).reshape(-1, 2)

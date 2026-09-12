@@ -1,9 +1,4 @@
-"""Checks that the closed-loop analysis' inequalities hold on the loop they describe.
-
-These are the executable half of the paper's Sec. "guarantees": each test asserts one
-statement's inequality on real planning steps, so a change that breaks the analysis' premises
-fails here rather than in a reviewer's reading.
-"""
+"""Regressions for closed-loop theory-audit inequalities."""
 
 import tempfile
 import unittest
@@ -76,7 +71,7 @@ class ExecutedTrackingBoundTest(unittest.TestCase):
             # representation does not have; four ulps is what the arithmetic can carry.
             tolerance = 4.0 * float(np.spacing(np.float32(row.eps_track)))
             self.assertAlmostEqual(
-                row.rhs_k0 - row.eps_track, row.jensen_slack, delta=tolerance
+                row.eps_fm_k0 - row.eps_track, row.jensen_slack, delta=tolerance
             )
 
     def test_averaging_gap_vanishes_under_a_convex_update(self):
@@ -305,7 +300,7 @@ class IdealFlowKernelTest(unittest.TestCase):
 
     def test_executed_velocity_equals_the_reference_field(self):
         from ergodic_control_mppi.experiments.theory_audit import ideal_step
-        from ergodic_control_mppi.mppi.core import _rollouts, reference_flow, sample_epsilon
+        from ergodic_control_mppi.mppi.core import _rollouts, reference_velocity, sample_epsilon
 
         with tempfile.TemporaryDirectory() as directory:
             params = _params(directory)
@@ -325,7 +320,7 @@ class IdealFlowKernelTest(unittest.TestCase):
             origin = carry.state[:2]
             initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2))
             evaluation = jnp.concatenate((initial, sampled[:, :-1]), axis=1)
-            flow = reference_flow(params, evaluation, carry.memory, carry.service_mass)[0]
+            velocity = reference_velocity(params, evaluation, carry.memory, carry.service_mass)[0]
 
             # eps_track is zero for this kernel wherever the projection is inactive: the
             # executed spatial velocity IS the reference. If this drifts, the "ideal" run is
@@ -333,10 +328,10 @@ class IdealFlowKernelTest(unittest.TestCase):
             # starts at the origin and moves 3.6 cm, so no constraint is anywhere near active.
             executed = (nxt.state[:2] - origin) / params.model.delta_t
             np.testing.assert_allclose(
-                np.asarray(executed), np.asarray(flow), rtol=1e-6, atol=1e-6
+                np.asarray(executed), np.asarray(velocity), rtol=1e-6, atol=1e-6
             )
             np.testing.assert_allclose(
-                np.asarray(nxt.state[2:4]), np.asarray(flow), rtol=1e-6, atol=1e-6
+                np.asarray(nxt.state[2:4]), np.asarray(velocity), rtol=1e-6, atol=1e-6
             )
 
     def test_memory_records_the_executed_position(self):

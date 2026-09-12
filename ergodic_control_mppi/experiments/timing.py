@@ -1,21 +1,4 @@
-"""Per-stage timing of one MPPI step, and cost scaling in K, T, P, Q.
-
-The closed loop is a single ``jax.jit`` around a single ``lax.scan``
-(simulation.py:91), so per-stage cost cannot be recovered by wrapping Python
-calls. Two independent measurements, reported side by side:
-
-1. Micro-benchmarks -- each stage jitted on its own and timed with an explicit
-   ``block_until_ready()``. Their sum is compared against the jitted whole step;
-   the difference is reported as ``residual``, not absorbed.
-2. End-to-end differencing -- ``memory_length=2`` makes the occupancy KDE
-   negligible *without* removing the code path (``memory_gain`` is a runtime
-   value, so XLA cannot eliminate it), isolating the shared rollout cost.
-
-A reporting script, never a test gate.
-
-    python -m ergodic_control_mppi.experiments.timing --device gpu
-    python -m ergodic_control_mppi.experiments.timing --scaling --device gpu
-"""
+"""Per-stage timing of one MPPI step, and cost scaling in K, T, P, Q."""
 
 from __future__ import annotations
 
@@ -124,8 +107,7 @@ def measure_stages(
     )
 
     sample_fn = jax.jit(lambda k, p: sample_epsilon(k, p)[0])
-    # The attraction is pointwise now, so it is O(T) rather than the Stein path's O(T^2).
-    # The quadratic block moved to the plan self-repulsion, which is timed separately.
+    # Attraction is pointwise O(T); plan self-repulsion is the O(T^2) kernel.
     attraction_fn = jax.jit(score_pdf)
     plan_fn = jax.jit(kde_repulsion)
     memory_fn = jax.jit(memory_flow)
@@ -191,11 +173,7 @@ def measure_scaling(
     device: str = "auto",
     repeats: int = 60,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Per-step cost against each of K, T and P, one axis at a time.
-
-    P is swept through ``mppi.memory_length`` directly rather than through
-    ``memory_time``, so gamma is held fixed and only the truncation moves.
-    """
+    """Per-step cost against each of K, T and P, one axis at a time."""
     sweeps = {
         "K": ("mppi.K", [125, 250, 500, 1000, 2000, 4000]),
         "T": ("mppi.T", [50, 100, 150, 200, 350, 500, 700]),
@@ -228,13 +206,14 @@ def measure_scaling(
 
 def measure_endtoend(config_path: str | Path = DEFAULT_CONFIG, device: str = "auto",
                      steps: int = 2000, repeats: int = 200) -> dict[str, Any]:
-    """Measure warmed synchronous controller calls, including transfer of the applied control.
-
+    """
+    Measure warmed synchronous controller calls, including transfer of the applied control.
+    
     Args:
-        config_path: Frozen configuration for this session.
-        device: Requested execution device.
-        steps: Untimed warmup steps on each measured configuration.
-        repeats: Number of synchronized measured calls, excluding compilation.
+            config_path: Frozen configuration for this session.
+            device: Requested execution device.
+            steps: Untimed warmup steps on each measured configuration.
+            repeats: Number of synchronized measured calls, excluding compilation.
     """
     from ergodic_control_mppi.mppi.single import initialize_single, single_step
 

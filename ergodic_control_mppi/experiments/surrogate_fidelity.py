@@ -1,27 +1,6 @@
-r"""Measure what the median-source surrogate costs, instead of assuming it costs something.
+"""Measure surrogate-vs-faithful reference-flow cost at each planning step.
 
-:func:`ergodic_control_mppi.mppi.core.reference_flow` does not build eq. (25) at each rollout's own
-states. It evaluates it once on one representative path -- the per-horizon-step median over
-rollouts -- and broadcasts the resulting ``(T, 2)`` field to every rollout. That median path
-is also the plan the self-repulsion term repels from. Both are a compression: the paper's
-``eps_comp``.
-
-The compression is only visible to MPPI through the *ranking* it induces over rollouts,
-since the weights are a softmax of the costs and a monotone re-labelling of every cost leaves
-the update unchanged. So the quantity that matters is the rank correlation between
-
-    surrogate:  S_track(v* on the median path, broadcast to all rollouts)   shape (K,)
-    faithful:   S_track(v* queried at each rollout's own states)            shape (K,)
-
-not the pointwise field error. This module computes both on real planning steps of the
-deployed profile and reports Spearman rho between them.
-
-Why the rollout count is swept rather than fixed at the deployed ``N=250``: the faithful
-field is ``K`` evaluations of a field whose plan term is ``O(T^2)``, against the surrogate's
-one, which is the reason the surrogate exists. The sweep covers the range where the faithful
-field is affordable, and any claim made from it must state that range.
-
-    uv run python -m ergodic_control_mppi.experiments.surrogate_fidelity
+uv run python -m ergodic_control_mppi.experiments.surrogate_fidelity
 """
 
 from typing import NamedTuple
@@ -44,26 +23,16 @@ from ergodic_control_mppi.parameters import ControllerParams
 
 
 class StepFidelity(NamedTuple):
-    """One planning step's surrogate-vs-faithful comparison.
+    """Surrogate-vs-faithful comparison for one planning step.
 
     Attributes:
-        spearman: Rank correlation between the two per-rollout *flow* cost vectors. This
-            isolates the compression: it is the surrogate's effect on the only term it
-            touches, before the task costs and ``track_weight`` are applied.
-        pearson: Linear correlation of the same two vectors, on the raw cost scale.
-        weight_tv: Total-variation distance between the two weight simplices MPPI would
-            actually form -- the *total* rollout cost at the step's own temperature. This is
-            the operational number: it is how differently the two fields steer the update.
-        field_rmse: RMS difference between the two flow fields at the rollout states, m/s.
-        cost_scale: RMS of the faithful cost vector, for reading ``field_rmse`` against.
-        ess_fraction: effective sample fraction of the faithful weights. Reported because
-            ``weight_tv`` is only informative when the weights are actually concentrated --
-            two near-uniform simplices agree trivially. The profile targets 0.3.
-        control_gap: ``||u_surrogate - u_faithful||`` for the control the step would execute,
-            as a fraction of the linear acceleration bound. This is the end of the chain and
-            the only quantity the vehicle sees: when the weights are near one-hot, a
-            ``weight_tv`` of 1 means only that a different rollout won, which two rollouts
-            proposing the same command render irrelevant.
+        spearman: Rank correlation of per-rollout flow costs.
+        pearson: Linear correlation of flow costs.
+        weight_tv: Total-variation distance between MPPI weight simplices.
+        field_rmse: RMS flow-field difference at rollout states (m/s).
+        cost_scale: RMS faithful cost vector magnitude.
+        ess_fraction: Effective sample fraction of faithful weights.
+        control_gap: Control difference as a fraction of the acceleration bound.
     """
 
     spearman: float
@@ -81,24 +50,14 @@ def faithful_reference_flow(
     memory: jax.Array,
     service_mass: jax.Array | None = None,
 ) -> jax.Array:
-    """Return the reference field queried at each rollout's own states, shape ``(K, T, 2)``.
-
-    :func:`field_at` verbatim -- the same call the controller makes, with the median path
-    replaced by each rollout's own states in *both* roles it plays. Two things change:
-
-    * the query set, so the score, the memory repulsion and the speed schedule are all read
-      where that rollout actually goes rather than where the median path goes;
-    * the plan the plan-repulsion term repels from, which for a given rollout is its own
-      horizon rather than the shared median.
-
-    Nothing is transcribed, so this cannot drift from the control path. It is
-    ``O(K)`` calls of the deployed field rather than one, which is the whole reason the
-    surrogate exists.
-    """
+    """Return the reference field at each rollout state, shape ``(K, T, d)``."""
     return jax.lax.map(
         lambda states: field_at(params, states, states, memory, service_mass),
         evaluation_positions,
     )
+
+
+faithful_reference_velocity = faithful_reference_flow
 
 
 def step_fidelity(
@@ -109,8 +68,9 @@ def step_fidelity(
     task_costs, sampled_controls, sampled_positions = _rollouts(
         params, carry.state, carry.controls, epsilon, carry.temperature
     )
-    origin = carry.state[:2]
-    initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, 2))
+    d = params.gmm.means.shape[-1]
+    origin = carry.state[:d]
+    initial = jnp.broadcast_to(origin, (params.mppi.samples, 1, d))
     evaluation = jnp.concatenate((initial, sampled_positions[:, :-1]), axis=1)
     displacements = sampled_positions - evaluation
 
@@ -192,16 +152,11 @@ def fidelity_walk(
     stride: int,
     preflight_steps: int = 0,
 ) -> jax.Array:
-    """Fly one closed loop, comparing the two costs every ``stride`` steps.
-
-    Same nested-scan shape as
-    :func:`ergodic_control_mppi.experiments.theory_audit.residual_walk`, and the same caveat:
-    this is a different numerical branch than ``run_single``, so the path here is not that
-    call's path from the same key. It does not matter -- both cost vectors are read off the
-    *same* cloud at every measured step, so each comparison is internally exact.
-
+    """
+    Fly one closed loop, comparing the two costs every ``stride`` steps.
+    
     Returns:
-        Array of shape ``(steps // stride, 5)``, columns ordered as :class:`StepFidelity`.
+            Array of shape ``(steps // stride, 5)``, columns ordered as : class:`StepFidelity`.
     """
     if steps % stride:
         raise ValueError(f"steps {steps} is not divisible by stride {stride}")

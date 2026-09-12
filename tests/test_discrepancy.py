@@ -1,5 +1,4 @@
-"""The executable half of the certificate: it must hold on every prefix, against the
-same discrete target the coverage metrics use."""
+"""Regressions for the occupation-discrepancy certificate."""
 
 import unittest
 

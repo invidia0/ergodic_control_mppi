@@ -1,14 +1,7 @@
-"""Render the opening figure from a trajectory the campaign actually flew.
+"""
+Render the opening figure from a trajectory the campaign actually flew.
 
-The previous opening figure was flown on a 25-pillar map. The campaign uses 10, 15 and 20
-pillars, so that map is in no reported table and the figure showed a run no number in the
-paper describes. This replays one path out of the frozen bundle's `short_paths.npz` instead,
-on the campaign's own map, so the picture and the results are the same experiment.
-
-Replay, not re-flight: the paths are already recorded, so this needs no GPU and cannot drift
-from the bundle the manuscript cites.
-
-    uv run python scripts/teaser_figure.py --obs-num 20 --map-seed 516 --seed 0
+uv run python scripts/teaser_figure.py --obs-num 20 --map-seed 516 --seed 0
 """
 
 import argparse

@@ -1,8 +1,5 @@
-"""Re-run a recorded UAV trial as an ideal offline trial and score it identically.
-
-The point of the pairing is that the only difference between the two rows is the vehicle:
-same map grid, same start state, same seed, same timestep, same density, same controller
-configuration. Any degradation the summary shows is therefore attributable to flying it.
+"""
+Re-run a recorded UAV trial as an ideal offline trial and score it identically.
 """
 
 import argparse
@@ -21,16 +18,16 @@ from ergodic_control_mppi.simulation import run_simulation
 
 
 def pair_run(run_directory: Path, device: str = "auto", summary: Path | None = None) -> dict:
-    """Run the ideal twin of a recorded trial and append its summary row.
-
+    """
+    Run the ideal twin of a recorded trial and append its summary row.
+    
     Args:
-        run_directory: A recorder output directory holding ``manifest.json`` and
-            ``arrays.npz``.
-        device: Requested JAX device selection.
-        summary: Summary CSV to append to; defaults to the recorder's own.
-
+            run_directory: A recorder output directory holding ``manifest.json`` and
+                ``arrays.npz``.
+            device: Requested JAX device selection.
+            summary: Summary CSV to append to; defaults to the recorder's own.
     Returns:
-        The appended row.
+            The appended row.
     """
     manifest = json.loads((run_directory / "manifest.json").read_text(encoding="utf-8"))
     arrays = np.load(run_directory / "arrays.npz", allow_pickle=False)
@@ -126,11 +123,7 @@ def pair_run(run_directory: Path, device: str = "auto", summary: Path | None = N
 
 
 def _resolve_config(manifest: dict) -> Path:
-    """Find the run's config, whether recorded in a container or on this host.
-
-    The manifest's absolute path is the one inside the container, so prefer it only if it
-    exists here and fall back to the workspace-relative form.
-    """
+    """Find the run's config, whether recorded in a container or on this host."""
     for candidate in (manifest.get("config"), manifest.get("config_relative")):
         if candidate and Path(candidate).exists():
             return Path(candidate)

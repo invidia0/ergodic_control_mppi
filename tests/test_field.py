@@ -1,13 +1,4 @@
-"""The reference field, and the one claim the whole theory now rests on.
-
-``mppi/field.py:potential`` writes down a scalar ``Phi`` and asserts that the controller
-tracks ``Gamma_v(grad Phi)``. That is only true if every weight in the three KDE terms is
-constant in the query ``z``, and it is only true because there is no rotation:
-``R(theta) grad Phi`` is not the gradient of anything unless ``R = I``.
-
-:class:`PotentialTest` finite-differences ``Phi`` against the pre-gauge field and fails
-loudly the moment any weight acquires a ``z`` dependence.
-"""
+"""Regressions for the reference potential and its gradient field."""
 
 import tempfile
 import unittest
@@ -19,14 +10,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from ergodic_control_mppi.config import load_config
+from ergodic_control_mppi.mppi.core import field_at
 from ergodic_control_mppi.mppi.field import (
     deficit_weighted,
     kde_repulsion,
-    memory_flow,
+    memory_repulsion,
     per_mode_weighted,
     potential,
     responsibility_gaps,
+    scheduled_speed,
     score_pdf,
+    service_ratio_from_mass,
 )
 from tests.helpers import write_small_config
 
@@ -67,7 +61,7 @@ class PotentialTest(unittest.TestCase):
         flow = score_pdf(
             self.queries, attraction_target(self.params.gmm, field, service_mass)
         )
-        flow += field.memory_gain * memory_flow(
+        flow += field.memory_gain * memory_repulsion(
             self.queries, self.memory, self.recency, self.params.gmm, field, self.floor
         )
         flow += field.plan_gain * gauge * kde_repulsion(
@@ -238,6 +232,35 @@ class ServiceGateTest(unittest.TestCase):
         b = score_pdf(query, deficit_weighted(starved, gmm, ceiling))
         self.assertGreater(float(jnp.abs(a - b).max()), 1e-3,
                            "service mass does not move the score field")
+
+    def test_scheduled_speed_at_the_robot_is_the_gauge(self):
+        """``||field_at||`` at the robot is ``scheduled_speed``, wherever the field is live."""
+        params = replace(
+            self.params,
+            field=replace(
+                self.params.field,
+                reference_speed=1.8,
+                transit_speedup=4.0,
+                dwell_slowdown=1.0,
+                service_floor=0.3,
+            ),
+        )
+        rng = np.random.default_rng(7)
+        memory = jnp.asarray(rng.uniform(-4.0, 4.0, size=(24, 2)), dtype=jnp.float32)
+        plan = jnp.asarray(rng.uniform(-4.0, 4.0, size=(12, 2)), dtype=jnp.float32)
+        mass = jnp.asarray([2.4, 0.4, 0.3], dtype=jnp.float32)[
+            : params.gmm.log_weights.shape[0]
+        ]
+        robot = memory[-1][None, :]
+        gauged = field_at(params, robot, plan, memory, mass)
+        pre = jnp.linalg.norm(gauged, axis=-1)
+        if float(pre[0]) < 1e-3:
+            self.skipTest("pre-gauge field vanished at the robot")
+        sigma = service_ratio_from_mass(mass, memory[-1], params.gmm)
+        speed = scheduled_speed(robot, params.gmm, params.field, sigma)
+        np.testing.assert_allclose(
+            np.asarray(pre), np.asarray(speed), rtol=1e-4, atol=1e-5
+        )
 
 
 class PlanRepulsionTest(unittest.TestCase):

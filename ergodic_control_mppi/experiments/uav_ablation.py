@@ -1,20 +1,7 @@
-"""Offline ablation of the deployment profile on a recorded UAV map.
+"""
+Offline ablation of the deployment profile on a recorded UAV map.
 
-The vehicle is not in the loop here: every arm is the ideal offline controller flying the
-same inflated grid, start state, and horizon that the UAV flew. That isolates controller
-tuning from the deployment, and it is what makes the arms comparable at all -- a UAV run
-answers a different question and costs 30x the wall time.
-
-One row per (arm, seed), not per arm. Aggregates belong in the analysis, not the archive.
-
-Determinism matters more here than anywhere else in the repo. Two arms differing only by a
-kernel choice the XLA autotuner made under different machine load produced trajectories
-16 m apart in this workspace; ``ergodic_control_mppi/__init__`` pins that off, and every
-row records ``device`` because the CPU and GPU backends are individually deterministic but
-disagree with each other.
-
-    uv run python -m ergodic_control_mppi.experiments.uav_ablation \
-        --run-dir results/uav/baseline --seeds 18 --steps 20000
+uv run python -m ergodic_control_mppi.experiments.uav_ablation         --run-dir results/uav/baseline --seeds 18 --steps 20000
 """
 
 import argparse
@@ -69,6 +56,7 @@ ARMS: list[tuple[str, str, Any, dict]] = [
     # lambda: the fading-memory gain. `memory_off` is a necessity row -- it deletes one of
     # the three terms of Phi outright and carries the argument that the term is load-bearing.
     ("memory_off", "memory_gain", 0.0, {"memory_gain": 0.0}),
+    ("gain_5", "memory_gain", 5.0, {"memory_gain": 5.0}),
     ("gain_30", "memory_gain", 30.0, {"memory_gain": 30.0}),
     ("gain_120", "memory_gain", 120.0, {"memory_gain": 120.0}),
     # g: the plan self-repulsion gain. `plan_off` is the second necessity row, and the one
@@ -111,7 +99,11 @@ ARMS: list[tuple[str, str, Any, dict]] = [
     ("service_90", "service_time", 90.0, {"service_time": 90.0}),
     # beta: transit speedup. 1 restores the flat constant-speed gauge exactly.
     ("transit_1", "transit_speedup", 1.0, {"transit_speedup": 1.0}),
+    ("transit_2", "transit_speedup", 2.0, {"transit_speedup": 2.0}),
+    ("transit_6", "transit_speedup", 6.0, {"transit_speedup": 6.0}),
     ("transit_8", "transit_speedup", 8.0, {"transit_speedup": 8.0}),
+    ("dwell_2", "dwell_slowdown", 2.0, {"dwell_slowdown": 2.0}),
+    ("floor_0.15", "service_floor", 0.15, {"service_floor": 0.15}),
     # eps_s: the service floor. One level, because it is a *second* threshold on the same
     # sigma -- half-release at 1 + eps_s = 1.3 -- competing with the demotion's release at
     # sigma* = 2.24. Worth measuring once before deciding whether to pin it.
@@ -141,15 +133,13 @@ ARMS: list[tuple[str, str, Any, dict]] = [
     # m/s against a commanded 1.8. alpha = 1.0 severs the coupling and is the deployed value,
     # so 0.9 is here as the low anchor.
     ("alpha_0.9", "alpha", 0.90, {"alpha": 0.90}),
+    ("alpha_0.95", "alpha", 0.95, {"alpha": 0.95}),
+    ("alpha_0.97", "alpha", 0.97, {"alpha": 0.97}),
     # Fraction of rollouts that ignore the warm start. Zero makes the plan fully committed
     # to its previous solution, which is the regime a long dwell lives in.
     ("explore_0", "exploration", 0.0, {"exploration": 0.0}),
     ("lam_max_1e4", "lam_max", 1e4, {"lam_max": 1e4}),
-    # gamma_track, the weight on the cost that makes a rollout follow +grad Phi. Named for
-    # the parameter and not for `flow_weight`, the config key it used to have: an arm called
-    # `flow_*` in a campaign whose whole point is that the Stein flow was removed reads as a
-    # survivor of it. Nothing Stein-era is swept here -- `config.py` raises on every
-    # withdrawn key.
+    # gamma_track, the weight on the cost that makes a rollout follow +grad Phi.
     ("gamma_1500", "track_weight", 1500.0, {"track_weight": 1500.0}),
     ("gamma_6000", "track_weight", 6000.0, {"track_weight": 6000.0}),
     # reference_speed normalises the field, so only its *direction* matters and this asks
@@ -165,11 +155,8 @@ ARMS: list[tuple[str, str, Any, dict]] = [
 ]
 
 # The campaign's arm set. Selected from ARMS rather than redeclared so an arm name means the
-# same override in every archive. Here it is every arm: the Stein-era table carried
-# diagnostics for hypotheses that have since closed, and the port dropped them rather than
-# spending cells restating dead questions.
+# same override in every archive.
 #
-# 22 mechanism arms and 17 MPPI arms against one baseline. The three necessity rows are
 # `memory_off`, `plan_off` and `release_off` -- one per term of Phi that the argument claims
 # is load-bearing -- and the two `ceiling_*` arms are the pre-registered null.
 FINAL_ARMS = tuple(name for name, *_ in ARMS)
@@ -188,11 +175,7 @@ QUARANTINED_AXES = ("K",)
 
 
 def _apply(config, overrides: dict):
-    """Return the config with one arm's overrides applied.
-
-    ``memory_time`` and ``service_time`` are stored derived (as decays), so they are
-    re-derived here exactly as ``config.py`` does rather than set directly.
-    """
+    """Return the config with one arm's overrides applied."""
     delta_t = config.controller.model.delta_t
     mppi, field = config.controller.mppi, config.controller.field
     workspace = config.controller.workspace

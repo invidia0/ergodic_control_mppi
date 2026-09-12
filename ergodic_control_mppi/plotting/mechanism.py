@@ -1,22 +1,4 @@
-"""Explanatory figures for Sec. III-C, Fading-Memory Coverage Feedback.
-
-Every field, weight and bandwidth drawn here is produced by calling the
-controller's own functions -- ``kernel``, ``kernel_gradient``, ``smoothed``,
-``pdf``, ``kde_repulsion`` -- on a memory buffer taken from a real run. Nothing
-is hand-drawn, so a figure cannot drift away from the implementation; the
-composition of those calls is pinned against ``memory_flow`` itself in
-``tests/test_plotting.py``.
-
-    python -m ergodic_control_mppi.plotting.mechanism --output-dir theory/pictures
-
-Three figures, in the order Sec. III-C introduces them:
-
-    fig_occupancy       o_t^h and the fading trail that produced it
-    fig_excess_focus    the relative excess e_{t,i}^h, read off one memory point
-    fig_memory_fields   the recency and over-coverage fields
-
-The source run is cached; delete the .npz to regenerate it.
-"""
+"""Explanatory figures for Sec. III-C, Fading-Memory Coverage Feedback."""
 
 from __future__ import annotations
 
@@ -219,13 +201,7 @@ def _context(config, arrays):
 
 
 def _field_at(ctx, points, bandwidth: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Occupancy, scale-matched target and relative excess at arbitrary points.
-
-    Term for term eq. (occupancy_density), (smoothed_target) and
-    (relative_excess), which is what ``field.py:memory_weights`` evaluates at the memory
-    points. Blocked over the query axis: the full ``(N, P)`` kernel matrix is
-    ~200 MB at N = 180^2, P = 1500.
-    """
+    """Occupancy, scale-matched target and relative excess at arbitrary points."""
     memory, recency = ctx["memory"], ctx["recency"]
     query = jnp.asarray(points, dtype=jnp.float32).reshape(-1, 2)
     blocks = max(1, int(np.ceil(query.shape[0] / 4096)))
@@ -255,10 +231,8 @@ def _grid(ctx, n: int = 180, limits=None):
 
 
 def _rho(ctx, points, masses, bandwidth: float) -> np.ndarray:
-    """Memory repulsion of eq. (memory_repulsion), as the controller computes it.
-
-    ``kde_repulsion`` divides by the mass sum, so passing the raw recency gives
-    exactly rho(.; q^rec).
+    """
+    Memory repulsion of eq. (memory_repulsion), as the controller computes it.
     """
     return np.asarray(
         kde_repulsion(
@@ -276,12 +250,7 @@ def _rho_excess(ctx, points, bandwidth: float) -> np.ndarray:
 
 
 def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4, flat: str | None = None):
-    """The executed trail, fading soft blue-grey to near-black, plus the robot.
-
-    ``flat`` draws the path in one solid colour instead of the recency ramp, for
-    panels that show the path as geometry only -- there the ramp's light end
-    reads as a faded line rather than as an encoding of anything.
-    """
+    """The executed trail, fading soft blue-grey to near-black, plus the robot."""
     memory = np.asarray(ctx["memory"])
     collection = None
     if flat is not None:
@@ -305,13 +274,8 @@ def _trail(axis, ctx, linewidth: float = 2.0, zorder: int = 4, flat: str | None 
 
 def _target_contours(axis, ctx, levels=10, cmap=TARGET_CMAP, limits=None, gmm=None,
                      rule: float = 0.3, rule_color: str = TARGET_EDGE) -> None:
-    """Draw the target density as a filled blue field, under the trajectory marks.
-
-    Filled rather than a ring ladder: the figure sets two densities against each
-    other, so both should be fields. The levels are still drawn, as hairlines on
-    the boundaries of the bands they belong to -- a fill alone says how much, and
-    the rules say how much per step, which is what makes the falloff readable
-    rather than merely visible.
+    """
+    Draw the target density as a filled blue field, under the trajectory marks.
     """
     grid_x, grid_y, points = _grid(ctx, n=160, limits=limits)
     density = np.asarray(
@@ -363,16 +327,7 @@ def _modes(axis, ctx, label: str | None = None) -> None:
 
 def _inline_colorbar(figure, axis, mappable, label: str, *, backing: bool = False,
                      corner: str = "lower") -> None:
-    """Compact horizontal colorbar *inside* the panel.
-
-    An external colorbar steals ~15% of a panel's width and, when only some
-    panels carry one, leaves their titles at different heights. Putting it
-    inside keeps every map the same size.
-
-    ``backing`` lays a translucent white pad underneath, needed whenever the bar
-    sits over a filled field map: the ink used for its label and ticks reads
-    1.33:1 against the dark end of the ramp.
-    """
+    """Compact horizontal colorbar *inside* the panel."""
     bottom = 0.075 if corner == "lower" else 0.80
     if backing:
         pad = axis.inset_axes((0.035, bottom - 0.04, 0.50, 0.185), zorder=7)
@@ -395,13 +350,7 @@ def _inline_colorbar(figure, axis, mappable, label: str, *, backing: bool = Fals
 def _field_map(axis, grid_x, grid_y, values, *, cmap=MECHANISM_OCCUPANCY_CMAP,
                norm=None, vmax=None, levels: int = 24, rules: int = 0,
                rule_color: str = OCCUPANCY_EDGE):
-    """Filled field contours under everything else.
-
-    ``rules`` draws that many level lines over the fill, as ``_target_contours``
-    does for the target. They are spaced evenly *through the norm* rather than
-    evenly in value: the fill's own bands are, so value-spaced rules would visibly
-    disagree with the shading they are drawn on.
-    """
+    """Filled field contours under everything else."""
     if norm is None:
         norm = PowerNorm(0.5, vmin=0.0, vmax=vmax if vmax is not None else values.max())
     # A grid over a filled field is noise, and axisbelow puts it above the field.
@@ -431,14 +380,8 @@ def _field_map(axis, grid_x, grid_y, values, *, cmap=MECHANISM_OCCUPANCY_CMAP,
 
 
 def figure_occupancy(ctx, output: Path) -> Path:
-    """Fig. 1 -- the occupancy proxy the memory maintains, and the trail behind it.
-
-    One map, because there is one object: eq. (occupancy_density) at the deployed
-    scale, with the buffer that generated it drawn on top fading from soft
-    blue-grey (oldest) to near-black (newest), ending at the blue robot marker.
-    PowerNorm(1/2) rather than a linear norm -- occupancy is a sum of P narrow
-    kernels, so linearly the halo around the track is invisible and only a thin
-    ridge survives.
+    """
+    Fig. 1 -- the occupancy proxy the memory maintains, and the trail behind it.
     """
     bandwidth = float(ctx["field"].fine_bandwidth)
     grid_x, grid_y, points = _grid(ctx, n=220)
@@ -459,12 +402,8 @@ def figure_occupancy(ctx, output: Path) -> Path:
 
 
 def _focus_point(ctx, bandwidth: float) -> tuple[int, np.ndarray]:
-    """The most over-served memory point *inside a mode*, and the excess vector.
-
-    Restricted to Mahalanobis radius < 2 of the nearest mode on purpose. The
-    unrestricted argmax lands on a transit point where p*_h ~ 0 and the excess
-    collapses to o/eps_p -- that illustrates the density floor, not the coverage
-    mechanism the figure is about.
+    """
+    The most over-served memory point *inside a mode*, and the excess vector.
     """
     memory = np.asarray(ctx["memory"])
     _, _, excess = _field_at(ctx, memory, bandwidth)
@@ -479,20 +418,7 @@ def _focus_point(ctx, bandwidth: float) -> tuple[int, np.ndarray]:
 
 def _edge_profile(axis, coordinate, fields, vmax, excess_max, *, vertical: bool,
                   depth: float = 0.24, labels: tuple[str, ...] = ()) -> None:
-    """One chromeless o-vs-p* cut, drawn just outside an edge of a map panel.
-
-    The comparison eq. (relative_excess) makes is local, so it does not need
-    axes of its own: two filled curves on the border say it in a fifth of the
-    height a second panel costs. ``o`` is filled first and ``p*`` over it, so
-    the sliver of occupancy colour left uncovered *is* the positive part -- the
-    excess is shown rather than shaded and asserted.
-
-    Over the two fills goes eq. (relative_excess) itself, the ratio the fills
-    only imply, in bold red. It is dimensionless, so it cannot share the density
-    axis; it is drawn against ``excess_max`` instead. Both strips take ``vmax``
-    and ``excess_max`` from the caller rather than from their own cut, so the
-    three curves are comparable between the two edges as well as within one.
-    """
+    """One chromeless o-vs-p* cut, drawn just outside an edge of a map panel."""
     occupancy, target, excess = fields
     # Scaled to sit just under the fills' ceiling, on its own common scale --
     # a strip carries no axis, so the only thing a height means here is a
@@ -558,25 +484,7 @@ def _edge_profile(axis, coordinate, fields, vmax, excess_max, *, vertical: bool,
 
 
 def figure_excess_focus(ctx, output: Path) -> Path:
-    """Fig. 3 -- the relative excess, read off one memory point.
-
-    One panel: the neighbourhood around the most over-served memory point --
-    occupancy ramp, target contours, kernel radius, executed trail in flat ink
-    over the ramp -- with a small locator thumbnail (the target's modes and the
-    trail, boxed at the crop) showing where in Omega it sits.
-
-    Three inks, one meaning each: blue is the target wherever it appears, grey is
-    the occupancy, red is the excess and nothing else. Everything that is drawing
-    rather than data -- the cuts, the kernel circle and its spoke, the focus point,
-    the crop box -- is in one construction ink.
-
-    The arithmetic of eq. (relative_excess) is on the borders rather than in a
-    second panel: ``_edge_profile`` puts o and p* along the two marked cuts
-    through the point on the top and right edges, filled and overlapping, and
-    the excess is the part of the occupancy fill that the target fill does not
-    cover. The crop is centred exactly on the point, so both profiles peak at
-    the middle of their edge.
-    """
+    """Fig. 3 -- the relative excess, read off one memory point."""
     bandwidth = float(ctx["field"].fine_bandwidth)
     index, excess = _focus_point(ctx, bandwidth)
     memory = np.asarray(ctx["memory"])
@@ -801,13 +709,7 @@ def figure_memory_fields(ctx, output: Path) -> Path:
 
 
 def figure_extra(ctx, output_dir: Path) -> list[Path]:
-    """Rebuttal-only: matched target, activity gate, effective blend.
-
-    Deliberately not in the submission. Kept runnable so the answer exists if a
-    reviewer asks why the occupancy is compared against a smoothed target, what
-    eps_S is for, or why the two fields are blended after normalization rather
-    than blending their weights.
-    """
+    """Rebuttal-only: matched target, activity gate, effective blend."""
     field = ctx["field"]
     paths = []
     with plt.rc_context(rc=paper_style("double")):

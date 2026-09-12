@@ -23,16 +23,16 @@ def plot_simulation(
     output: str | Path | None = None,
     show: bool = True,
 ):
-    """Render coverage, occupancy, and cumulative ergodic error panels.
-
+    """
+    Render coverage, occupancy, and cumulative ergodic error panels.
+    
     Args:
-        config: Configuration used for the simulation.
-        result: Normalized simulation result.
-        output: Optional image path.
-        show: Whether to display the Matplotlib window.
-
+            config: Configuration used for the simulation.
+            result: Normalized simulation result.
+            output: Optional image path.
+            show: Whether to display the Matplotlib window.
     Returns:
-        The created Matplotlib figure.
+            The created Matplotlib figure.
     """
     params = config.controller
     workspace = params.workspace
