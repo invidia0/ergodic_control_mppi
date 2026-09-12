@@ -1,146 +1,222 @@
 # Ergodic Control MPPI
 
-JAX implementation of flow-matching Model Predictive Path Integral control for ergodic coverage with a Gaussian mixture target density. The repository supports both:
+JAX implementation of service-gated potential-gradient Model Predictive Path Integral
+control for single-robot ergodic coverage of a Gaussian-mixture target density.
 
-- single-robot ergodic exploration
-- decentralized multi-robot ergodic exploration following the formulation in [`DARS2026_paper.pdf`](/home/mmantovani/Projects/ergodic_control_mppi/DARS2026_paper.pdf)
+![Perlin occupancy flight](figures/fig_perlin.png)
 
-The runtime path is selected through `robots.num_robots` in [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml).
+The same lifted controller flying a Perlin occupancy volume (the SITL map rule:
+mockamap `perlin3D` thresholded to 10% of the slab). Bunny-shell, 3D pillar, and
+planar deployment snapshots:
 
-## Overview
+| Stanford bunny shell | 3D pillars | Planar deployment |
+|---|---|---|
+| ![Bunny](figures/fig_bunny.png) | ![Volumetric](figures/fig_volumetric.png) | ![Deployment](figures/fig_deployment.png) |
 
-At each control step, MPPI samples `K` noisy control sequences over a horizon `T`, rolls them through the double-integrator dynamics, scores them, and updates the nominal control using importance weights.
+## Implementation
 
-The rollout cost combines:
+At every control step, the controller samples `mppi.K` noisy control sequences
+over `mppi.T` steps, integrates the double integrator, and scores obstacle,
+map-boundary, MPPI control, and reference-field tracking costs. The weighted
+update becomes the next receding-horizon control sequence.
 
-- obstacle and out-of-map penalties
-- the standard MPPI control-cost cross term
-- a flow-matching ergodic term built from Stein interactions with the target density
-- an optional target log-density term
+YAML runs are planar. Position dimension `d > 2` is available through
+`ergodic_control_mppi.experiments.dimension.lift`; the planar branch stays
+bit-identical.
 
-The controller runs on CPU and also uses CUDA when JAX can acquire a CUDA device.
+| Path | Responsibility |
+|---|---|
+| `ergodic_control_mppi/config.py` | One-pass YAML loading and validation |
+| `ergodic_control_mppi/parameters.py` | Immutable JAX parameter trees and typed experiment variants |
+| `ergodic_control_mppi/models/double_integrator.py` | Batch-compatible dynamics: state `(2d+2,)`, control `(d+1,)` |
+| `ergodic_control_mppi/mppi/core.py` | Sampling, rollout costs, reference-field tracking, and MPPI update |
+| `ergodic_control_mppi/mppi/field.py` | Analytic GMM score, KDE repulsion, service gating, and scalar potential |
+| `ergodic_control_mppi/mppi/single.py` | Single-robot closed-loop scan |
+| `ergodic_control_mppi/mppi/replay.py` | Measured-state replay of a recorded flight |
+| `ergodic_control_mppi/deploy/` | Occupancy-grid adapters used by ROS 2 and offline UAV maps |
+| `ergodic_control_mppi/simulation.py` | Device selection, initialization, dispatch, and NumPy results |
+| `ergodic_control_mppi/metrics/` | Ergodicity, discrepancy, modes, and coordination metrics |
+| `ergodic_control_mppi/experiments/` | Experiment runners, baselines, analyses, and reports |
+| `ergodic_control_mppi/plotting/` | Simulation and publication figures, including `dimension.py` |
 
-## Theory to Code
+`run_simulation(...)` always returns paths with shape `(steps, 1, 6)` (a
+trivial robot axis kept for metric/plot compatibility). Internally,
+`run_single(...)` uses `(steps, 2d+2)`. Obstacles have shape `(num_obstacles, 3)`
+and may be empty; `d >= 3` may append a pillar top height as a fourth column.
 
-### Single robot
+## Reference potential field
 
-The single-robot controller follows the paper's flow-matching MPPI idea:
+At every control step, rollout evaluation states are the current position
+followed by the first `T - 1` sampled positions. Their temporal increments are
+scored with the velocity-residual objective
+`sum(-dt * h(z_k) @ delta_z_k + 0.5 * ||delta_z_k||^2)`. The reference velocity
+`h(z_k)` is evaluated once on the horizon-wise median of those states and
+broadcast across rollouts. Before its speed gauge, the field is the gradient of
+the explicit scalar potential in `ergodic_control_mppi/mppi/field.py`: an
+analytic target-density score plus KDE repulsion from the fading executed trail
+and from the plan itself. Density and recent per-mode service schedule the
+tracked speed. The returned surrogate remains the median of all `T` future
+sampled positions.
 
-- sampled rollouts induce a predicted spatial trajectory surrogate
-- the surrogate is used to build a Stein target flow toward the GMM density
-- the robot is repelled from its current predicted waypoints (`ell_self`)
-- recent executed positions are injected as cross particles (`ell_cross`) to reduce looping
-- the resulting flow is added as an MPPI rollout cost
-
-In code, the surrogate is the temporal median of sampled spatial rollouts (returned as `trajectory_surrogate`), and not the arithmetic mean trajectory used in the paper derivation. The rest of the mechanism is the same: the surrogate defines the self particle set and the flow cost biases sampling toward ergodic coverage.
-
-### Multi robot
-
-The multi-robot path in [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py) is decentralized:
-
-- each robot runs its own MPPI loop
-- each robot shares a predicted spatial trajectory surrogate with the others
-- each robot appends other robots' shared trajectories and recent histories into `cross_particles`
-- the self term keeps the single-robot ergodic attraction to the target density
-- the cross term keeps only the kernel-gradient repulsion from other robots, matching the paper's decision to drop the foreign score contribution
-
-This maps directly to the paper's multi-robot formulation:
-
-- shared predicted trajectories induce coordination
-- repulsion acts across the whole prediction horizon, so robots avoid future overlap rather than only current positions
-- recent executed positions are included to reduce revisitation
-- the multi-robot objective is encoded entirely in the rollout cost, so the MPPI optimization loop itself does not change
-
-### Adaptive parameters
-
-Two adaptive rules from the paper are present in the implementation:
-
-- self-interaction bandwidth is updated online with the median heuristic, floored by `stein.ell_self` (previously `stein.h`)
-- MPPI temperature `lambda` is adapted with an ESS target and clamped by `mppi.lam_min` and `mppi.lam_max`
-
-The cross-robot bandwidth `stein.ell_x` remains fixed. Its square root is the approximate interaction distance scale in workspace units.
-
-## Repository Layout
-
-| Path | Purpose |
-|------|---------|
-| [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml) | Main configuration file for simulation, MPPI, map, density, and Stein parameters |
-| [`configs/params_loader.py`](/home/mmantovani/Projects/ergodic_control_mppi/configs/params_loader.py) | Strict YAML loader and validator that builds the runtime parameter dataclasses |
-| [`models/double_integrator.py`](/home/mmantovani/Projects/ergodic_control_mppi/models/double_integrator.py) | 6D double-integrator dynamics and control clamping |
-| [`mppi/core.py`](/home/mmantovani/Projects/ergodic_control_mppi/mppi/core.py) | Functional MPPI rollout, weighting, and Stein-flow cost integration |
-| [`mppi/stein.py`](/home/mmantovani/Projects/ergodic_control_mppi/mppi/stein.py) | GMM log-density, score, kernel, and Stein interaction operators |
-| [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py) | Single and multi-robot simulation entrypoint plus visualization |
-| [`results/`](/home/mmantovani/Projects/ergodic_control_mppi/results) | Saved artifacts from experiments already present in the repository |
-| [`DARS2026_paper.pdf`](/home/mmantovani/Projects/ergodic_control_mppi/DARS2026_paper.pdf) | Paper reference for the intended multi-robot formulation |
+MPPI temperature adapts toward `mppi.ess_target`, and the control-cost
+coefficient is recomputed from the current temperature and `mppi.alpha` at
+every step.
 
 ## Installation
 
-The project uses `uv` for environment management.
+The base installation is CPU-capable and depends on plain `jax`:
 
 ```bash
-uv sync
+uv sync --python 3.12
 ```
 
-If you prefer plain `venv` + `pip`:
+Optional environments are:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install .
+uv sync --python 3.12 --extra cuda13  # NVIDIA CUDA 13 JAX wheels
 ```
 
-## Usage
+This follows the official JAX split between plain CPU `jax` and accelerator
+extras such as [`jax[cuda13]`](https://docs.jax.dev/en/latest/installation.html).
 
-Run commands from the repository root.
+## Simulation
+
+Run from the repository root:
 
 ```bash
-# Run either the single-robot or multi-robot simulation
-# depending on robots.num_robots in configs/mppi_params.yaml
 uv run python scripts/main.py
-
-# Syntax check the Python modules
-uv run python -m compileall configs models mppi scripts
+uv run python scripts/main.py --config configs/mppi_params.yaml --device cpu --no-plot
 ```
 
-The script loads [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml), generates random obstacles and initial states, then executes:
+The CLI accepts `--device auto|cpu|gpu`. `auto` uses a GPU when JAX exposes one
+and otherwise falls back to CPU. Controller imports do not query devices,
+print, log, or import plotting.
 
-- `closed_loop_jit(...)` when `robots.num_robots == 1`
-- `multi_robot_closed_loop_jit(...)` when `robots.num_robots > 1`
+Planar model dimensions are not configuration keys:
 
-## Configuration
+- state `(6,)`: `[px, py, vx, vy, yaw, yaw_rate]`
+- control `(3,)`: `[ax, ay, angular_acceleration]`
 
-The main configuration surface is [`configs/mppi_params.yaml`](/home/mmantovani/Projects/ergodic_control_mppi/configs/mppi_params.yaml).
+Active MPPI keys are `mppi.T`, `mppi.K`, `mppi.lambda`, `mppi.alpha`,
+`mppi.exploration`, `mppi.smooth_window`, `mppi.ess_target`, `mppi.lam_min`,
+`mppi.lam_max`, `mppi.memory_length`, and `mppi.noise.sigma`. Reference-field
+keys are `reference.weight_track`, `reference.reference_speed`,
+`reference.memory_time`, `reference.memory_balance`, `reference.memory_gain`,
+`reference.fill_resolution`, `reference.fine_bandwidth`, `reference.plan_gain`,
+`reference.transit_speedup`, `reference.dwell_slowdown`,
+`reference.service_floor`, `reference.service_time`,
+`reference.deficit_ceiling`, and `reference.release_ratio`.
 
-Important keys for switching and tuning modes:
+`mppi.memory_length` defaults to `ceil(3 * reference.memory_time /
+model.delta_t)`. `reference.fine_bandwidth` defaults to
+`2 * reference.fill_resolution ** 2`; either derived value can be overridden
+explicitly.
 
-| Key | Meaning |
-|-----|---------|
-| `robots.num_robots` | `1` for single-robot mode, `>1` for decentralized multi-robot mode |
-| `mppi.K` | Number of MPPI rollouts per replanning step |
-| `mppi.T` | Receding-horizon length |
-| `mppi.lambda` | Initial MPPI temperature |
-| `mppi.ess_target` | ESS fraction target for adaptive temperature tuning |
-| `mppi.lam_min`, `mppi.lam_max` | Clamp range for adaptive temperature |
-| `mppi.history_len` | Length of the executed-position history buffer used in Stein interactions |
-| `stein.weight` | Weight of the flow-matching cost |
-| `stein.weight_pdf` | Weight of the log-density term |
-| `stein.h` | Floor for the adaptive self bandwidth |
-| `stein.ell_x` | Fixed cross-robot bandwidth |
-| `stein.theta` | Rotation angle defining the curl-augmented geometry |
-| `stein.alpha_cross` | Strength of inter-robot repulsion |
+## UAV simulator and ROS 2
 
-The target density is specified under `density`. Obstacles are sampled each run from `map.obstacles`.
+[`uav_simulator/`](uav_simulator/) is the vendored SO3 quadrotor, mockamap, and
+map-generator stack used for SITL. Origin, license, and local integration notes
+are in [`uav_simulator/SOURCE.md`](uav_simulator/SOURCE.md).
 
-## State and Control
+The ROS 2 Jazzy package in [`ros2/ergodic_control_mppi_ros/`](ros2/ergodic_control_mppi_ros/)
+flies the same JAX controller on that simulator: map adapter, online driver,
+independent safety guard, and a recorder that pairs every flight with an ideal
+offline run on the identical grid, start state, and seed. Build, topic map,
+launch arguments, and safety budget are in
+[`ros2/ergodic_control_mppi_ros/README.md`](ros2/ergodic_control_mppi_ros/README.md).
 
-| Quantity | Shape | Meaning |
-|----------|-------|---------|
-| state `x` | `(6,)` | `[px, py, vx, vy, yaw, yaw_rate]` |
-| control `u` | `(3,)` | `[ax, ay, alpha]` |
+With `DISPLAY` and `XAUTHORITY` exported for the host XWayland session:
 
-Controls are clamped to the configured acceleration bounds before integration.
+```bash
+docker compose -f docker/ros2/compose.yaml up --build scene
+```
 
-## Current implementation notes
+This opens one RViz window with the Perlin map, configured target density,
+native SO3 drone, and live trail. Headless:
 
-- The current multi-robot implementation shares predicted spatial surrogates and history buffers inside the simulation loop in [`scripts/main.py`](/home/mmantovani/Projects/ergodic_control_mppi/scripts/main.py).
-- The paper describes pooling mean predicted trajectories. The current code uses the temporal median of sampled spatial rollouts as the exchanged surrogate.
+```bash
+docker compose -f docker/ros2/compose.yaml run --rm uav \
+    ros2 launch ergodic_control_mppi_ros scene.launch.py rviz:=false
+```
+
+The launch accepts `config:=PATH`.
+
+Fixed-altitude UAV smoke run:
+
+```bash
+docker compose -f docker/ros2/compose.yaml build uav
+docker compose -f docker/ros2/compose.yaml run --rm uav \
+    ros2 launch ergodic_control_mppi_ros uav.launch.py \
+        config:=/workspace/configs/uav_profile.yaml run_id:=smoke steps:=200 rviz:=false
+```
+
+`configs/uav_profile.yaml` is the deployment configuration (`T=150`, `K=250`).
+`configs/uav_profile_T150.yaml` is the same frozen profile.
+`configs/mppi_params.yaml` is the default offline simulation configuration.
+
+## Research commands
+
+Experiment YAML lives in `configs/experiments/`. Destructive runners refuse to
+replace CSV output unless `--overwrite` is supplied.
+
+```bash
+uv run python -m ergodic_control_mppi.experiments.literature --config configs/experiments/literature_comparison.yaml --overwrite
+uv run python -m ergodic_control_mppi.experiments.baselines --help
+uv run python scripts/final_ablation.py --help
+uv run python scripts/theory_audit.py --help
+uv run python -m ergodic_control_mppi.experiments.dimension {clutter3d,scaling} --help
+uv run python scripts/dimension_figure.py --pillars 20 --seed 0
+uv run python -m ergodic_control_mppi.experiments.bunny {run,figure} --help
+uv run python -m ergodic_control_mppi.experiments.perlin {run,figure} --help
+```
+
+The dimension studies fly the deployed profile with its position dimension
+lifted and every gain unchanged. `clutter3d` flies a 3D pillar field in which
+half the pillars can be flown over, against the same controller held at the
+target's mean altitude. `scaling` sweeps workspace dimensions 2, 3, 4 and 6 on
+an open box against d-dimensional SMC and HEDAC. Outputs default to
+`results/dimension/`. `scripts/dimension_figure.py` renders one stored 3D path.
+
+The bunny comparison flies the same lifted controller around the Stanford bunny
+scan (fetched once into `results/bunny/` and pinned by hash) against HEDAC,
+FMEC, SMC and SVES transcribed to 3D. The target is a shell 0.75 m off the
+scanned surface.
+
+The Perlin demo flies the same lifted controller and the three-altitude target
+of `clutter3d` through Perlin noise thresholded to 10% of the slab, as a 0.1 m
+voxel grid. `run` scores certificate, contact, and altitude use; `figure`
+renders four frames of one stored path. Outputs default to `results/perlin/`.
+
+These runners write an adjacent `.manifest.json` containing resolved inputs,
+source hashes, and execution metadata. Resume requires matching provenance;
+incompatible outputs require a fresh output path or `--overwrite`.
+
+The frozen T150 bundle lives under `results/uav/T150/`:
+
+```bash
+uv run python scripts/run_t150_revision.py plan --bundle results/uav/T150
+uv run python scripts/run_t150_revision.py run --bundle results/uav/T150
+```
+
+`scripts/report_figures.py` renders paired ablation effects. Timing outputs have
+provenance manifests and require `--overwrite` for replacement.
+
+Trial CSV rows preserve the established scalar fields, including
+`team_ergodic_error`, `pairwise_overlap`, `safety_metric`,
+`redundancy_metric`, `R_pair`, `D_min_pair`, and `runtime_ms`.
+
+## Validation
+
+```bash
+uv run python -m compileall ergodic_control_mppi scripts tests
+JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests -v
+uv lock --check
+```
+
+The ROS package has its own tests, which need the container:
+
+```bash
+docker compose -f docker/ros2/compose.yaml run --rm uav \
+    bash -lc 'cd /ros_ws && colcon test --packages-select ergodic_control_mppi_ros \
+              && colcon test-result --verbose'
+```

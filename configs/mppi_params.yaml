@@ -1,44 +1,41 @@
 # Run-level settings
 seed: 43
-steps: 5000
-
-# Multi-robot toggle: set to 1 for single-robot mode.
-robots:
-  num_robots: 4
+steps: 20000
 
 # MPPI controller settings
 mppi:
-  T: 350
-  K: 1000
+  T: 350  # planning horizon
+  K: 1000 # number of rollouts
   lambda: 1.0
-  alpha: 0.2        # control-cost scaling term in MPPI importance weighting
+  alpha: 0.95       # control-cost weight; (1-alpha) is temperature-independent, so at long T it must be high to keep ESS healthy
   exploration: 0.1  # fraction of rollouts that ignore warm-start controls
   ess_target: 0.3   # target effective sample size fraction for adaptive lambda
   lam_min: 0.05
   lam_max: 20.0
-  history_len: 1000  # length of executed-position history included in Stein particles
-  dim_x: 6
-  dim_u: 3
+  # memory_length is derived as ceil(3 * memory_time / delta_t); set it here only to
+  # override that (the occupancy KDE is O(P^2), so P dominates cost).
   noise:
     sigma:
-      - [6.0, 0.0, 0.0]  # linear x
-      - [0.0, 6.0, 0.0]  # linear y
-      - [0.0, 0.0, 3.0]  # angular
+      - [0.9, 0.0, 0.0]  # linear x  (tighter sampling => cleaner flow tracking / dwelling)
+      - [0.0, 0.9, 0.0]  # linear y
+      - [0.0, 0.0, 0.45] # angular
 
 # Map and obstacle costs
 map:
-  x_limits: [-10.0, 10.0]
+  x_limits: [-20.0, 20.0]
   y_limits: [-10.0, 10.0]
-  resolution: 0.2  # visualization grid resolution
-  oom_cost: 1e8
+  resolution: 0.15  # visualization grid resolution
+  oom_cost: 1e3
+  boundary_margin: 1.5   # soft inward margin band [m] near map edges
+  boundary_weight: 100.0 # penalty for hugging the inside of the edge (stops corner-dwelling, frees far modes)
 
   obstacles:
     num_obstacles: 3
     min_radius: 0.5
     max_radius: 1.5
-    x_limits: [-8.0, 8.0]
+    x_limits: [-16.0, 16.0]
     y_limits: [-8.0, 8.0]
-    weight: 1e8
+    weight: 1e3
     safe_distance: 0.3
 
 # Target density p(x): Gaussian mixture in R^2
@@ -49,21 +46,53 @@ density:
     - 0.33333334
   means:
     - [0.0, 6.0]
-    - [-6.0, -4.0]
-    - [6.0, -4.0]
+    - [-12.0, -4.0]
+    - [12.0, -4.0]
   covariances:
-    - [[3.0, 0.0], [0.0, 2.0]]
-    - [[2.0, 1.0], [1.0, 3.0]]
-    - [[2.0, -1.0], [-1.0, 3.0]]
+    - [[12.0, 0.0], [0.0, 2.0]]
+    - [[8.0, 2.0], [2.0, 3.0]]
+    - [[8.0, -2.0], [-2.0, 3.0]]
 
-# Stein flow settings
-stein:
-  weight_stein: 2228.2492276014987
-  weight_pdf: 0.0
-  ell_self: 4.0        # self bandwidth floor; runtime uses median heuristic with this floor
-  ell_x: 16.565452675970764  # fixed cross-robot bandwidth; sqrt(ell_x) is an interaction distance scale
-  alpha_cross: 12.633417458693733 # scaling on cross-robot Stein gradient
-  theta: 54.97752282732397   # degrees: 0 = pure score-descent, 90 = pure curl
+# Reference potential field: the analytic score, repulsion from the executed trail,
+# and repulsion of the plan from itself -- all gradients of one scalar potential Phi
+# (see ergodic_control_mppi/mppi/field.py:potential). There is no rotation: R(theta) = I
+# is exactly the condition under which the field is a gradient.
+reference:
+  weight_track: 3000.0      # gamma_track: flow-tracking weight; must dominate control/obstacle costs to actually dwell
+  reference_speed: 4.0
+
+  # Fading-memory coverage feedback.
+  memory_time: 10.0          # tau_M [s]: decay exp(-dt/tau), buffer P = ceil(3 tau/dt)
+  memory_balance: 0.85      # a in [0, 1]: 0 = pure trail avoidance, 1 = pure over-coverage correction
+  memory_gain: 60.0         # k_M: memory strength as a ratio to the attraction (implicit weight 1)
+
+  # The one lengthscale. The repulsion kernel peaks at sqrt(h/2); h = 0.94 puts that peak
+  # at 0.69 m, the track spacing the plan self-repulsion fills a basin at.
+  fine_bandwidth: 0.94
+
+  # Plan self-repulsion. Repels the T horizon points from each other, which is what makes
+  # the plan space-filling inside a basin -- the executed trail can only repel from the
+  # past, and avoiding your own wake still admits a compact repeated circuit. Same
+  # sqrt(he/2) gauge as memory_gain, so the two gains are commensurate. 0 disables it.
+  plan_gain: 6.0
+
+  # Speed schedule: 1/p* is the classical condition for a path's time density to match the
+  # target. beta = 4 keeps reference_speed at a mode peak and reaches 4x it in the corridors.
+  transit_speedup: 4.0
+
+  # Service gate. sigma > 1 means the mode the vehicle is in has had more than its target
+  # share of recent path; the in-mode speed then climbs to the transit speed and the vehicle
+  # leaves under the same schedule that made it stay. 0 disables the gate exactly.
+  service_floor: 0.3        # eps_s
+  service_time: 45.0        # tau_s [s]: a history of visits, deliberately not the trail's 5.5 s
+
+  # Destination bias. deficit_ceiling (c) bounds the promotion of under-served modes at
+  # log((c+1)/c) = 3.04 nats -- which cannot overturn the Delta_j margins of 18.7/31.1 nats,
+  # so promotion alone never empties a basin. release_ratio (sigma*) supplies the demotion
+  # that does, with kappa_j = Delta_j / (sigma* - 1) read off the target itself: every mode
+  # is released at sigma* times its fair share. <= 0 keeps the promotion-only bend.
+  deficit_ceiling: 0.05
+  release_ratio: 2.24
 
 model:
   delta_t: 0.02  # source of truth for integration timestep
