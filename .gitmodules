@@ -1,0 +1,3 @@
+[submodule "ros2/mullet-interfaces"]
+	path = ros2/mullet-interfaces
+	url = git@github.com:skymule-ai/mullet-interfaces.git

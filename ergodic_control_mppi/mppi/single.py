@@ -104,6 +104,29 @@ def single_step(
     return next_carry, result
 
 
+def measured_step(
+    params: ControllerParams, carry: SingleControllerState, observation: jax.Array
+) -> tuple[SingleControllerState, MPPIStepResult]:
+    """
+    Advance the closed loop from a measured state instead of the model's prediction.
+
+    The newest fading-memory sample is overwritten too, so the buffer holds positions the
+    vehicle actually reached.
+
+    Args:
+            params: Controller parameters.
+            carry: Current closed-loop carry.
+            observation: Measured state with shape ``(2d + 2,)``.
+    Returns:
+            The next carry and the planning outputs of this step.
+    """
+    d = params.gmm.means.shape[-1]
+    corrected = carry._replace(
+        state=observation, memory=carry.memory.at[-1].set(observation[:d])
+    )
+    return single_step(params, corrected)
+
+
 def stationary_step(
     params: ControllerParams,
     carry: SingleControllerState,

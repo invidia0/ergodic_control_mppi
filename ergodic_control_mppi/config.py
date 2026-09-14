@@ -100,6 +100,33 @@ def _positive_definite(value: Any, path: str, shape: tuple[int, ...]) -> np.ndar
     return result
 
 
+def gmm_params(means: np.ndarray, covariances: np.ndarray, weights: np.ndarray) -> GMMParams:
+    """
+    Precompute the Gaussian-mixture terms the controller evaluates.
+
+    Args:
+            means: Component means with shape ``(M, d)``.
+            covariances: Positive-definite covariances with shape ``(M, d, d)``.
+            weights: Positive component weights summing to one, shape ``(M,)``.
+    Returns:
+            Immutable mixture parameters in float32.
+    """
+    means = np.asarray(means, dtype=np.float32)
+    covariances = np.asarray(covariances, dtype=np.float32)
+    weights = np.asarray(weights, dtype=np.float32)
+    dimension = means.shape[-1]
+    log_normalizers = -0.5 * (
+        dimension * np.log(2 * np.pi) + np.linalg.slogdet(covariances)[1]
+    )
+    return GMMParams(
+        means=jnp.asarray(means),
+        covariance=jnp.asarray(covariances),
+        covariance_inverse=jnp.asarray(np.linalg.inv(covariances).astype(np.float32)),
+        log_weights=jnp.log(jnp.asarray(weights)),
+        log_normalizers=jnp.asarray(log_normalizers.astype(np.float32)),
+    )
+
+
 def _generate_obstacles(
     count: int,
     x_limits: np.ndarray,
@@ -242,15 +269,7 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError(f"Config key 'density.weights' must have shape ({means.shape[0]},)")
     if np.any(weights <= 0) or not np.isclose(weights.sum(), 1.0, rtol=1e-5, atol=1e-6):
         raise ValueError("Config key 'density.weights' must be positive and sum to 1")
-    covariance_inverse = np.linalg.inv(covariances).astype(np.float32)
-    log_normalizers = (-0.5 * (2 * np.log(2 * np.pi) + np.linalg.slogdet(covariances)[1])).astype(np.float32)
-    gmm = GMMParams(
-        means=jnp.asarray(means),
-        covariance=jnp.asarray(covariances),
-        covariance_inverse=jnp.asarray(covariance_inverse),
-        log_weights=jnp.log(jnp.asarray(weights)),
-        log_normalizers=jnp.asarray(log_normalizers),
-    )
+    gmm = gmm_params(means, covariances, weights)
 
     delta_t = _number(_required(model_raw, "delta_t", "model"), "model.delta_t", 1e-12)
 

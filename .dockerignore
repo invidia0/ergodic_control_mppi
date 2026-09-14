@@ -1,9 +1,11 @@
-.git
+**/.git
 .venv
-ego-planner-swarm
 results
+scratch
+attic
 build
 install
 log
+**/.env
 **/__pycache__
 *.py[cod]
