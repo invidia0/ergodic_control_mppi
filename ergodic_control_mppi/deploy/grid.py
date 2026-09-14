@@ -3,7 +3,6 @@ Occupancy-grid construction and queries for the fixed-altitude UAV deployment.
 """
 
 from collections import deque
-from itertools import combinations
 
 import numpy as np
 
@@ -37,42 +36,6 @@ def inflation_radius(
     discretization = 0.5 * np.sqrt(2.0) * resolution
     stopping = max_speed * reaction_time + max_speed * max_speed / (2.0 * brake_accel)
     return float(robot_radius + clearance + discretization + tracking_allowance + stopping)
-
-
-def slice_cloud(points: np.ndarray, altitude: float, half_extent: float) -> np.ndarray:
-    """
-    Keep the ``(x, y)`` of points inside the robot's vertical footprint.
-    
-    Args:
-            points: Cloud with shape ``(N, 3)``.
-            altitude: Flight altitude in metres.
-            half_extent: Half the vertical footprint height in metres.
-    Returns:
-            Horizontal positions with shape ``(M, 2)``.
-    """
-    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    inside = np.abs(points[:, 2] - altitude) <= half_extent
-    return points[inside, :2]
-
-
-def rasterize(
-    positions: np.ndarray,
-    x_limits: tuple[float, float],
-    y_limits: tuple[float, float],
-    resolution: float,
-) -> np.ndarray:
-    """Bin horizontal positions into a boolean occupancy grid covering the workspace."""
-    width = int(np.ceil((x_limits[1] - x_limits[0]) / resolution))
-    height = int(np.ceil((y_limits[1] - y_limits[0]) / resolution))
-    occupancy = np.zeros((height, width), dtype=bool)
-    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
-    if positions.size == 0:
-        return occupancy
-    column = np.floor((positions[:, 0] - x_limits[0]) / resolution).astype(np.int64)
-    row = np.floor((positions[:, 1] - y_limits[0]) / resolution).astype(np.int64)
-    inside = (column >= 0) & (column < width) & (row >= 0) & (row < height)
-    occupancy[row[inside], column[inside]] = True
-    return occupancy
 
 
 def inflate(occupancy: np.ndarray, radius: float, resolution: float) -> np.ndarray:
@@ -231,40 +194,6 @@ def all_reachable(
     return bool(flags.all()) and bool(visited.any()), flags, diagnosis
 
 
-def metric_reachable_mask(
-    grid: np.ndarray,
-    origin: tuple[float, float],
-    resolution: float,
-    start: tuple[float, float],
-    x_limits: tuple[float, float],
-    y_limits: tuple[float, float],
-    bins: tuple[int, int],
-) -> np.ndarray:
-    """
-    Sample grid reachability onto the coverage-metric grid.
-    
-    Args:
-            grid: Inflated boolean occupancy.
-            origin: World coordinates of the lower-left grid corner.
-            resolution: Grid cell size in metres.
-            start: Arming position.
-            x_limits: Workspace x bounds of the metric grid.
-            y_limits: Workspace y bounds of the metric grid.
-            bins: Metric grid shape as ``(rows, columns)``.
-    Returns:
-            Boolean mask with shape ``bins``.
-    """
-    visited = reachable_from(grid, origin, resolution, start)
-    rows, columns = bins
-    x = np.linspace(x_limits[0], x_limits[1], columns)
-    y = np.linspace(y_limits[0], y_limits[1], rows)
-    grid_x, grid_y = np.meshgrid(x, y)
-    cells = world_to_cell(np.stack((grid_x, grid_y), axis=-1), origin, resolution)
-    row = np.clip(cells[..., 0], 0, grid.shape[0] - 1)
-    column = np.clip(cells[..., 1], 0, grid.shape[1] - 1)
-    return visited[row, column]
-
-
 def nearest_free(
     grid: np.ndarray,
     origin: tuple[float, float],
@@ -325,55 +254,3 @@ def path_blocked(
         segment_blocked(grid, origin, resolution, positions[index], positions[index + 1])
         for index in range(positions.shape[0] - 1)
     )
-
-
-def blocked_mode_segments(
-    grid: np.ndarray,
-    origin: tuple[float, float],
-    resolution: float,
-    modes: np.ndarray,
-) -> int:
-    """Count blocked straight segments between pairs of target modes."""
-    modes = np.asarray(modes, dtype=np.float64).reshape(-1, 2)
-    return sum(
-        segment_blocked(grid, origin, resolution, modes[first], modes[second])
-        for first, second in combinations(range(modes.shape[0]), 2)
-    )
-
-
-def clearance_along(
-    occupancy: np.ndarray,
-    origin: tuple[float, float],
-    resolution: float,
-    positions: np.ndarray,
-) -> np.ndarray:
-    """
-    Return each position's distance to the nearest occupied cell centre.
-    
-    Args:
-            occupancy: Boolean grid with shape ``(H, W)``.
-            origin: World coordinates of the lower-left grid corner.
-            resolution: Grid cell size in metres.
-            positions: Query positions with shape ``(N, 2)``.
-    Returns:
-            Distances with shape ``(N,)``.
-    """
-    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
-    occupied = np.argwhere(occupancy)
-    if occupied.size == 0 or positions.size == 0:
-        return np.full(positions.shape[0], np.inf)
-    centres = np.column_stack(
-        (
-            origin[0] + (occupied[:, 1] + 0.5) * resolution,
-            origin[1] + (occupied[:, 0] + 0.5) * resolution,
-        )
-    )
-    # ponytail: dense (N x M) distance block, chunked over the path. A 20k-step path
-    # against a few thousand occupied cells is the realistic worst case; tile over the
-    # cells too only if the map gets much denser.
-    distances = np.empty(positions.shape[0], dtype=np.float64)
-    for begin in range(0, positions.shape[0], 2048):
-        block = positions[begin : begin + 2048]
-        block_distances = np.linalg.norm(block[:, None, :] - centres[None, :, :], axis=-1)
-        distances[begin : begin + 2048] = block_distances.min(axis=1)
-    return distances

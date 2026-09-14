@@ -21,8 +21,8 @@ class ConfigTest(unittest.TestCase):
         return path
 
     def test_valid_load_and_deterministic_obstacles(self):
-        config_a = load_config("configs/mppi_params.yaml")
-        config_b = load_config("configs/mppi_params.yaml")
+        config_a = load_config("configs/uav_profile.yaml")
+        config_b = load_config("configs/uav_profile.yaml")
         self.assertEqual(config_a.controller.field.fine_bandwidth, 0.94)
         np.testing.assert_array_equal(config_a.controller.workspace.obstacles, config_b.controller.workspace.obstacles)
 
@@ -100,10 +100,10 @@ class ConfigTest(unittest.TestCase):
     def test_memory_and_service_times_are_derived(self):
         # Assert the derivations, not the tuned values, so tuning the config cannot break
         # this test: decay = exp(-dt/tau), P = ceil(3 tau/dt), h = 2 delta_res^2.
-        raw = yaml.safe_load(Path("configs/mppi_params.yaml").read_text(encoding="utf-8"))
+        raw = yaml.safe_load(Path("configs/uav_profile.yaml").read_text(encoding="utf-8"))
         tau = raw["reference"]["memory_time"]
         delta_t = raw["model"]["delta_t"]
-        config = load_config("configs/mppi_params.yaml")
+        config = load_config("configs/uav_profile.yaml")
         field = config.controller.field
         self.assertAlmostEqual(field.memory_decay, np.exp(-delta_t / tau), places=9)
         self.assertEqual(config.controller.mppi.memory_length, math.ceil(3.0 * tau / delta_t))

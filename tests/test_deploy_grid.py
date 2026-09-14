@@ -6,17 +6,12 @@ import numpy as np
 
 from ergodic_control_mppi.deploy.grid import (
     all_reachable,
-    blocked_mode_segments,
-    clearance_along,
     entry_cell,
     inflate,
     inflation_radius,
-    metric_reachable_mask,
     path_blocked,
-    rasterize,
     reachable_from,
     segment_blocked,
-    slice_cloud,
     world_to_cell,
 )
 
@@ -43,7 +38,7 @@ class InflationBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(radius, 1.1394, places=3)
         self.assertEqual(int(np.ceil(radius / RESOLUTION)), 8)
 
-    def test_pillar_tuning_uses_seven_cells(self):
+    def test_smaller_clearance_drops_one_cell(self):
         radius = inflation_radius(
             robot_radius=0.30,
             clearance=0.05,
@@ -72,39 +67,6 @@ class InflationBudgetTest(unittest.TestCase):
     def test_zero_braking_is_rejected(self):
         with self.assertRaises(ValueError):
             inflation_radius(0.3, 0.15, 0.2, 2.0, 0.0, 0.1, RESOLUTION)
-
-
-class SliceTest(unittest.TestCase):
-    def test_only_the_vertical_band_survives(self):
-        points = np.array(
-            [
-                [1.0, 2.0, 0.75],  # centre of the band
-                [3.0, 4.0, 0.95],  # exactly on the upper edge
-                [5.0, 6.0, 0.55],  # exactly on the lower edge
-                [7.0, 8.0, 1.20],  # above
-                [9.0, 9.0, 0.10],  # below
-            ]
-        )
-        kept = slice_cloud(points, 0.75, 0.20)
-        self.assertEqual(kept.shape, (3, 2))
-        np.testing.assert_allclose(kept[:, 0], [1.0, 3.0, 5.0])
-
-    def test_empty_cloud(self):
-        self.assertEqual(slice_cloud(np.zeros((0, 3)), 0.75, 0.2).shape, (0, 2))
-
-
-class RasterizeTest(unittest.TestCase):
-    def test_point_lands_in_the_expected_cell(self):
-        grid = rasterize(np.array([[0.0, 0.0]]), X_LIMITS, Y_LIMITS, RESOLUTION)
-        self.assertEqual(grid.shape, (134, 267))
-        self.assertEqual(grid.sum(), 1)
-        row, column = np.argwhere(grid)[0]
-        self.assertEqual(column, int(20.0 / RESOLUTION))
-        self.assertEqual(row, int(10.0 / RESOLUTION))
-
-    def test_points_outside_the_workspace_are_dropped(self):
-        grid = rasterize(np.array([[100.0, 0.0], [0.0, -50.0]]), X_LIMITS, Y_LIMITS, RESOLUTION)
-        self.assertEqual(grid.sum(), 0)
 
 
 class InflateTest(unittest.TestCase):
@@ -260,10 +222,6 @@ class SegmentTest(unittest.TestCase):
     def test_segment_beside_a_blocked_cell(self):
         self.assertFalse(segment_blocked(self.grid, self.origin, 1.0, [4.5, 3.5], [6.5, 3.5]))
 
-    def test_blocked_mode_segments_counts_each_pair_once(self):
-        modes = np.array([[4.5, 5.5], [6.5, 5.5], [4.5, 3.5]])
-        self.assertEqual(blocked_mode_segments(self.grid, self.origin, 1.0, modes), 1)
-
     def test_no_tunneling_across_a_thin_obstacle(self):
         """A long jump must not step over the single blocked cell between its ends."""
         self.assertTrue(segment_blocked(self.grid, self.origin, 1.0, [0.5, 5.5], [9.5, 5.5]))
@@ -277,32 +235,6 @@ class SegmentTest(unittest.TestCase):
     def test_clear_polyline(self):
         path = np.array([[0.5, 0.5], [0.5, 3.5], [3.5, 3.5]])
         self.assertFalse(path_blocked(self.grid, self.origin, 1.0, path))
-
-
-class ClearanceTest(unittest.TestCase):
-    def test_distance_to_the_nearest_occupied_centre(self):
-        grid = np.zeros((10, 10), dtype=bool)
-        grid[5, 5] = True  # centre at (5.5, 5.5)
-        distances = clearance_along(grid, (0.0, 0.0), 1.0, np.array([[5.5, 5.5], [5.5, 8.5]]))
-        np.testing.assert_allclose(distances, [0.0, 3.0])
-
-    def test_empty_map_is_infinitely_clear(self):
-        distances = clearance_along(
-            np.zeros((4, 4), dtype=bool), (0.0, 0.0), 1.0, np.array([[1.0, 1.0]])
-        )
-        self.assertTrue(np.isinf(distances).all())
-
-
-class MetricMaskTest(unittest.TestCase):
-    def test_mask_excludes_the_far_side_of_a_wall(self):
-        grid = np.zeros((20, 20), dtype=bool)
-        grid[:, 10] = True
-        mask = metric_reachable_mask(
-            grid, (0.0, 0.0), 1.0, (2.5, 2.5), (0.0, 20.0), (0.0, 20.0), (16, 16)
-        )
-        self.assertEqual(mask.shape, (16, 16))
-        self.assertTrue(mask[:, 0].all())
-        self.assertFalse(mask[:, -1].any())
 
 
 if __name__ == "__main__":
