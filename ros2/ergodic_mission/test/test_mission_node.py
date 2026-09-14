@@ -2,6 +2,7 @@
 
 import time
 import unittest
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import numpy as np
@@ -10,6 +11,7 @@ from ergodic_mission.mission_node import (
     WARMUP_MIN_STEPS,
     failed_tests,
     join_path,
+    position_problem,
     warmup_p99,
 )
 
@@ -41,6 +43,16 @@ class FailedTestsTest(unittest.TestCase):
                 "test_config (unittest.loader._FailedTest.test_config)",
             ],
         )
+
+
+class PositionProblemTest(unittest.TestCase):
+    def test_each_reason_is_named(self):
+        valid = SimpleNamespace(xy_valid=True, v_xy_valid=True)
+        self.assertIsNone(position_problem(valid, received_at=10.0, now=10.05))
+        self.assertIn("yet", position_problem(None, received_at=0.0, now=10.0))
+        invalid = SimpleNamespace(xy_valid=True, v_xy_valid=False)
+        self.assertIn("invalid", position_problem(invalid, received_at=10.0, now=10.0))
+        self.assertIn("0.50 s old", position_problem(valid, received_at=10.0, now=10.5))
 
 
 class WarmupGateTest(unittest.TestCase):

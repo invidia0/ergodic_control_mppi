@@ -104,6 +104,17 @@ def observation_from(position: VehicleLocalPosition, yaw_rate: float = 0.0) -> n
     )
 
 
+def position_problem(position, received_at: float, now: float) -> str | None:
+    """Why the latest local position cannot be flown on, or ``None`` when it can."""
+    if position is None:
+        return "no local position from PX4 yet"
+    if not (position.xy_valid and position.v_xy_valid):
+        return "PX4 reports its horizontal position or velocity invalid"
+    if now - received_at > STALE_POSITION_S:
+        return f"PX4 local position is {now - received_at:.2f} s old"
+    return None
+
+
 class ErgodicMission(Node):
     """Load, check and fly ergodic MPPI missions for one drone."""
 
@@ -133,6 +144,7 @@ class ErgodicMission(Node):
         self.heartbeat: DroneHeartbeat | None = None
         self.position: VehicleLocalPosition | None = None
         self.position_received = -math.inf
+        self.last_position_stamp = None
         self.load_path = ""
         self.command_publisher = self.hold_client = None
 
@@ -152,10 +164,13 @@ class ErgodicMission(Node):
 
     def set_state(self, state: str, detail: str) -> None:
         """Move to ``state`` and log the change. Callers hold the lock."""
-        if (state, detail) != (self.state, self.detail):
-            log = self.get_logger().error if state == "FAULT" else self.get_logger().info
-            log(f"{state}: {detail}")
+        changed = (state, detail) != (self.state, self.detail)
         self.state, self.detail = state, detail
+        # One call site per severity: rclpy refuses a call site whose severity changes.
+        if changed and state == "FAULT":
+            self.get_logger().error(f"{state}: {detail}")
+        elif changed:
+            self.get_logger().info(f"{state}: {detail}")
 
     def self_test(self) -> None:
         """Run the self-test modules once, on the CPU; a failure refuses every load."""
@@ -214,12 +229,6 @@ class ErgodicMission(Node):
     def on_position(self, message: VehicleLocalPosition) -> None:
         self.position, self.position_received = message, time.monotonic()
 
-    def position_age(self, position: VehicleLocalPosition | None) -> float:
-        """Seconds since the latest local position, or ``inf`` if it is invalid."""
-        if position is None or not (position.xy_valid and position.v_xy_valid):
-            return math.inf
-        return time.monotonic() - self.position_received
-
     # --- Load and preflight ---------------------------------------------------------------
 
     def load_refusal(self, position: VehicleLocalPosition | None) -> str | None:
@@ -231,8 +240,9 @@ class ErgodicMission(Node):
             return "a preflight is already running"
         if self.heartbeat.state_label == "MISSION":
             return "the drone is in MISSION; hold it before loading"
-        if self.position_age(position) > STALE_POSITION_S:
-            return "no fresh, valid local position from PX4"
+        problem = position_problem(position, self.position_received, time.monotonic())
+        if problem is not None:
+            return problem
         if not position.xy_global:
             return "PX4 has no global origin yet (xy_global is false)"
         return None
@@ -268,8 +278,8 @@ class ErgodicMission(Node):
 
     def run_preflight(self, mission, state: np.ndarray) -> None:
         """Pick a device that holds the deadline, then fly the mission in the model."""
+        checks, chosen = [], None
         try:
-            checks, chosen = [], None
             zeros = jnp.zeros((mission.params.mppi.horizon, 3), dtype=jnp.float32)
             for device in self.devices():
                 params = jax.device_put(mission.params, device)
@@ -299,7 +309,8 @@ class ErgodicMission(Node):
             )
             self.finish_preflight(mission, checks, chosen, failure)
         except Exception as error:  # a crashed preflight must end in FAULT, never hang
-            self.finish_preflight(mission, [f"preflight: FAIL {error!r}"], None, repr(error))
+            checks.append(f"preflight: FAIL {error!r}")
+            self.finish_preflight(mission, checks, None, repr(error))
 
     def finish_preflight(self, mission, checks: list[str], chosen, failure: str | None) -> None:
         with self.lock:
@@ -340,10 +351,14 @@ class ErgodicMission(Node):
     def start(self) -> bool:
         """Apply the start gate on every MISSION entry, first start or resume."""
         position = self.position
-        age = self.position_age(position)
-        xy = (position.x, position.y) if math.isfinite(age) else (0.0, 0.0)
-        moved = position is not None and position.ref_timestamp != self.reference_stamp
-        failure = start_failure(self.mission, xy, age, moved)
+        failure = position_problem(position, self.position_received, time.monotonic())
+        if failure is None:
+            failure = start_failure(
+                self.mission,
+                (position.x, position.y),
+                time.monotonic() - self.position_received,
+                position.ref_timestamp != self.reference_stamp,
+            )
         if failure is not None:
             self.abort("FAULT", f"start refused: {failure}")
             return False
@@ -359,13 +374,22 @@ class ErgodicMission(Node):
     def fly(self) -> None:
         """One controller step: guard, solve, check the plan, publish."""
         mission, position = self.mission, self.position
-        if self.position_age(position) > STALE_POSITION_S:
-            return  # no command: mullet_core holds once the stream goes stale
+        problem = position_problem(position, self.position_received, time.monotonic())
+        if problem is not None:
+            # No command: mullet_core holds once the stream goes stale.
+            self.get_logger().warn(f"skipping a step: {problem}", throttle_duration_sec=1.0)
+            return
         if position.ref_timestamp != self.reference_stamp:
             self.abort("FAULT", "PX4 moved its EKF origin mid-mission; load the mission again")
             return
-        yaw_rate = float(self.carry.state[5])
-        observation = jax.device_put(jnp.asarray(observation_from(position, yaw_rate)), self.device)
+        # Feed each PX4 measurement once; between measurements, step from the model's own
+        # prediction rather than re-applying a position the vehicle has already left.
+        if position.timestamp != self.last_position_stamp:
+            self.last_position_stamp = position.timestamp
+            yaw_rate = float(self.carry.state[5])
+            observation = jax.device_put(jnp.asarray(observation_from(position, yaw_rate)), self.device)
+        else:
+            observation = self.carry.state
         begin = time.perf_counter()
         self.carry, result = self.step(self.params, self.carry, observation)
         plan = np.asarray(result.optimal_trajectory)

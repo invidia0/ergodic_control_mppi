@@ -397,7 +397,8 @@ def dry_run_failure(mission: Mission, state: jax.Array, key: jax.Array, seconds:
     Returns:
             Why the mission must not fly, or ``None`` when the model flight is clean.
     """
-    delta_t = mission.params.model.delta_t
+    # Parameters placed on a device hold delta_t as an array; the scan length must be static.
+    delta_t = float(mission.params.model.delta_t)
     steps = max(1, round(seconds / delta_t))
     controls = jnp.zeros((mission.params.mppi.horizon, 3), dtype=jnp.float32)
     result = jax.jit(run_single, static_argnames="steps")(

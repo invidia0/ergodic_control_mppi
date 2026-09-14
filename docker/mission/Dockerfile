@@ -25,8 +25,9 @@ ENV LD_LIBRARY_PATH=/opt/cuda-compat/usr/local/cuda-13.2/compat_orin
 
 COPY --from=uv /uv /bin/
 WORKDIR /workspace
-COPY pyproject.toml uv.lock .python-version README.md LICENSE ./
-# Dependencies only: the package itself is imported from /workspace via PYTHONPATH.
+COPY pyproject.toml uv.lock .python-version ./
+# Dependencies only: the package itself is imported from /workspace via PYTHONPATH. Only the
+# lock files are copied first, so doc edits never invalidate the dependency and px4_msgs layers.
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never
 RUN uv sync --frozen --no-dev --no-install-project --extra cuda13
 

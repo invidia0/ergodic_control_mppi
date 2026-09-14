@@ -5,6 +5,7 @@ import math
 import unittest
 from dataclasses import replace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -195,6 +196,13 @@ class DryRunTest(unittest.TestCase):
     def test_clean_flight_passes(self):
         state = jnp.zeros(6, dtype=jnp.float32)
         self.assertIsNone(dry_run_failure(self.mission, state, controller_key(0), 0.5))
+
+    def test_device_placed_parameters_run(self):
+        """The node dry-runs parameters after device_put, which turns floats into arrays."""
+        device = jax.devices("cpu")[0]
+        mission = self.mission._replace(params=jax.device_put(self.mission.params, device))
+        state = jax.device_put(jnp.zeros(6, dtype=jnp.float32), device)
+        self.assertIsNone(dry_run_failure(mission, state, controller_key(0), 0.1))
 
     def test_start_inside_a_margin_fails(self):
         state = jnp.asarray([9.9, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
