@@ -1,222 +1,165 @@
-# Ergodic Control MPPI
+# Ergodic MPPI for MULLET drones
 
-JAX implementation of service-gated potential-gradient Model Predictive Path Integral
-control for single-robot ergodic coverage of a Gaussian-mixture target density.
+The `mullet-deploy` branch of the ergodic MPPI controller: only what the drone runs and
+tests. Research code, experiments, figures and simulators live on `main`.
 
-![Perlin occupancy flight](figures/fig_perlin.png)
+The controller is service-gated potential-gradient MPPI for single-robot ergodic coverage
+of a Gaussian-mixture target density, in JAX. On the drone it is one MULLET *mission
+framework*:
 
-The same lifted controller flying a Perlin occupancy volume (the SITL map rule:
-mockamap `perlin3D` thresholded to 10% of the slab). Bunny-shell, 3D pillar, and
-planar deployment snapshots:
+```text
+paddock (operator)  --LoadMission-->  ergodic_mission  --MissionCommand-->  mullet_core  -->  PX4
+                    <--MissionStatus--  (this repo)     <--heartbeat, local position--
+```
 
-| Stanford bunny shell | 3D pillars | Planar deployment |
-|---|---|---|
-| ![Bunny](figures/fig_bunny.png) | ![Volumetric](figures/fig_volumetric.png) | ![Deployment](figures/fig_deployment.png) |
+`mullet_core` owns arming, Offboard, takeoff, land and hold, and forwards mission commands
+to PX4 only in `MISSION`. This node never talks to `/fmu/in/*`; every refusal ends in
+`mullet_core`'s own hold.
 
-## Implementation
-
-At every control step, the controller samples `mppi.K` noisy control sequences
-over `mppi.T` steps, integrates the double integrator, and scores obstacle,
-map-boundary, MPPI control, and reference-field tracking costs. The weighted
-update becomes the next receding-horizon control sequence.
-
-YAML runs are planar. Position dimension `d > 2` is available through
-`ergodic_control_mppi.experiments.dimension.lift`; the planar branch stays
-bit-identical.
+## Layout
 
 | Path | Responsibility |
 |---|---|
-| `ergodic_control_mppi/config.py` | One-pass YAML loading and validation |
-| `ergodic_control_mppi/parameters.py` | Immutable JAX parameter trees and typed experiment variants |
-| `ergodic_control_mppi/models/double_integrator.py` | Batch-compatible dynamics: state `(2d+2,)`, control `(d+1,)` |
-| `ergodic_control_mppi/mppi/core.py` | Sampling, rollout costs, reference-field tracking, and MPPI update |
-| `ergodic_control_mppi/mppi/field.py` | Analytic GMM score, KDE repulsion, service gating, and scalar potential |
-| `ergodic_control_mppi/mppi/single.py` | Single-robot closed-loop scan |
-| `ergodic_control_mppi/mppi/replay.py` | Measured-state replay of a recorded flight |
-| `ergodic_control_mppi/deploy/` | Occupancy-grid adapters used by ROS 2 and offline UAV maps |
-| `ergodic_control_mppi/simulation.py` | Device selection, initialization, dispatch, and NumPy results |
-| `ergodic_control_mppi/metrics/` | Ergodicity, discrepancy, modes, and coordination metrics |
-| `ergodic_control_mppi/experiments/` | Experiment runners, baselines, analyses, and reports |
-| `ergodic_control_mppi/plotting/` | Simulation and publication figures, including `dimension.py` |
+| `ergodic_control_mppi/config.py` | One-pass YAML loading and validation; `gmm_params` |
+| `ergodic_control_mppi/parameters.py` | Immutable JAX parameter trees |
+| `ergodic_control_mppi/models/double_integrator.py` | Dynamics: state `(6,)`, control `(3,)` |
+| `ergodic_control_mppi/mppi/core.py` | Sampling, rollout costs, reference-field tracking, MPPI update |
+| `ergodic_control_mppi/mppi/field.py` | GMM score, KDE repulsion, service gate, scalar potential |
+| `ergodic_control_mppi/mppi/single.py` | Closed loop: `single_step`, `measured_step`, `run_single` |
+| `ergodic_control_mppi/deploy/grid.py` | Inflation budget, reachability and path-blocking queries |
+| `ergodic_control_mppi/deploy/mission.py` | Spec compiler, frames, start gate, command shaping, dry run |
+| `ergodic_control_mppi/simulation.py` | Device selection and offline runs used by the tests |
+| `configs/uav_profile.yaml` | Tuned base profile every mission specialises |
+| `ros2/ergodic_mission/` | The ROS 2 node |
+| `ros2/mullet-interfaces/` | Submodule: the MULLET wire contract (`MissionCommand`, `MissionStatus`, `LoadMission`) |
+| `docker/mission/` | Image, compose file and `.env.example` |
 
-`run_simulation(...)` always returns paths with shape `(steps, 1, 6)` (a
-trivial robot axis kept for metric/plot compatibility). Internally,
-`run_single(...)` uses `(steps, 2d+2)`. Obstacles have shape `(num_obstacles, 3)`
-and may be empty; `d >= 3` may append a pillar top height as a fourth column.
+State `(6,) = [px, py, vx, vy, yaw, yaw_rate]`, control `(3,) = [ax, ay, yaw_accel]`, both in
+PX4 local NED.
 
-## Reference potential field
+## Mission spec `ergodic/1`
 
-At every control step, rollout evaluation states are the current position
-followed by the first `T - 1` sampled positions. Their temporal increments are
-scored with the velocity-residual objective
-`sum(-dt * h(z_k) @ delta_z_k + 0.5 * ||delta_z_k||^2)`. The reference velocity
-`h(z_k)` is evaluated once on the horizon-wise median of those states and
-broadcast across rollouts. Before its speed gauge, the field is the gradient of
-the explicit scalar potential in `ergodic_control_mppi/mppi/field.py`: an
-analytic target-density score plus KDE repulsion from the fading executed trail
-and from the plan itself. Density and recent per-mode service schedule the
-tracked speed. The returned surrogate remains the median of all `T` future
-sampled positions.
+The paddock sends one JSON document per mission. The drone validates it and refuses it
+with an operator-readable reason; unknown keys are refused.
 
-MPPI temperature adapts toward `mppi.ess_target`, and the control-cost
-coefficient is recomputed from the current temperature and `mppi.alpha` at
-every step.
-
-## Installation
-
-The base installation is CPU-capable and depends on plain `jax`:
-
-```bash
-uv sync --python 3.12
+```json
+{
+  "schema": "ergodic/1",
+  "mission_id": "field-a",
+  "command_mode": "velocity",
+  "duration_s": 300,
+  "vehicle": {"radius_m": 0.45, "clearance_m": 0.15, "tracking_allowance_m": 0.2,
+              "max_speed_mps": 1.5, "max_accel_mps2": 3.0, "brake_accel_mps2": 3.0,
+              "reaction_time_s": 0.1},
+  "area": [[44.6301, 10.9471], [44.6305, 10.9480], [44.6299, 10.9486]],
+  "obstacles": [
+    {"type": "circle", "center": [44.6302, 10.9478], "radius_m": 1.5},
+    {"type": "polygon", "points": [[44.63, 10.9475], [44.6301, 10.9476], [44.63, 10.9477]]}
+  ],
+  "density": [
+    {"mean": [44.6303, 10.9479], "sigma_major_m": 6, "sigma_minor_m": 2, "bearing_deg": 30, "weight": 2}
+  ]
+}
 ```
 
-Optional environments are:
+- Points are WGS84 `[lat, lon]` degrees; sizes are metres; bearings are degrees clockwise
+  from north; density weights are relative.
+- `command_mode` is `velocity` (PX4 tracks the planned velocity with the MPPI acceleration
+  as feedforward) or `acceleration` (PX4 tracks the MPPI acceleration).
+- The area polygon is the geofence: everything outside it is an obstacle. Obstacles are 2D
+  footprints that block every altitude; the drone flies at the altitude it had on entering
+  `MISSION`.
+- Every obstacle and the area edge are grown by the stopping-distance budget of
+  `deploy/grid.py:inflation_radius`, computed from the `vehicle` block.
+- `max_speed_mps` scales the speed schedule so its corridor peak is the limit; the node also
+  clamps every velocity command to it. `max_accel_mps2` is the model's per-axis limit.
+- The grid is 0.15 m; areas above 2 M cells (about 200 m x 200 m) are refused.
+
+**Frames.** At load the drone projects every point into its PX4 local NED frame around the
+EKF origin (`VehicleLocalPosition.ref_lat/ref_lon`) with PX4's own azimuthal-equidistant map
+projection, and the controller runs in NED directly. If PX4 moves its EKF origin after the
+load, the mission is refused or aborted and must be loaded again.
+
+## The node
+
+`ergodic_mission` takes one parameter that matters, `drone_id`, and derives every other name
+from that drone's `/mullet/heartbeat`:
+
+| Direction | Name | Type |
+|---|---|---|
+| sub | `/mullet/heartbeat` | `mullet_interfaces/DroneHeartbeat` |
+| sub | `<px4_fmu_prefix>/fmu/out/vehicle_local_position` | `px4_msgs/VehicleLocalPosition` |
+| pub | `<ros_namespace>/command` | `mullet_interfaces/MissionCommand` |
+| pub | `/mullet/mission_status` (2 Hz) | `mullet_interfaces/MissionStatus` |
+| srv | `<ros_namespace>/mission/ergodic/load` | `mullet_interfaces/LoadMission` |
+| client | heartbeat `hold_service_path` | `std_srvs/Trigger` |
+
+States: `SELF_TEST → EMPTY → PREPARING → READY → RUNNING ⇄ PAUSED → DONE`, or `FAULT`.
+
+Nothing is `READY` unless every layer below passes, and each result is reported in
+`MissionStatus.preflight`:
+
+1. **Build.** The image build runs the full unit suite and the node's tests; red means no image.
+2. **Boot.** The node runs the fast safety-relevant modules (config, closed loop, grid,
+   mission) on the CPU in a subprocess. A failure refuses every load.
+3. **Load.** `spec` (validation, projection, reachability of the drone and every mode), then
+   `device` (compile and time 200 steps on the GPU; if the 99th percentile misses
+   `deadline_ms`, 16 ms by default, the same on the CPU; if neither holds, `FAULT`), then
+   `dry_run` (fly the compiled mission for `preflight_seconds`, 20 s, in the model: no safety
+   margin entered, never outside the area, speed in bounds, all values finite).
+4. **Start.** On every `MISSION` entry: fresh local position, EKF origin unchanged, drone in
+   a free cell. Otherwise it calls `hold` and goes `FAULT`.
+
+In flight, every step: a local position older than 0.1 s publishes nothing (mullet_core
+holds after 0.25 s); an EKF origin change, or a plan whose next second enters a safety
+margin, calls `hold` and goes `FAULT`; reaching `duration_s` calls `hold` and goes `DONE`.
+Leaving `MISSION` pauses the mission with its coverage memory kept, and `start_mission`
+resumes it.
+
+## Build and deploy
+
+Clone with the submodule (`git clone --recursive`, or `git submodule update --init`).
+
+On the drone (Jetson Orin Nano, JetPack 6.2.2), next to MULLET's own container:
 
 ```bash
-uv sync --python 3.12 --extra cuda13  # NVIDIA CUDA 13 JAX wheels
+rsync -az --delete --exclude-from=.dockerignore ./ orin:ergodic_control_mppi_v2/
+ssh orin 'cd ergodic_control_mppi_v2/docker/mission && cp -n .env.example .env && docker compose up -d --build'
+ssh orin 'docker logs -f ergodic-mission'
 ```
 
-This follows the official JAX split between plain CPU `jax` and accelerator
-extras such as [`jax[cuda13]`](https://docs.jax.dev/en/latest/installation.html).
+Set `DRONE_ID` and `ROS_DOMAIN_ID` in `docker/mission/.env` to match `mullet_core`. The image
+uses the NVIDIA runtime; on the Orin, JAX's CUDA 13 build runs on the JetPack 6 driver
+through NVIDIA's user-space forward-compatibility libraries.
 
-## Simulation
+Measured on the Orin Nano at 15 W (`T=150`, `K=250`, 50 Hz): GPU p50 7.1 ms / p99 13.6 ms;
+CPU p50 45 ms / p99 69 ms. The GPU holds the deadline; the CPU fallback does not, so a drone
+without a working GPU refuses missions (`FAULT`) rather than flying late. 100 Hz (`T=300`)
+misses on both.
 
-Run from the repository root:
+For SITL on an amd64 host, build against the simulator's PX4 messages:
 
 ```bash
-uv run python scripts/main.py
-uv run python scripts/main.py --config configs/mppi_params.yaml --device cpu --no-plot
+cd docker/mission && PX4_MSGS_REF=release/1.16 DRONE_ID=uav_1 ROS_DOMAIN_ID=42 docker compose up --build
 ```
 
-The CLI accepts `--device auto|cpu|gpu`. `auto` uses a GPU when JAX exposes one
-and otherwise falls back to CPU. Controller imports do not query devices,
-print, log, or import plotting.
+## Pulling algorithm updates from `main`
 
-Planar model dimensions are not configuration keys:
-
-- state `(6,)`: `[px, py, vx, vy, yaw, yaw_rate]`
-- control `(3,)`: `[ax, ay, angular_acceleration]`
-
-Active MPPI keys are `mppi.T`, `mppi.K`, `mppi.lambda`, `mppi.alpha`,
-`mppi.exploration`, `mppi.smooth_window`, `mppi.ess_target`, `mppi.lam_min`,
-`mppi.lam_max`, `mppi.memory_length`, and `mppi.noise.sigma`. Reference-field
-keys are `reference.weight_track`, `reference.reference_speed`,
-`reference.memory_time`, `reference.memory_balance`, `reference.memory_gain`,
-`reference.fill_resolution`, `reference.fine_bandwidth`, `reference.plan_gain`,
-`reference.transit_speedup`, `reference.dwell_slowdown`,
-`reference.service_floor`, `reference.service_time`,
-`reference.deficit_ceiling`, and `reference.release_ratio`.
-
-`mppi.memory_length` defaults to `ceil(3 * reference.memory_time /
-model.delta_t)`. `reference.fine_bandwidth` defaults to
-`2 * reference.fill_resolution ** 2`; either derived value can be overridden
-explicitly.
-
-## UAV simulator and ROS 2
-
-[`uav_simulator/`](uav_simulator/) is the vendored SO3 quadrotor, mockamap, and
-map-generator stack used for SITL. Origin, license, and local integration notes
-are in [`uav_simulator/SOURCE.md`](uav_simulator/SOURCE.md).
-
-The ROS 2 Jazzy package in [`ros2/ergodic_control_mppi_ros/`](ros2/ergodic_control_mppi_ros/)
-flies the same JAX controller on that simulator: map adapter, online driver,
-independent safety guard, and a recorder that pairs every flight with an ideal
-offline run on the identical grid, start state, and seed. Build, topic map,
-launch arguments, and safety budget are in
-[`ros2/ergodic_control_mppi_ros/README.md`](ros2/ergodic_control_mppi_ros/README.md).
-
-With `DISPLAY` and `XAUTHORITY` exported for the host XWayland session:
+This branch deletes the research tree, so merge controller changes by path and re-run the
+suite:
 
 ```bash
-docker compose -f docker/ros2/compose.yaml up --build scene
+git checkout main -- ergodic_control_mppi/mppi ergodic_control_mppi/models \
+    ergodic_control_mppi/parameters.py ergodic_control_mppi/config.py
+JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests
 ```
-
-This opens one RViz window with the Perlin map, configured target density,
-native SO3 drone, and live trail. Headless:
-
-```bash
-docker compose -f docker/ros2/compose.yaml run --rm uav \
-    ros2 launch ergodic_control_mppi_ros scene.launch.py rviz:=false
-```
-
-The launch accepts `config:=PATH`.
-
-Fixed-altitude UAV smoke run:
-
-```bash
-docker compose -f docker/ros2/compose.yaml build uav
-docker compose -f docker/ros2/compose.yaml run --rm uav \
-    ros2 launch ergodic_control_mppi_ros uav.launch.py \
-        config:=/workspace/configs/uav_profile.yaml run_id:=smoke steps:=200 rviz:=false
-```
-
-`configs/uav_profile.yaml` is the deployment configuration (`T=150`, `K=250`).
-`configs/uav_profile_T150.yaml` is the same frozen profile.
-`configs/mppi_params.yaml` is the default offline simulation configuration.
-
-## Research commands
-
-Experiment YAML lives in `configs/experiments/`. Destructive runners refuse to
-replace CSV output unless `--overwrite` is supplied.
-
-```bash
-uv run python -m ergodic_control_mppi.experiments.literature --config configs/experiments/literature_comparison.yaml --overwrite
-uv run python -m ergodic_control_mppi.experiments.baselines --help
-uv run python scripts/final_ablation.py --help
-uv run python scripts/theory_audit.py --help
-uv run python -m ergodic_control_mppi.experiments.dimension {clutter3d,scaling} --help
-uv run python scripts/dimension_figure.py --pillars 20 --seed 0
-uv run python -m ergodic_control_mppi.experiments.bunny {run,figure} --help
-uv run python -m ergodic_control_mppi.experiments.perlin {run,figure} --help
-```
-
-The dimension studies fly the deployed profile with its position dimension
-lifted and every gain unchanged. `clutter3d` flies a 3D pillar field in which
-half the pillars can be flown over, against the same controller held at the
-target's mean altitude. `scaling` sweeps workspace dimensions 2, 3, 4 and 6 on
-an open box against d-dimensional SMC and HEDAC. Outputs default to
-`results/dimension/`. `scripts/dimension_figure.py` renders one stored 3D path.
-
-The bunny comparison flies the same lifted controller around the Stanford bunny
-scan (fetched once into `results/bunny/` and pinned by hash) against HEDAC,
-FMEC, SMC and SVES transcribed to 3D. The target is a shell 0.75 m off the
-scanned surface.
-
-The Perlin demo flies the same lifted controller and the three-altitude target
-of `clutter3d` through Perlin noise thresholded to 10% of the slab, as a 0.1 m
-voxel grid. `run` scores certificate, contact, and altitude use; `figure`
-renders four frames of one stored path. Outputs default to `results/perlin/`.
-
-These runners write an adjacent `.manifest.json` containing resolved inputs,
-source hashes, and execution metadata. Resume requires matching provenance;
-incompatible outputs require a fresh output path or `--overwrite`.
-
-The frozen T150 bundle lives under `results/uav/T150/`:
-
-```bash
-uv run python scripts/run_t150_revision.py plan --bundle results/uav/T150
-uv run python scripts/run_t150_revision.py run --bundle results/uav/T150
-```
-
-`scripts/report_figures.py` renders paired ablation effects. Timing outputs have
-provenance manifests and require `--overwrite` for replacement.
-
-Trial CSV rows preserve the established scalar fields, including
-`team_ergodic_error`, `pairwise_overlap`, `safety_metric`,
-`redundancy_metric`, `R_pair`, `D_min_pair`, and `runtime_ms`.
 
 ## Validation
 
 ```bash
-uv run python -m compileall ergodic_control_mppi scripts tests
+uv run python -m compileall ergodic_control_mppi tests
 JAX_PLATFORMS=cpu uv run python -m unittest discover -s tests -v
 uv lock --check
 ```
 
-The ROS package has its own tests, which need the container:
-
-```bash
-docker compose -f docker/ros2/compose.yaml run --rm uav \
-    bash -lc 'cd /ros_ws && colcon test --packages-select ergodic_control_mppi_ros \
-              && colcon test-result --verbose'
-```
+The node's own tests need ROS 2; they run inside the image build.
