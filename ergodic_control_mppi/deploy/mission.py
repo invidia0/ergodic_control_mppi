@@ -29,8 +29,12 @@ MAX_GRID_CELLS = 2_000_000
 # ponytail: allowance for the model overshooting the scheduled speed peak; the node clamps
 # every command to max_speed regardless, so this only catches a mis-scaled schedule.
 SPEED_TOLERANCE = 1.25
-# Oldest local position a mission may start or step from; mullet_core holds after 0.25 s.
-STALE_POSITION_S = 0.1
+# Oldest local position a mission may start or step from; mullet_core holds 0.25 s after the
+# last command. Between measurements the controller steps on its own prediction.
+STALE_POSITION_S = 0.2
+# ponytail: proportional speed cap on the acceleration along the measured velocity, in 1/s per
+# m/s of speed margin. Tune on the airframe if it brakes too softly or too hard near the limit.
+SPEED_CAP_GAIN = 2.0
 
 _SPEC_KEYS = {
     "schema", "mission_id", "command_mode", "duration_s", "vehicle", "area", "obstacles", "density",
@@ -361,27 +365,28 @@ def command_vectors(
             measured_velocity: Measured horizontal NED velocity, shape ``(2,)``.
     Returns:
             ``(velocity, acceleration)``, each shape ``(3,)`` float32 with a NaN z. In
-            acceleration mode the velocity is all NaN.
+            acceleration mode the velocity is all NaN. The acceleration (the feedforward in
+            velocity mode) is capped along the measured velocity so the speed settles at
+            ``max_speed``: the cap shrinks to zero at the limit and brakes above it.
     """
     acceleration = np.asarray(control[:2], dtype=np.float64)
+    measured = np.asarray(measured_velocity, dtype=np.float64)
+    speed = float(np.hypot(*measured))
+    if speed > 1e-3:
+        heading = measured / speed
+        along = float(acceleration @ heading)
+        cap = SPEED_CAP_GAIN * (mission.max_speed - speed)
+        if along > cap:
+            acceleration = acceleration + (cap - along) * heading
     if mission.command_mode == "velocity":
         velocity = np.asarray(planned_state[2:4], dtype=np.float64)
-        speed = float(np.hypot(*velocity))
-        if speed > mission.max_speed:
-            velocity = velocity * (mission.max_speed / speed)
+        planned_speed = float(np.hypot(*velocity))
+        if planned_speed > mission.max_speed:
+            velocity = velocity * (mission.max_speed / planned_speed)
         return (
             np.array([*velocity, np.nan], dtype=np.float32),
             np.array([*acceleration, np.nan], dtype=np.float32),
         )
-    # No velocity loop to clamp in acceleration mode: at the limit, drop the part of the
-    # acceleration that would speed the vehicle up further.
-    measured = np.asarray(measured_velocity, dtype=np.float64)
-    speed = float(np.hypot(*measured))
-    if speed >= mission.max_speed:
-        heading = measured / speed
-        along = float(acceleration @ heading)
-        if along > 0.0:
-            acceleration = acceleration - along * heading
     return np.full(3, np.nan, dtype=np.float32), np.array([*acceleration, np.nan], dtype=np.float32)
 
 

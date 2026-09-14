@@ -184,6 +184,14 @@ class FlightRulesTest(unittest.TestCase):
         _, brake = command_vectors(mission, np.zeros(6), np.array([-1.0, 0.0, 0.0]), (1.5, 0.0))
         np.testing.assert_allclose(slow[:2], [1.0, 1.0])
         np.testing.assert_allclose(brake[:2], [-1.0, 0.0])
+        # Above the limit the cap brakes even when the plan asks for nothing.
+        _, over = command_vectors(mission, np.zeros(6), np.zeros(3), (2.0, 0.0))
+        np.testing.assert_allclose(over[:2], [-1.0, 0.0], atol=1e-6)
+
+    def test_velocity_feedforward_is_capped_at_the_limit(self):
+        planned = np.array([0.0, 0.0, 1.5, 0.0, 0.0, 0.0])
+        _, feedforward = command_vectors(self.mission, planned, np.array([1.0, 0.5, 0.0]), (1.5, 0.0))
+        np.testing.assert_allclose(feedforward[:2], [0.0, 0.5], atol=1e-6)
 
 
 class DryRunTest(unittest.TestCase):
