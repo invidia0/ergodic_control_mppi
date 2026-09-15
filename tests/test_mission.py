@@ -11,14 +11,19 @@ import numpy as np
 
 from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.deploy.grid import world_to_cell
+from ergodic_control_mppi.deploy.grid import path_blocked
 from ergodic_control_mppi.deploy.mission import (
     EARTH_RADIUS_M,
     command_vectors,
     compile_mission,
     dry_run_failure,
+    flight_step,
     ned_from_wgs84,
+    plan_blocked,
     start_failure,
+    unpack_flight,
 )
+from ergodic_control_mppi.mppi.single import initialize_single, measured_step
 from ergodic_control_mppi.simulation import controller_key
 
 REFERENCE = (44.63, 10.95)
@@ -216,6 +221,30 @@ class DryRunTest(unittest.TestCase):
         state = jnp.asarray([9.9, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
         reason = dry_run_failure(self.mission, state, controller_key(0), 0.1)
         self.assertIn("safety margin", reason)
+
+    def test_flight_step_packs_what_the_tick_reads(self):
+        params = self.mission.params
+        state = jnp.asarray([1.0, -2.0, 0.3, 0.1, 0.0, 0.0], dtype=jnp.float32)
+        carry = initialize_single(params, state, jnp.zeros((params.mppi.horizon, 3)), controller_key(0))
+        expected_carry, expected = measured_step(params, carry, state)
+        _, packed = jax.jit(flight_step, static_argnames="plan_steps")(params, carry, state, plan_steps=3)
+        plan, next_state, control = unpack_flight(np.asarray(packed), 3)
+        np.testing.assert_allclose(plan, expected.optimal_trajectory[:3, :2], rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(next_state, expected_carry.state, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(control, expected.control, rtol=1e-5, atol=1e-6)
+
+    def test_plan_check_matches_the_segment_exact_check(self):
+        dense = np.column_stack((np.linspace(-2.0, 2.0, 60), np.zeros(60)))
+        into_margin = np.column_stack((np.linspace(8.0, 9.95, 60), np.zeros(60)))
+        sparse = np.array([[0.0, -9.0], [0.0, 9.0], [0.0, 12.0]])
+        for path in (dense, into_margin, sparse):
+            with self.subTest(end=path[-1].tolist()):
+                self.assertEqual(
+                    plan_blocked(self.mission, path),
+                    path_blocked(self.mission.grid, self.mission.origin, self.mission.resolution, path),
+                )
+        self.assertFalse(plan_blocked(self.mission, dense))
+        self.assertTrue(plan_blocked(self.mission, into_margin))
 
     def test_non_finite_state_fails(self):
         state = jnp.full(6, jnp.nan, dtype=jnp.float32)

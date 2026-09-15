@@ -7,6 +7,7 @@ this drone's heartbeat, never from a guessed namespace. Nothing here overrides m
 leaving ``MISSION`` pauses the mission, and every refusal ends in mullet_core's own hold.
 """
 
+import functools
 import json
 import math
 import os
@@ -31,16 +32,18 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
 from ergodic_control_mppi.config import load_config
-from ergodic_control_mppi.deploy.grid import path_blocked
 from ergodic_control_mppi.deploy.mission import (
     SCHEMA,
     STALE_POSITION_S,
     command_vectors,
     compile_mission,
     dry_run_failure,
+    flight_step,
+    plan_blocked,
     start_failure,
+    unpack_flight,
 )
-from ergodic_control_mppi.mppi.single import initialize_single, measured_step
+from ergodic_control_mppi.mppi.single import initialize_single
 from ergodic_control_mppi.simulation import controller_key
 
 FRAMEWORK = "ergodic"
@@ -81,12 +84,12 @@ def failed_tests(output: str) -> list[str]:
 
 
 def warmup_p99(step, params, carry, observation, deadline_ms: float) -> float:
-    """99th-percentile time of a compiled step, in milliseconds, over the warmup."""
+    """99th-percentile time of a compiled step and its host copy, in ms, over the warmup."""
     durations = []
     for index in range(WARMUP_STEPS):
         begin = time.perf_counter()
-        carry, _ = step(params, carry, observation)
-        jax.block_until_ready(carry.state)
+        carry, result = step(params, carry, observation)
+        jax.device_get(result)
         durations.append((time.perf_counter() - begin) * 1e3)
         if (
             index + 1 >= WARMUP_MIN_STEPS
@@ -139,6 +142,8 @@ class ErgodicMission(Node):
         self.device_label, self.warmup_ms = "", 0.0
         self.step_ms: deque[float] = deque(maxlen=500)
         self.progress = 0.0
+        self.steps = 0
+        self.predicted_state: np.ndarray | None = None
         self.mission = self.params = self.step = self.carry = self.device = None
         self.reference_stamp = None
         self.heartbeat: DroneHeartbeat | None = None
@@ -269,7 +274,7 @@ class ErgodicMission(Node):
             self.reference_stamp = position.ref_timestamp
             self.preflight, self.device_label, self.warmup_ms = ["spec: ok"], "", 0.0
             self.step_ms.clear()
-            self.progress = 0.0
+            self.progress, self.steps = 0.0, 0
             self.set_state("PREPARING", f"preflight of '{mission.mission_id}'")
             state = observation_from(position)
         threading.Thread(target=self.run_preflight, args=(mission, state), daemon=True).start()
@@ -285,8 +290,8 @@ class ErgodicMission(Node):
                 params = jax.device_put(mission.params, device)
                 observation = jax.device_put(jnp.asarray(state), device)
                 carry = jax.device_put(initialize_single(params, observation, zeros, self.key), device)
-                step = jax.jit(measured_step)
-                jax.block_until_ready(step(params, carry, observation)[0].state)  # compile
+                step = jax.jit(functools.partial(flight_step, plan_steps=self.plan_steps))
+                jax.device_get(step(params, carry, observation)[1])  # compile
                 p99 = warmup_p99(step, params, carry, observation, self.deadline_ms)
                 verdict = "ok" if p99 <= self.deadline_ms else "FAIL"
                 checks.append(
@@ -364,15 +369,17 @@ class ErgodicMission(Node):
             return False
         if self.carry is None:  # first start: plan from where the drone is now
             zeros = jnp.zeros((self.params.mppi.horizon, 3), dtype=jnp.float32)
-            observation = jax.device_put(jnp.asarray(observation_from(position)), self.device)
+            self.predicted_state = observation_from(position)
             self.carry = jax.device_put(
-                initialize_single(self.params, observation, zeros, self.key), self.device
+                initialize_single(self.params, jnp.asarray(self.predicted_state), zeros, self.key),
+                self.device,
             )
         self.set_state("RUNNING", f"flying '{self.mission.mission_id}'")
         return True
 
     def fly(self) -> None:
         """One controller step: guard, solve, check the plan, publish."""
+        begin = time.perf_counter()
         mission, position = self.mission, self.position
         problem = position_problem(position, self.position_received, time.monotonic())
         if problem is not None:
@@ -383,22 +390,20 @@ class ErgodicMission(Node):
             self.abort("FAULT", "PX4 moved its EKF origin mid-mission; load the mission again")
             return
         # Feed each PX4 measurement once; between measurements, step from the model's own
-        # prediction rather than re-applying a position the vehicle has already left.
+        # prediction rather than re-applying a position the vehicle has already left. Every
+        # host-device copy costs milliseconds on the Jetson: one upload, one packed download.
         if position.timestamp != self.last_position_stamp:
             self.last_position_stamp = position.timestamp
-            yaw_rate = float(self.carry.state[5])
-            observation = jax.device_put(jnp.asarray(observation_from(position, yaw_rate)), self.device)
+            observation = observation_from(position, float(self.predicted_state[5]))
         else:
             observation = self.carry.state
-        begin = time.perf_counter()
-        self.carry, result = self.step(self.params, self.carry, observation)
-        plan = np.asarray(result.optimal_trajectory)
-        self.step_ms.append((time.perf_counter() - begin) * 1e3)
-        if path_blocked(mission.grid, mission.origin, mission.resolution, plan[: self.plan_steps, :2]):
+        self.carry, packed = self.step(self.params, self.carry, observation)
+        plan, self.predicted_state, control = unpack_flight(np.asarray(packed), self.plan_steps)
+        if plan_blocked(mission, plan):
             self.abort("FAULT", "the plan entered a safety margin; drone held")
             return
         velocity, acceleration = command_vectors(
-            mission, plan[0], np.asarray(result.control), (position.vx, position.vy)
+            mission, self.predicted_state, control, (position.vx, position.vy)
         )
         command = MissionCommand()
         command.stamp = self.get_clock().now().to_msg()
@@ -407,7 +412,15 @@ class ErgodicMission(Node):
         command.acceleration_ned_mps2 = acceleration.tolist()
         command.yaw_ned_rad = math.nan
         self.command_publisher.publish(command)
-        elapsed = int(self.carry.step_index) * self.delta_t
+        tick_ms = (time.perf_counter() - begin) * 1e3
+        self.step_ms.append(tick_ms)
+        if tick_ms > self.delta_t * 1e3:
+            self.get_logger().warn(
+                f"tick took {tick_ms:.1f} ms, over the {self.delta_t * 1e3:.0f} ms period",
+                throttle_duration_sec=5.0,
+            )
+        self.steps += 1
+        elapsed = self.steps * self.delta_t
         self.progress = min(elapsed / mission.duration_s, 1.0)
         if elapsed >= mission.duration_s:
             self.abort("DONE", f"'{mission.mission_id}' completed {mission.duration_s:.0f} s")

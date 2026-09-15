@@ -16,8 +16,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from ergodic_control_mppi.config import gmm_params
-from ergodic_control_mppi.deploy.grid import all_reachable, inflate, inflation_radius, world_to_cell
-from ergodic_control_mppi.mppi.single import run_single
+from ergodic_control_mppi.deploy.grid import (
+    all_reachable,
+    inflate,
+    inflation_radius,
+    path_blocked,
+    world_to_cell,
+)
+from ergodic_control_mppi.mppi.single import SingleControllerState, measured_step, run_single
 from ergodic_control_mppi.parameters import ControllerParams
 
 SCHEMA = "ergodic/1"
@@ -388,6 +394,59 @@ def command_vectors(
             np.array([*acceleration, np.nan], dtype=np.float32),
         )
     return np.full(3, np.nan, dtype=np.float32), np.array([*acceleration, np.nan], dtype=np.float32)
+
+
+def flight_step(
+    params: ControllerParams,
+    carry: SingleControllerState,
+    observation: jax.Array,
+    plan_steps: int,
+) -> tuple[SingleControllerState, jax.Array]:
+    """
+    One controller step, packed so the host needs a single device-to-host copy.
+
+    Each copy costs milliseconds on the Jetson, so everything a flight tick reads comes back
+    in one flat array; split it with :func:`unpack_flight`.
+
+    Args:
+            params: Controller parameters.
+            carry: Current closed-loop carry.
+            observation: Measured (or predicted) state with shape ``(6,)``.
+            plan_steps: Planned positions to return; static under JIT.
+    Returns:
+            The next carry and a float32 array of length ``2 * plan_steps + 9``.
+    """
+    carry, result = measured_step(params, carry, observation)
+    packed = jnp.concatenate(
+        (result.optimal_trajectory[:plan_steps, :2].ravel(), carry.state, result.control)
+    )
+    return carry, packed
+
+
+def unpack_flight(packed: np.ndarray, plan_steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split :func:`flight_step`'s array into planned positions, next state and control."""
+    split = 2 * plan_steps
+    return packed[:split].reshape(plan_steps, 2), packed[split:split + 6], packed[split + 6:split + 9]
+
+
+def plan_blocked(mission: Mission, positions: np.ndarray) -> bool:
+    """
+    Whether a planned polyline touches a blocked cell or leaves the grid.
+
+    Planned points are one controller step apart, far closer than half a cell at the speed
+    cap, so checking the points alone cannot step over a blocked cell. Sparser plans fall back
+    to the segment-exact :func:`path_blocked`.
+    """
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
+    if positions.shape[0] > 1 and np.max(np.linalg.norm(np.diff(positions, axis=0), axis=1)) > 0.5 * mission.resolution:
+        return path_blocked(mission.grid, mission.origin, mission.resolution, positions)
+    height, width = mission.grid.shape
+    rows, columns = world_to_cell(positions, mission.origin, mission.resolution).T
+    inside = (rows >= 0) & (rows < height) & (columns >= 0) & (columns < width)
+    return bool(
+        (~inside).any()
+        or mission.grid[np.clip(rows, 0, height - 1), np.clip(columns, 0, width - 1)].any()
+    )
 
 
 def dry_run_failure(mission: Mission, state: jax.Array, key: jax.Array, seconds: float) -> str | None:
