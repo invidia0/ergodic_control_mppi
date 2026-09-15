@@ -143,13 +143,29 @@ step, one packed download, plan guard, command shaping) is GPU p50 10.4 ms / p99
 against the 20 ms period; each host-device copy costs about 2.5 ms on the Jetson, which is why
 `flight_step` returns everything in one array. The GPU holds the deadline; the CPU fallback does
 not, so a drone without a working GPU refuses missions (`FAULT`) rather than flying late.
-100 Hz (`T=300`) misses on both.
+At MAXN_SUPER (Super firmware, GPU 1020 MHz) the preflight gate's step p99 is 14.6 ms against the
+16 ms deadline (15.6-15.8 ms at 15 W). 100 Hz (`T=300`, 8 ms deadline) misses on both devices,
+even at MAXN_SUPER (GPU p99 21.5 ms).
 
-For SITL on an amd64 host, build against the simulator's PX4 messages:
+### SITL and HIL
+
+The simulator matches the drone: ROS 2 Jazzy and PX4 1.17 (`px4_msgs` `release/1.17`, what the
+Pixhawks run). Run `mullet_sitl_sim` headless, run a mission node for one simulated drone, and fly
+it with the end-to-end harness (`tests/sitl/sitl_e2e.py`: takeoff, both command modes through
+preflight, start, a 15 s rate check, hold, resume and DONE, then land):
 
 ```bash
-cd docker/mission && PX4_MSGS_REF=release/1.16 DRONE_ID=uav_1 ROS_DOMAIN_ID=42 docker compose up --build
+../MULLET/mullet_sitl_sim/run.sh --headless --config config/paddock.yaml --domain 42
+# HIL: the node on the Orin, for simulated drone uav_1 (the GPU holds the real 16 ms gate)
+ssh orin 'docker run -d --name ergodic-mission-hil --network host --runtime nvidia --memory 4g \
+  -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -e NVIDIA_DISABLE_REQUIRE=1 \
+  -e ROS_DOMAIN_ID=42 -e DRONE_ID=uav_1 ergodic-mission:latest'
+docker run --rm --network host -e ROS_DOMAIN_ID=42 -v "$PWD/tests/sitl:/sitl:ro" \
+  ergodic-mission:latest python /sitl/sitl_e2e.py --drone uav_1
 ```
+
+On a laptop GPU the node misses the 16 ms gate and refuses missions; for a flow-only run start it
+with `--ros-args -p drone_id:=uav_1 -p deadline_ms:=150`.
 
 ## Pulling algorithm updates from `main`
 
