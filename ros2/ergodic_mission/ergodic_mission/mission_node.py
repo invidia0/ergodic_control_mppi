@@ -7,7 +7,6 @@ this drone's heartbeat, never from a guessed namespace. Nothing here overrides m
 leaving ``MISSION`` pauses the mission, and every refusal ends in mullet_core's own hold.
 """
 
-import functools
 import json
 import math
 import os
@@ -36,9 +35,9 @@ from ergodic_control_mppi.deploy.mission import (
     SCHEMA,
     STALE_POSITION_S,
     command_vectors,
+    compile_flight,
     compile_mission,
     dry_run_failure,
-    flight_step,
     plan_blocked,
     start_failure,
     unpack_flight,
@@ -288,11 +287,12 @@ class ErgodicMission(Node):
             zeros = jnp.zeros((mission.params.mppi.horizon, 3), dtype=jnp.float32)
             for device in self.devices():
                 params = jax.device_put(mission.params, device)
-                observation = jax.device_put(jnp.asarray(state), device)
-                carry = jax.device_put(initialize_single(params, observation, zeros, self.key), device)
-                step = jax.jit(functools.partial(flight_step, plan_steps=self.plan_steps))
-                jax.device_get(step(params, carry, observation)[1])  # compile
-                p99 = warmup_p99(step, params, carry, observation, self.deadline_ms)
+                carry = jax.device_put(
+                    initialize_single(params, jnp.asarray(state), zeros, self.key), device
+                )
+                # Compiles every argument kind flight passes; none may compile mid-flight.
+                step = compile_flight(params, carry, state, self.plan_steps)
+                p99 = warmup_p99(step, params, carry, state, self.deadline_ms)
                 verdict = "ok" if p99 <= self.deadline_ms else "FAIL"
                 checks.append(
                     f"device: {verdict} {device.platform} p99 {p99:.1f} ms "
@@ -306,7 +306,7 @@ class ErgodicMission(Node):
                 return
             device, params, step, p99 = chosen
             failure = dry_run_failure(
-                mission._replace(params=params), observation, self.key, self.preflight_seconds
+                mission._replace(params=params), jnp.asarray(state), self.key, self.preflight_seconds
             )
             checks.append(
                 f"dry_run: {'ok' if failure is None else 'FAIL ' + failure} "

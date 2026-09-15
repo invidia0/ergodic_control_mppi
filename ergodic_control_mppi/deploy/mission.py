@@ -7,6 +7,7 @@ and y (east). A bearing measured clockwise from north is then the x-to-y angle: 
 handedness flip, and headings taken from the plan are PX4 yaw as they are.
 """
 
+import functools
 import math
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -421,6 +422,38 @@ def flight_step(
         (result.optimal_trajectory[:plan_steps, :2].ravel(), carry.state, result.control)
     )
     return carry, packed
+
+
+def compile_flight(
+    params: ControllerParams,
+    carry: SingleControllerState,
+    observation: np.ndarray,
+    plan_steps: int,
+):
+    """
+    JIT :func:`flight_step` and compile every argument kind the flight loop passes.
+
+    The loop feeds a fresh measurement as a host array and, between measurements, the
+    prediction already on the device, first with the initial carry and then with carries the
+    step returned. Each kind is its own compilation, and compiling one mid-flight stalls the
+    loop for seconds, so all of them are compiled here.
+
+    Args:
+            params: Controller parameters, already on the flight device.
+            carry: Initial carry, already on the flight device.
+            observation: A measured state as a host float32 array, shape ``(6,)``.
+            plan_steps: Planned positions each step returns.
+    Returns:
+            The compiled step, called as ``step(params, carry, observation)``.
+    """
+    step = jax.jit(functools.partial(flight_step, plan_steps=plan_steps))
+    observation = np.asarray(observation, dtype=np.float32)
+    next_carry, packed = step(params, carry, observation)
+    jax.device_get(packed)
+    for state in (carry.state, next_carry.state):
+        jax.device_get(step(params, next_carry, state)[1])
+    jax.device_get(step(params, next_carry, observation)[1])
+    return step
 
 
 def unpack_flight(packed: np.ndarray, plan_steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

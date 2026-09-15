@@ -15,6 +15,7 @@ from ergodic_control_mppi.deploy.grid import path_blocked
 from ergodic_control_mppi.deploy.mission import (
     EARTH_RADIUS_M,
     command_vectors,
+    compile_flight,
     compile_mission,
     dry_run_failure,
     flight_step,
@@ -232,6 +233,22 @@ class DryRunTest(unittest.TestCase):
         np.testing.assert_allclose(plan, expected.optimal_trajectory[:3, :2], rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(next_state, expected_carry.state, rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(control, expected.control, rtol=1e-5, atol=1e-6)
+
+    def test_flight_never_recompiles_after_the_preflight(self):
+        """A mid-flight compile stalled the Orin's first tick for 3.4 s."""
+        device = jax.devices("cpu")[0]
+        params = jax.device_put(self.mission.params, device)
+        state = np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        zeros = jnp.zeros((params.mppi.horizon, 3), dtype=jnp.float32)
+        carry = jax.device_put(initialize_single(params, jnp.asarray(state), zeros, controller_key(0)), device)
+        step = compile_flight(params, carry, state, plan_steps=3)
+        compiled = step._cache_size()
+        # The node's sequence: fresh start carry, then measurements and predictions interleaved.
+        start = jax.device_put(initialize_single(params, jnp.asarray(state), zeros, controller_key(0)), device)
+        carry, _ = step(params, start, state)
+        for index in range(4):
+            carry, _ = step(params, carry, state + 0.1 * index if index % 2 else carry.state)
+        self.assertEqual(step._cache_size(), compiled)
 
     def test_plan_check_matches_the_segment_exact_check(self):
         dense = np.column_stack((np.linspace(-2.0, 2.0, 60), np.zeros(60)))

@@ -116,6 +116,11 @@ margin, calls `hold` and goes `FAULT`; reaching `duration_s` calls `hold` and go
 Leaving `MISSION` pauses the mission with its coverage memory kept, and `start_mission`
 resumes it.
 
+Commands: velocity is clamped to `max_speed_mps`, and every acceleration (the feedforward in
+velocity mode) is capped along the measured velocity at `SPEED_CAP_GAIN * (max_speed - speed)`,
+so the speed settles at the limit and the cap brakes above it. Each PX4 measurement is fed to
+the controller once; between measurements it steps on its own prediction.
+
 ## Build and deploy
 
 Clone with the submodule (`git clone --recursive`, or `git submodule update --init`).
@@ -132,10 +137,13 @@ Set `DRONE_ID` and `ROS_DOMAIN_ID` in `docker/mission/.env` to match `mullet_cor
 uses the NVIDIA runtime; on the Orin, JAX's CUDA 13 build runs on the JetPack 6 driver
 through NVIDIA's user-space forward-compatibility libraries.
 
-Measured on the Orin Nano at 15 W (`T=150`, `K=250`, 50 Hz): GPU p50 7.1 ms / p99 13.6 ms;
-CPU p50 45 ms / p99 69 ms. The GPU holds the deadline; the CPU fallback does not, so a drone
-without a working GPU refuses missions (`FAULT`) rather than flying late. 100 Hz (`T=300`)
-misses on both.
+Measured on the Orin Nano at 15 W (`T=150`, `K=250`, 50 Hz): the controller step alone is GPU
+p50 7.1 ms / p99 13.6 ms, CPU p50 45 ms / p99 69 ms. A whole flight tick (observation upload,
+step, one packed download, plan guard, command shaping) is GPU p50 10.4 ms / p99 15.2 ms
+against the 20 ms period; each host-device copy costs about 2.5 ms on the Jetson, which is why
+`flight_step` returns everything in one array. The GPU holds the deadline; the CPU fallback does
+not, so a drone without a working GPU refuses missions (`FAULT`) rather than flying late.
+100 Hz (`T=300`) misses on both.
 
 For SITL on an amd64 host, build against the simulator's PX4 messages:
 
