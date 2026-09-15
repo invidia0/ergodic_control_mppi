@@ -73,6 +73,16 @@ def join_path(namespace: str, name: str) -> str:
     return "/" + "/".join(part for part in (*namespace.split("/"), *name.split("/")) if part)
 
 
+def px4_topic(name: str, message_type) -> str:
+    """PX4's DDS name for a message topic: a ``MESSAGE_VERSION`` above 0 adds ``_v<N>``.
+
+    The version comes from the px4_msgs build, which is pinned to the firmware's line
+    (VehicleLocalPosition is v1 from PX4 1.17, so its topic is ``vehicle_local_position_v1``).
+    """
+    version = getattr(message_type, "MESSAGE_VERSION", 0)
+    return f"{name}_v{version}" if version else name
+
+
 def failed_tests(output: str) -> list[str]:
     """Names of the failing tests in unittest's report."""
     return [
@@ -215,7 +225,7 @@ class ErgodicMission(Node):
         """Create every drone-specific interface from the paths the heartbeat carries."""
         self.create_subscription(
             VehicleLocalPosition,
-            heartbeat.px4_fmu_prefix + "/fmu/out/vehicle_local_position",
+            px4_topic(heartbeat.px4_fmu_prefix + "/fmu/out/vehicle_local_position", VehicleLocalPosition),
             self.on_position,
             PX4_QOS,
             callback_group=self.callbacks,

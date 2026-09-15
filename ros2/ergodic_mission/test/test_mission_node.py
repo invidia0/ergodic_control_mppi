@@ -1,4 +1,4 @@
-"""The node's own glue: name joining, self-test parsing, and the deadline gate."""
+"""The node's own glue: name joining, PX4 topic names, self-test parsing, and the deadline gate."""
 
 import time
 import unittest
@@ -12,6 +12,7 @@ from ergodic_mission.mission_node import (
     failed_tests,
     join_path,
     position_problem,
+    px4_topic,
     warmup_p99,
 )
 
@@ -26,6 +27,17 @@ class JoinPathTest(unittest.TestCase):
         self.assertEqual(join_path("/", "command"), "/command")
         self.assertEqual(join_path("/px4_1", "command"), "/px4_1/command")
         self.assertEqual(join_path("/px4_1/", "mission/ergodic/load"), "/px4_1/mission/ergodic/load")
+
+
+class Px4TopicTest(unittest.TestCase):
+    def test_versioned_messages_get_the_suffix(self):
+        v1 = SimpleNamespace(MESSAGE_VERSION=1)
+        v0 = SimpleNamespace(MESSAGE_VERSION=0)
+        unversioned = SimpleNamespace()
+        self.assertEqual(px4_topic("/uav_1/fmu/out/vehicle_local_position", v1),
+                         "/uav_1/fmu/out/vehicle_local_position_v1")
+        self.assertEqual(px4_topic("/fmu/out/vehicle_land_detected", v0), "/fmu/out/vehicle_land_detected")
+        self.assertEqual(px4_topic("/fmu/in/offboard_control_mode", unversioned), "/fmu/in/offboard_control_mode")
 
 
 class FailedTestsTest(unittest.TestCase):
