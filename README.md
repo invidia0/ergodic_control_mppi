@@ -133,9 +133,11 @@ ssh orin 'cd ergodic_control_mppi_v2/docker/mission && cp -n .env.example .env &
 ssh orin 'docker logs -f ergodic-mission'
 ```
 
-Set `DRONE_ID` and `ROS_DOMAIN_ID` in `docker/mission/.env` to match `mullet_core`. The image
-uses the NVIDIA runtime; on the Orin, JAX's CUDA 13 build runs on the JetPack 6 driver
-through NVIDIA's user-space forward-compatibility libraries.
+Set `DRONE_ID` and `ROS_DOMAIN_ID` in `docker/mission/.env` to match `mullet_core`. On the Orin
+the image builds on MULLET's base (`mullet-ros2-base`, arm64 only), which pins `px4_msgs` and
+carries NVIDIA's user-space forward-compatibility libraries: through them JAX's CUDA 13 build
+runs on the JetPack 6 driver, with the NVIDIA runtime. On amd64 the Dockerfile builds the same
+`px4_msgs` branch itself.
 
 Measured on the Orin Nano at 15 W (`T=150`, `K=250`, 50 Hz): the controller step alone is GPU
 p50 7.1 ms / p99 13.6 ms, CPU p50 45 ms / p99 69 ms. A whole flight tick (observation upload,

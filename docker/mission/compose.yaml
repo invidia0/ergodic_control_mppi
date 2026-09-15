@@ -6,8 +6,6 @@ services:
     build:
       context: ../..
       dockerfile: docker/mission/Dockerfile
-      args:
-        PX4_MSGS_REF: ${PX4_MSGS_REF:-release/1.17}
     image: ergodic-mission:latest
     container_name: ergodic-mission
     # Same host network, domain and RMW as mullet_core's container, so DDS discovery works.
