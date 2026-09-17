@@ -19,3 +19,6 @@ services:
       NVIDIA_DISABLE_REQUIRE: "1"
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       DRONE_ID: ${DRONE_ID:?set DRONE_ID in docker/mission/.env}
+    # The mission library: every accepted spec, kept across container rebuilds.
+    volumes:
+      - ./missions:/workspace/missions

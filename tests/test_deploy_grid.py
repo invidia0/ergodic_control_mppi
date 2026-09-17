@@ -64,6 +64,11 @@ class InflationBudgetTest(unittest.TestCase):
         weak = inflation_radius(brake_accel=3.0, **common)
         self.assertAlmostEqual(weak - strong, 4.0 / 6.0 - 4.0 / 12.0, places=6)
 
+    def test_voxels_have_a_longer_half_diagonal(self):
+        planar = inflation_radius(0.3, 0.15, 0.05, 2.0, 6.0, 0.1, 0.5)
+        volumetric = inflation_radius(0.3, 0.15, 0.05, 2.0, 6.0, 0.1, 0.5, dimension=3)
+        self.assertAlmostEqual(volumetric - planar, 0.25 * (np.sqrt(3.0) - np.sqrt(2.0)), places=6)
+
     def test_zero_braking_is_rejected(self):
         with self.assertRaises(ValueError):
             inflation_radius(0.3, 0.15, 0.2, 2.0, 0.0, 0.1, RESOLUTION)
@@ -235,6 +240,43 @@ class SegmentTest(unittest.TestCase):
     def test_clear_polyline(self):
         path = np.array([[0.5, 0.5], [0.5, 3.5], [3.5, 3.5]])
         self.assertFalse(path_blocked(self.grid, self.origin, 1.0, path))
+
+
+class VoxelTest(unittest.TestCase):
+    """The same queries on a ``(Z, H, W)`` grid, world points ``(x, y, z)``."""
+
+    def setUp(self):
+        # 10 x 10 x 6 m at 1 m voxels, split by a slab at z in [2, 3) with one hole at x=7, y=7.
+        self.grid = np.zeros((6, 10, 10), dtype=bool)
+        self.grid[2] = True
+        self.grid[2, 7, 7] = False
+        self.origin = (0.0, 0.0, 0.0)
+
+    def test_ball_inflation(self):
+        grid = np.zeros((9, 9, 9), dtype=bool)
+        grid[4, 4, 4] = True
+        inflated = inflate(grid, radius=2.0, resolution=1.0)
+        self.assertTrue(inflated[4, 4, 6] and inflated[6, 4, 4])
+        self.assertFalse(inflated[6, 6, 4])  # sqrt(8) > 2
+        self.assertEqual(int(inflated.sum()), 33)  # lattice points in a radius-2 ball
+
+    def test_world_to_cell_reverses_three_axes(self):
+        np.testing.assert_array_equal(world_to_cell(np.array([1.5, 2.5, 3.5]), self.origin, 1.0), [3, 2, 1])
+
+    def test_flood_fill_passes_only_through_the_hole(self):
+        below, above = (1.5, 1.5, 0.5), np.array([[1.5, 1.5, 4.5]])
+        reachable, _, diagnosis = all_reachable(self.grid, self.origin, 1.0, below, above)
+        self.assertTrue(reachable)
+        self.assertTrue(diagnosis["component"][4, 1, 1])
+        self.grid[2, 7, 7] = True
+        reachable, _, diagnosis = all_reachable(self.grid, self.origin, 1.0, below, above)
+        self.assertFalse(reachable)
+        self.assertEqual(diagnosis["disconnected_modes"], [0])
+
+    def test_segments_through_the_slab(self):
+        self.assertTrue(segment_blocked(self.grid, self.origin, 1.0, [1.5, 1.5, 0.5], [1.5, 1.5, 4.5]))
+        self.assertFalse(segment_blocked(self.grid, self.origin, 1.0, [7.5, 7.5, 0.5], [7.5, 7.5, 4.5]))
+        self.assertTrue(path_blocked(self.grid, self.origin, 1.0, np.zeros((0, 3))))
 
 
 if __name__ == "__main__":

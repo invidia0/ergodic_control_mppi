@@ -231,3 +231,6 @@ __marimo__/
 results/
 scratch/
 attic/
+
+# The drone's mission library (docker/mission/compose.yaml volume)
+docker/mission/missions/

@@ -11,6 +11,7 @@ from ergodic_mission.mission_node import (
     WARMUP_MIN_STEPS,
     failed_tests,
     join_path,
+    observation_from,
     position_problem,
     px4_topic,
     warmup_p99,
@@ -59,12 +60,23 @@ class FailedTestsTest(unittest.TestCase):
 
 class PositionProblemTest(unittest.TestCase):
     def test_each_reason_is_named(self):
-        valid = SimpleNamespace(xy_valid=True, v_xy_valid=True)
+        valid = SimpleNamespace(xy_valid=True, v_xy_valid=True, z_valid=True, v_z_valid=True)
         self.assertIsNone(position_problem(valid, received_at=10.0, now=10.05))
         self.assertIn("yet", position_problem(None, received_at=0.0, now=10.0))
-        invalid = SimpleNamespace(xy_valid=True, v_xy_valid=False)
-        self.assertIn("invalid", position_problem(invalid, received_at=10.0, now=10.0))
+        invalid = SimpleNamespace(xy_valid=True, v_xy_valid=False, z_valid=True, v_z_valid=True)
+        self.assertIn("horizontal", position_problem(invalid, received_at=10.0, now=10.0))
+        no_altitude = SimpleNamespace(xy_valid=True, v_xy_valid=True, z_valid=False, v_z_valid=True)
+        self.assertIn("altitude", position_problem(no_altitude, received_at=10.0, now=10.0))
         self.assertIn("0.50 s old", position_problem(valid, received_at=10.0, now=10.5))
+
+
+class ObservationTest(unittest.TestCase):
+    def test_planar_and_volumetric_states(self):
+        position = SimpleNamespace(x=1.0, y=2.0, z=-3.0, vx=0.1, vy=0.2, vz=-0.3, heading=0.5)
+        np.testing.assert_allclose(observation_from(position, 2, 0.7), [1, 2, 0.1, 0.2, 0.5, 0.7], rtol=1e-6)
+        np.testing.assert_allclose(
+            observation_from(position, 3), [1, 2, -3, 0.1, 0.2, -0.3, 0.5, 0.0], rtol=1e-6
+        )
 
 
 class WarmupGateTest(unittest.TestCase):
