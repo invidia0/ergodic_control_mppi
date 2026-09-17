@@ -3,6 +3,9 @@
 JAX implementation of service-gated potential-gradient Model Predictive Path Integral
 control for single-robot ergodic coverage of a Gaussian-mixture target density.
 
+Drone deployment (the MULLET mission framework, formerly the `mullet-deploy` branch, tagged
+`mullet-deploy-final`) lives in [`skymule-ai/ergodic_mppi`](https://github.com/skymule-ai/ergodic_mppi).
+
 ![Perlin occupancy flight](figures/fig_perlin.png)
 
 The same lifted controller flying a Perlin occupancy volume (the SITL map rule:
