@@ -1,8 +1,9 @@
 """
 Ergodic MPPI mission framework node for the MULLET stack.
 
-It serves ``LoadMission``, runs the preflight, and while mullet_core reports ``MISSION`` it
-streams one ``MissionCommand`` per controller step. Every topic and service path comes from
+It serves ``LoadMission`` and ``ListMissions``, keeps every accepted spec in its mission
+library, runs the preflight, and while mullet_core reports ``MISSION`` it streams one
+``MissionCommand`` per controller step. Every topic and service path comes from
 this drone's heartbeat, never from a guessed namespace. Nothing here overrides mullet_core:
 leaving ``MISSION`` pauses the mission, and every refusal ends in mullet_core's own hold.
 """
@@ -15,6 +16,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 import jax
@@ -22,7 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import rclpy
 from mullet_interfaces.msg import DroneHeartbeat, MissionCommand, MissionStatus
-from mullet_interfaces.srv import LoadMission
+from mullet_interfaces.srv import ListMissions, LoadMission
 from px4_msgs.msg import VehicleLocalPosition
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
@@ -34,14 +36,19 @@ from ergodic_control_mppi.config import load_config
 from ergodic_control_mppi.deploy.mission import (
     SCHEMA,
     STALE_POSITION_S,
+    altitude_failure,
+    command_position,
     command_vectors,
     compile_flight,
     compile_mission,
+    dimension,
     dry_run_failure,
     plan_blocked,
+    replans_from_measurement,
     start_failure,
     unpack_flight,
 )
+from ergodic_control_mppi.deploy.store import save_spec, stored_specs
 from ergodic_control_mppi.mppi.single import initialize_single
 from ergodic_control_mppi.simulation import controller_key
 
@@ -51,6 +58,7 @@ FRAMEWORK = "ergodic"
 # already passed when the image was built.
 SELF_TEST = (
     "tests.test_config", "tests.test_controllers", "tests.test_deploy_grid", "tests.test_mission",
+    "tests.test_store",
 )
 WARMUP_STEPS = 200
 # Stop timing early once the loop is hopeless rather than grinding through every step.
@@ -58,7 +66,14 @@ WARMUP_MIN_STEPS = 20
 WARMUP_ABORT_FACTOR = 5.0
 PLAN_CHECK_SECONDS = 1.0
 STATUS_PERIOD_S = 0.5
-MODES = {"velocity": MissionCommand.VELOCITY, "acceleration": MissionCommand.ACCELERATION}
+MODES = {
+    "trajectory": MissionCommand.TRAJECTORY,
+    "trajectory_3d": MissionCommand.TRAJECTORY_3D,
+    "velocity": MissionCommand.VELOCITY,
+    "acceleration": MissionCommand.ACCELERATION,
+    "velocity_3d": MissionCommand.VELOCITY_3D,
+    "acceleration_3d": MissionCommand.ACCELERATION_3D,
+}
 PX4_QOS = QoSProfile(
     depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE
 )
@@ -108,11 +123,17 @@ def warmup_p99(step, params, carry, observation, deadline_ms: float) -> float:
     return float(np.percentile(durations, 99))
 
 
-def observation_from(position: VehicleLocalPosition, yaw_rate: float = 0.0) -> np.ndarray:
-    """Controller state ``[x, y, vx, vy, yaw, yaw_rate]`` from PX4's local position."""
+def observation_from(position: VehicleLocalPosition, d: int, yaw_rate: float = 0.0) -> np.ndarray:
+    """Controller state ``[p(d), v(d), yaw, yaw_rate]`` from PX4's local position."""
     heading = position.heading if math.isfinite(position.heading) else 0.0
     return np.array(
-        [position.x, position.y, position.vx, position.vy, heading, yaw_rate], dtype=np.float32
+        [
+            *(position.x, position.y, position.z)[:d],
+            *(position.vx, position.vy, position.vz)[:d],
+            heading,
+            yaw_rate,
+        ],
+        dtype=np.float32,
     )
 
 
@@ -122,6 +143,8 @@ def position_problem(position, received_at: float, now: float) -> str | None:
         return "no local position from PX4 yet"
     if not (position.xy_valid and position.v_xy_valid):
         return "PX4 reports its horizontal position or velocity invalid"
+    if not (position.z_valid and position.v_z_valid):
+        return "PX4 reports its altitude or vertical velocity invalid"
     if now - received_at > STALE_POSITION_S:
         return f"PX4 local position is {now - received_at:.2f} s old"
     return None
@@ -140,6 +163,7 @@ class ErgodicMission(Node):
         self.base = load_config(self.workspace / base_config).controller
         self.deadline_ms = float(self.declare_parameter("deadline_ms", 16.0).value)
         self.preflight_seconds = float(self.declare_parameter("preflight_seconds", 20.0).value)
+        self.missions_dir = Path(self.declare_parameter("missions_dir", "/workspace/missions").value)
         self.delta_t = float(self.base.model.delta_t)
         self.plan_steps = max(1, round(PLAN_CHECK_SECONDS / self.delta_t))
         self.key = controller_key(0)
@@ -151,7 +175,7 @@ class ErgodicMission(Node):
         self.device_label, self.warmup_ms = "", 0.0
         self.step_ms: deque[float] = deque(maxlen=500)
         self.progress = 0.0
-        self.steps = 0
+        self.steps = self.re_anchors = 0
         self.predicted_state: np.ndarray | None = None
         self.mission = self.params = self.step = self.carry = self.device = None
         self.reference_stamp = None
@@ -159,7 +183,7 @@ class ErgodicMission(Node):
         self.position: VehicleLocalPosition | None = None
         self.position_received = -math.inf
         self.last_position_stamp = None
-        self.load_path = ""
+        self.load_path = self.list_path = ""
         self.command_publisher = self.hold_client = None
 
         self.callbacks = ReentrantCallbackGroup()
@@ -238,6 +262,10 @@ class ErgodicMission(Node):
         )
         self.load_path = join_path(heartbeat.ros_namespace, f"mission/{FRAMEWORK}/load")
         self.create_service(LoadMission, self.load_path, self.on_load, callback_group=self.callbacks)
+        self.list_path = join_path(heartbeat.ros_namespace, f"mission/{FRAMEWORK}/list")
+        self.create_service(
+            ListMissions, self.list_path, self.on_list, callback_group=self.callbacks
+        )
         self.get_logger().info(f"wired to '{self.drone_id}', serving {self.load_path}")
 
     def on_position(self, message: VehicleLocalPosition) -> None:
@@ -267,12 +295,8 @@ class ErgodicMission(Node):
             reason = self.load_refusal(position)
             if reason is None:
                 try:
-                    mission = compile_mission(
-                        json.loads(request.spec_json),
-                        self.base,
-                        (position.ref_lat, position.ref_lon),
-                        (position.x, position.y),
-                    )
+                    spec = json.loads(request.spec_json)
+                    mission = compile_mission(spec, self.base, (position.ref_lat, position.ref_lon))
                 except (ValueError, TypeError) as error:
                     reason = str(error)
             if reason is not None:
@@ -283,18 +307,36 @@ class ErgodicMission(Node):
             self.reference_stamp = position.ref_timestamp
             self.preflight, self.device_label, self.warmup_ms = ["spec: ok"], "", 0.0
             self.step_ms.clear()
-            self.progress, self.steps = 0.0, 0
+            self.progress, self.steps, self.re_anchors = 0.0, 0, 0
             self.set_state("PREPARING", f"preflight of '{mission.mission_id}'")
-            state = observation_from(position)
+            # The drone may be anywhere at load: the model flight starts at the heaviest mode.
+            d = dimension(mission.command_mode)
+            state = np.array([*mission.dry_run_start, *[0.0] * (d + 2)], dtype=np.float32)
+            try:
+                save_spec(self.missions_dir, spec, datetime.now(timezone.utc))
+            except OSError as error:  # the library is a convenience; it never refuses a mission
+                self.get_logger().warn(f"could not store '{mission.mission_id}': {error}")
         threading.Thread(target=self.run_preflight, args=(mission, state), daemon=True).start()
         response.accepted, response.mission_id = True, mission.mission_id
+        return response
+
+    def on_list(self, request: ListMissions.Request, response: ListMissions.Response):
+        """Every stored spec, newest first."""
+        try:
+            stored = stored_specs(self.missions_dir)
+        except OSError as error:
+            self.get_logger().warn(f"could not read the mission library: {error}")
+            stored = []
+        response.names = [name for name, _ in stored]
+        response.specs_json = [spec_json for _, spec_json in stored]
         return response
 
     def run_preflight(self, mission, state: np.ndarray) -> None:
         """Pick a device that holds the deadline, then fly the mission in the model."""
         checks, chosen = [], None
         try:
-            zeros = jnp.zeros((mission.params.mppi.horizon, 3), dtype=jnp.float32)
+            d = dimension(mission.command_mode)
+            zeros = jnp.zeros((mission.params.mppi.horizon, d + 1), dtype=jnp.float32)
             for device in self.devices():
                 params = jax.device_put(mission.params, device)
                 carry = jax.device_put(
@@ -366,11 +408,13 @@ class ErgodicMission(Node):
     def start(self) -> bool:
         """Apply the start gate on every MISSION entry, first start or resume."""
         position = self.position
+        d = dimension(self.mission.command_mode)
         failure = position_problem(position, self.position_received, time.monotonic())
         if failure is None:
             failure = start_failure(
                 self.mission,
-                (position.x, position.y),
+                (position.x, position.y, position.z)[:d],
+                -position.z,
                 time.monotonic() - self.position_received,
                 position.ref_timestamp != self.reference_stamp,
             )
@@ -378,8 +422,8 @@ class ErgodicMission(Node):
             self.abort("FAULT", f"start refused: {failure}")
             return False
         if self.carry is None:  # first start: plan from where the drone is now
-            zeros = jnp.zeros((self.params.mppi.horizon, 3), dtype=jnp.float32)
-            self.predicted_state = observation_from(position)
+            zeros = jnp.zeros((self.params.mppi.horizon, d + 1), dtype=jnp.float32)
+            self.predicted_state = observation_from(position, d)
             self.carry = jax.device_put(
                 initialize_single(self.params, jnp.asarray(self.predicted_state), zeros, self.key),
                 self.device,
@@ -399,25 +443,41 @@ class ErgodicMission(Node):
         if position.ref_timestamp != self.reference_stamp:
             self.abort("FAULT", "PX4 moved its EKF origin mid-mission; load the mission again")
             return
+        ceiling = altitude_failure(mission, -position.z)
+        if ceiling is not None:
+            self.abort("FAULT", f"{ceiling}; drone held")
+            return
+        d = dimension(mission.command_mode)
         # Feed each PX4 measurement once; between measurements, step from the model's own
-        # prediction rather than re-applying a position the vehicle has already left. Every
-        # host-device copy costs milliseconds on the Jetson: one upload, one packed download.
+        # prediction rather than re-applying a position the vehicle has already left. The
+        # trajectory modes keep stepping from that prediction, their reference, until the drone
+        # strays past the tracking allowance. Every host-device copy costs milliseconds on the
+        # Jetson: at most one upload, one packed download.
+        observation = self.carry.state
         if position.timestamp != self.last_position_stamp:
             self.last_position_stamp = position.timestamp
-            observation = observation_from(position, float(self.predicted_state[5]))
-        else:
-            observation = self.carry.state
+            measured = observation_from(position, d, float(self.predicted_state[2 * d + 1]))
+            if replans_from_measurement(mission, self.predicted_state, measured):
+                observation = measured
+                if mission.command_mode.startswith("trajectory"):
+                    self.re_anchors += 1
+                    self.get_logger().warn(
+                        f"drone strayed past the {mission.tracking_allowance:.2f} m tracking allowance: "
+                        f"plan re-anchored ({self.re_anchors} so far)",
+                        throttle_duration_sec=2.0,
+                    )
         self.carry, packed = self.step(self.params, self.carry, observation)
-        plan, self.predicted_state, control = unpack_flight(np.asarray(packed), self.plan_steps)
+        plan, self.predicted_state, control = unpack_flight(np.asarray(packed), self.plan_steps, d)
         if plan_blocked(mission, plan):
-            self.abort("FAULT", "the plan entered a safety margin; drone held")
+            self.abort("FAULT", "the plan comes within the drone's clearance of an obstacle; drone held")
             return
         velocity, acceleration = command_vectors(
-            mission, self.predicted_state, control, (position.vx, position.vy)
+            mission, self.predicted_state, control, (position.vx, position.vy, position.vz)[:d]
         )
         command = MissionCommand()
         command.stamp = self.get_clock().now().to_msg()
         command.mode = MODES[mission.command_mode]
+        command.position_ned_m = command_position(mission, self.predicted_state).tolist()
         command.velocity_ned_mps = velocity.tolist()
         command.acceleration_ned_mps2 = acceleration.tolist()
         command.yaw_ned_rad = math.nan
@@ -443,6 +503,7 @@ class ErgodicMission(Node):
             status.stamp = self.get_clock().now().to_msg()
             status.drone_id, status.framework, status.spec_schema = self.drone_id, FRAMEWORK, SCHEMA
             status.load_service_path = self.load_path
+            status.list_service_path = self.list_path
             status.mission_id = self.mission.mission_id if self.mission is not None else ""
             status.state_label, status.detail = self.state, self.detail
             status.progress = float(self.progress)

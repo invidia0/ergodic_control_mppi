@@ -10,6 +10,8 @@ framework, and nothing else. Research code, experiments, figures and simulators 
 The drone runs one ROS 2 node, `ros2/ergodic_mission/ergodic_mission/mission_node.py`,
 built into `docker/mission/`. It never publishes to PX4: it streams
 `mullet_interfaces/MissionCommand` to `mullet_core`, which forwards it only in `MISSION`.
+The command mode picks the dimension: planar (`velocity`, `acceleration`, altitude held by
+`mullet_core`) or 3D (`velocity_3d`, `acceleration_3d`, voxel grid, z commanded).
 
 ## Package architecture and data flow
 
@@ -23,27 +25,31 @@ built into `docker/mission/`. It never publishes to PX4: it streams
   scalar potential; `mppi/core.py` owns sampling, rollout costs and `mppi_step`;
   `mppi/single.py` owns the closed loop (`single_step`, `measured_step`, `run_single`).
 - `ergodic_control_mppi/deploy/grid.py` owns the inflation budget and the reachability and
-  path-blocking queries every safety check uses.
-- `ergodic_control_mppi/deploy/mission.py` owns the `ergodic/1` spec: WGS84-to-NED
-  projection, rasterization, `compile_mission`, and the flight rules the node applies
-  (`start_failure`, `command_vectors`, `dry_run_failure`). Keep node logic here when it can
-  be tested without ROS.
+  path-blocking queries every safety check uses, on planar grids and voxel grids alike.
+- `ergodic_control_mppi/deploy/mission.py` owns the `ergodic/3` spec: WGS84-to-NED
+  projection, rasterization and voxels, `compile_mission`, and the flight rules the node
+  applies (`start_failure`, `altitude_failure`, `command_vectors`, `dry_run_failure`). Keep
+  node logic here when it can be tested without ROS.
+- `ergodic_control_mppi/deploy/store.py` owns the mission library the node lists through
+  `ListMissions`.
 - `ergodic_control_mppi/simulation.py` owns device selection and the offline run the tests use.
 
-Flow on the drone: `LoadMission` JSON → `compile_mission` → preflight (device gate, model dry
-run) → `READY` → `measured_step` per tick while the heartbeat says `MISSION` →
+Flow on the drone: `LoadMission` JSON → `compile_mission` → stored in the library → preflight
+(device gate, model dry run from the heaviest mode) → `READY` → start gate (drone connected to
+the modes, under the ceiling) → `measured_step` per tick while the heartbeat says `MISSION` →
 `command_vectors` → `MissionCommand`.
 
 ## Shape and frame contracts
 
-- Planar only: state `[px, py, vx, vy, yaw, yaw_rate]`, control `[ax, ay, yaw_accel]`,
-  horizon `(T, 3)`, sampled controls `(K, T, 3)`.
+- Planar modes: state `[px, py, vx, vy, yaw, yaw_rate]`, control `[ax, ay, yaw_accel]`,
+  horizon `(T, 3)`, sampled controls `(K, T, 3)`. 3D modes: state `(8,)`, control `(4,)`.
 - Everything the controller sees is PX4 local NED (x north, y east). Specs are WGS84 and are
   projected once, at load, around the EKF origin with PX4's map projection. Never add a
   second frame.
-- Occupancy grid `(H, W)` indexed `[row = y cell, column = x cell]`; origin is the lower NED
-  corner. Resolution and origin are float32-exact so every check picks the controller's cells.
-- Commands carry NaN z: `mullet_core` holds the altitude.
+- Occupancy grid `(H, W)` indexed `[row = y cell, column = x cell]`, or voxels `(Z, H, W)`
+  with `layer = z cell` (NED z, down); origin is the lowest NED corner. Resolution and origin
+  are float32-exact so every check picks the controller's cells.
+- Planar commands carry NaN z: `mullet_core` holds the altitude. 3D commands carry z.
 
 ## Safety contracts
 
